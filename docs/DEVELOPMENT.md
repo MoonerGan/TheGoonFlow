@@ -43,6 +43,7 @@ npm install-scripts approve esbuild   # npm ≥ 12 blocks postinstall by default
 npm run dev          # vite only (http://localhost:1420)
 npm run tauri dev    # full app, hot reload
 npm run build        # production bundle to dist/
+npm run tauri build  # release exe + installers (see §8)
 ```
 
 ## 2. Repo layout
@@ -147,3 +148,23 @@ manually.
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
   `target/`, `node_modules/`, build logs under `tools/*.log`.
+
+## 8. Portable release build
+
+```powershell
+. tools\dev-env.ps1
+cd apps\desktop
+npm run tauri build
+```
+
+Outputs:
+
+- `target/release/GoonFlow.exe` — the all-in-one executable (frontend +
+  everything statically linked; only requirement is the WebView2 runtime,
+  preinstalled on Win 10/11). Copy it anywhere — the pointer file (`flow.cfg`)
+  and any vault you create live beside it.
+- `target/release/bundle/msi/` and `.../nsis/` — installers for people who
+  want one (we recommend just carrying the exe for the portable story).
+
+Release builds are slow (vendored OpenSSL + full optimization). Unsigned —
+SmartScreen will warn; that's expected until there's a signing identity.
