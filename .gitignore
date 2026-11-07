@@ -1,0 +1,17 @@
+# build artifacts
+node_modules/
+dist/
+target/
+
+# runtime state — never commit vault material
+flow.cfg
+goonflow-vault/
+*.log
+
+# scratch build logs (tools/)
+tools/*.log
+
+# editors / os
+.DS_Store
+.idea/
+.vscode/
