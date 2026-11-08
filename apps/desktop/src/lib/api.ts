@@ -232,6 +232,16 @@ export const siteStats = (kind?: string) =>
   invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
+
+// ---------- full viewer (#21) ----------
+export type MediaView = {
+  kind: "full" | "video" | "thumb";
+  mime: string;
+  data: string | null;
+  tooBig: number | null;
+};
+export const getMediaView = (itemId: string) =>
+  invoke<MediaView | null>("media_view", { itemId });
 export const updateItem = (
   id: string,
   title: string,

@@ -299,6 +299,14 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   *Browser pairing* block (copy port/token). Refactor: `AppState` Deref-exposes
   a cloneable `Core`, so UI and companion never fork state. Companion auth +
   clip ladder covered by two new `#[tokio::test]`s (68 green).
+- **#21 (in-app image browsing) landed** — clicking a media card now opens a
+  full viewer (`Viewer.svelte`) fed by `media_view` → `media::best_for`
+  (full-res from the vault, else stored video, else the thumbnail; nothing is
+  ever re-downloaded). ← / → navigate the current filtered grid, + / − / 0
+  zoom, space toggles a slideshow (4 s, wraps), stored videos play inline with
+  a 96 MB inline cap (bigger ones show the poster + a hint), `i` jumps to the
+  editor, Esc closes. New goon-core test for the full>video>thumb preference
+  (69 green).
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

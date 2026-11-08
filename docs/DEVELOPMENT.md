@@ -53,13 +53,13 @@ crates/
   vault/        crypto core: Argon2id KDF → XChaCha20-Poly1305-wrapped data key
                 → SQLCipher PRAGMA key; nuke = shred keyfile first, then files
   locator/      flow.cfg pointer + volume-label resolution (drive-letter agnostic)
-  goon-core/    domain model, SQLite schema (v4), media pipeline (thumbnail gen,
+  goon-core/    domain model, SQLite schema (v5), media pipeline (thumbnail gen,
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
     views/      LibraryView (tab shell) + GamesView / MediaView (separate views)
-    components/ TileGrid, ItemEditor, ActivityBar, ClipDialog, SourcesPanel,
-                ConfirmDialog, ReportBar
+    components/ TileGrid, ItemEditor, Viewer (#21 full-res viewer + slideshow),
+                ActivityBar, ClipDialog, SourcesPanel, ConfirmDialog, ReportBar
     lib/        api.ts (command bindings), activity.svelte.ts (job polling store)
   src-tauri/
     src/

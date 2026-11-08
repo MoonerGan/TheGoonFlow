@@ -165,6 +165,33 @@ pub fn get_video_bytes(conn: &Connection, item_id: &str) -> Option<Vec<u8>> {
     .ok()
 }
 
+/// The best viewable copy an item holds (#21): full-res original first,
+/// then a vault-stored video, then the thumbnail fallback.
+pub fn best_for(conn: &Connection, item_id: &str) -> Option<MediaBlob> {
+    for kind in ["full", "video", "thumb"] {
+        if let Ok(row) = conn.query_row(
+            "SELECT kind, mime, data FROM media WHERE item_id = ?1 AND kind = ?2 LIMIT 1",
+            params![item_id, kind],
+            |r| {
+                Ok(MediaBlob {
+                    kind: r.get(0)?,
+                    mime: r.get(1)?,
+                    data: r.get(2)?,
+                })
+            },
+        ) {
+            return Some(row);
+        }
+    }
+    None
+}
+
+pub struct MediaBlob {
+    pub kind: String,
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
 pub fn delete_video(conn: &Connection, item_id: &str) {
     let _ = conn.execute(
         "DELETE FROM media WHERE item_id = ?1 AND kind = 'video'",
@@ -283,5 +310,32 @@ mod tests {
             .query_row("SELECT count(*) FROM media WHERE item_id='m2' AND kind='thumb'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
+    }
+
+    /// #21: the viewer picks the best copy that exists.
+    #[test]
+    fn best_for_prefers_full_then_video_then_thumb() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        for id in ["m3", "m4", "m5"] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post','t','0','0')",
+                [id],
+            )
+            .unwrap();
+        }
+        // m3: thumb + full → full wins
+        let png = sample_png();
+        assert!(put_thumbnail(&conn, "m3", &png));
+        assert!(put_full_image(&conn, "m3", &png));
+        assert_eq!(best_for(&conn, "m3").unwrap().kind, "full");
+        // m4: thumb + video → video wins
+        assert!(put_thumbnail(&conn, "m4", &png));
+        assert!(put_video(&conn, "m4", "video/mp4", b"ftypmp42"));
+        assert_eq!(best_for(&conn, "m4").unwrap().kind, "video");
+        // m5: thumb only → thumb
+        assert!(put_thumbnail(&conn, "m5", &png));
+        assert_eq!(best_for(&conn, "m5").unwrap().kind, "thumb");
+        assert!(best_for(&conn, "m1").is_none());
     }
 }

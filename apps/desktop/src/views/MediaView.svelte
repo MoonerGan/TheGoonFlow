@@ -29,6 +29,7 @@
   import ItemEditor from "../components/ItemEditor.svelte";
   import ReportBar from "../components/ReportBar.svelte";
   import TileGrid from "../components/TileGrid.svelte";
+  import Viewer from "../components/Viewer.svelte";
 
   let {
     status,
@@ -53,6 +54,8 @@
   let loadError = $state<string | null>(null);
   let enrichOnline = $state(true);
   let selected = $state<ItemSummary | null>(null);
+  // #21: media cards open the full viewer; the editor is one button away.
+  let viewerIndex = $state<number | null>(null);
 
   // batch selection (#12)
   let selectMode = $state(false);
@@ -391,7 +394,7 @@
         showStatus={false}
         {selectMode}
         selected={selectedIds}
-        onOpen={(item) => (selected = item)}
+        onOpen={(item) => (viewerIndex = items.indexOf(item))}
         onToggle={toggleSelect}
       />
     {/if}
@@ -403,6 +406,18 @@
     item={selected}
     onClose={() => (selected = null)}
     onChanged={() => void load()}
+  />
+{/if}
+
+{#if viewerIndex !== null && items[viewerIndex]}
+  <Viewer
+    items={items}
+    index={viewerIndex}
+    onClose={() => (viewerIndex = null)}
+    onEdit={(it) => {
+      viewerIndex = null;
+      selected = it;
+    }}
   />
 {/if}
 

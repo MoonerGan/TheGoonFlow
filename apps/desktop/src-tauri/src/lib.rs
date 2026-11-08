@@ -320,6 +320,51 @@ fn get_thumbs(state: tauri::State<'_, AppState>, ids: Vec<String>) -> Result<Vec
         .collect())
 }
 
+// ---------- full viewer (#21) ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaView {
+    /// "full" | "video" | "thumb" — what the inline copy actually is
+    kind: String,
+    mime: String,
+    /// base64 inline bytes; None when a stored video is too big to ship whole
+    data: Option<String>,
+    /// true when the viewer should offer to open the original link instead
+    too_big: Option<u64>,
+}
+
+/// Biggest blob we inline into the webview for preview. Beyond this (rare,
+/// opt-in stored videos) we show the poster and let the OS player handle it.
+const INLINE_MAX: u64 = 96 * 1024 * 1024;
+
+#[tauri::command]
+fn media_view(state: tauri::State<'_, AppState>, item_id: String) -> Result<Option<MediaView>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let Some(b) = goon_core::media::best_for(&opened.conn, &item_id) else {
+        return Ok(None);
+    };
+    let size = b.data.len() as u64;
+    if b.kind == "video" && size > INLINE_MAX {
+        // fall back to the poster image so the viewer still shows something
+        if let Some((tmime, tbytes)) = goon_core::media::get_thumb(&opened.conn, &item_id) {
+            return Ok(Some(MediaView {
+                kind: "thumb".into(),
+                mime: tmime,
+                data: Some(B64.encode(tbytes)),
+                too_big: Some(size),
+            }));
+        }
+    }
+    Ok(Some(MediaView {
+        kind: b.kind,
+        mime: b.mime,
+        data: Some(B64.encode(b.data)),
+        too_big: None,
+    }))
+}
+
 #[tauri::command]
 fn update_item(
     state: tauri::State<'_, AppState>,
@@ -1046,6 +1091,7 @@ pub fn run() {
             site_stats,
             list_items,
             get_thumbs,
+            media_view,
             update_item,
             delete_item,
             set_complete,

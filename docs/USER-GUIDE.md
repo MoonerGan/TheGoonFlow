@@ -196,8 +196,15 @@ app reaches the content sites (and through your proxy if you set one).
 
 ## 4. The library
 
-- Grid of cards (thumbnail + title + kind/version/status). Click for the
-  editor. Cards arrive live during imports.
+- Grid of cards (thumbnail + title + kind/version/status). **Games**: click opens
+  the editor. **Media**: click opens the **full viewer**. Cards arrive live
+  during imports.
+- **Media viewer**: the real image from the encrypted vault (full-res when it
+  was stored), not a re-download. Navigate with **← / →** through the current
+  grid (including filters), **zoom** with `+`/`-`/`0` or the buttons, hit
+  **space** for a **slideshow** (4s per item, wraps), `i` opens the item's
+  editor, **Esc** closes. Stored videos play inline (very large ones show the
+  poster instead); link-only videos show their first-frame poster with a hint.
 - **Search box** (both views): matches title/circle as you type — the quick
   way to confirm something actually landed.
 - **Select… mode** (both views): click cards to tick them, *Select all* /
