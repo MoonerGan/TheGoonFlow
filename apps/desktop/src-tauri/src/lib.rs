@@ -20,7 +20,7 @@ use rand::RngCore;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub(crate) fn now_epoch() -> String {
@@ -75,6 +75,10 @@ pub struct AppState {
     /// #23: true while the panic key is physically held down; a watcher
     /// thread escalates to crypto-erase after PANIC_HOLD_MS.
     panic_hold: Arc<AtomicBool>,
+    /// #23: bumped on every hold episode start; a watcher only escalates if
+    /// its own episode is still the current one at the deadline (a stale
+    /// watcher from an already-released tap must never fire).
+    panic_gen: Arc<AtomicU64>,
     /// #23: set when a hold-erase fired, so the matching release does nothing
     nuked: Arc<AtomicBool>,
 }
@@ -346,6 +350,9 @@ fn panic_mods_down() -> bool {
 /// - the first Release closes the episode = tap: Lock + hide (tap again
 ///   reveals the locked window); duplicate Releases fall through inert
 /// - if the watcher escalated, the erase already ran; releases do nothing
+/// A watcher only escalates if it is still the *current* episode when its
+/// deadline lands (`panic_gen` matches): a stale watcher from an earlier
+/// quick tap must never fire while a fresh hold is still under 3 s old.
 fn panic_event(app: &tauri::AppHandle, pressed: bool) {
     use tauri::Manager;
     let state = app.state::<AppState>();
@@ -356,13 +363,19 @@ fn panic_event(app: &tauri::AppHandle, pressed: bool) {
             return;
         }
         state.panic_hold.store(true, Ordering::SeqCst);
+        let my_gen = state.panic_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let app2 = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(PANIC_HOLD_MS));
             let st = app2.state::<AppState>();
-            // Escalate only while the episode is live AND the keys are
-            // verifiably still held: a dropped release can never nuke alone.
-            if st.panic_hold.load(Ordering::SeqCst) && panic_mods_down() {
+            // Escalate only if this watcher is still the live episode AND
+            // the keys are verifiably still held. A newer tap bumps
+            // panic_gen, so a stale watcher (or a released-then-repressed
+            // hold that is not yet 3 s old) can never nuke by itself.
+            if st.panic_gen.load(Ordering::SeqCst) == my_gen
+                && st.panic_hold.load(Ordering::SeqCst)
+                && panic_mods_down()
+            {
                 eprintln!("panic hold: crypto-erasing vault");
                 st.nuked.store(true, Ordering::SeqCst);
                 st.panic_hold.store(false, Ordering::SeqCst);
@@ -1596,6 +1609,7 @@ pub fn run() {
         locked,
         hidden: Arc::new(AtomicBool::new(false)),
         panic_hold: Arc::new(AtomicBool::new(false)),
+        panic_gen: Arc::new(AtomicU64::new(0)),
         nuked: Arc::new(AtomicBool::new(false)),
     };
 
@@ -1755,6 +1769,7 @@ mod integration_tests {
             locked: Arc::new(AtomicBool::new(false)),
             hidden: Arc::new(AtomicBool::new(false)),
             panic_hold: Arc::new(AtomicBool::new(false)),
+            panic_gen: Arc::new(AtomicU64::new(0)),
             nuked: Arc::new(AtomicBool::new(false)),
         };
 
