@@ -218,24 +218,37 @@ pub fn classify(url: &str) -> Option<SiteRef> {
 
     // Known API-backed sites first.
     if host_no_port.ends_with("gelbooru.com") {
-        return Some(SiteRef {
-            site: "gelbooru".into(),
-            kind: ItemKind::Post,
-            // file-cache links (`img3.gelbooru.com//images/….jpg?4765984`)
-            // carry the post id as the whole query string
-            remote_id: query_param(url, "id")
-                .or_else(|| query_param(url, "pid"))
-                .or_else(|| numeric_query_id(url)),
-            mode: Mode::BooruId,
-        });
+        let id = query_param(url, "id")
+            .or_else(|| query_param(url, "pid"))
+            .or_else(|| numeric_query_id(url));
+        // direct CDN file links (img3.gelbooru.com/images/….jpg) with no
+        // recoverable post id must fall through to the direct-file branch
+        // below, which at least stores the image (#39).
+        if id.is_some() || media_ext(&path).is_none() {
+            return Some(SiteRef {
+                site: "gelbooru".into(),
+                kind: ItemKind::Post,
+                remote_id: id,
+                mode: Mode::BooruId,
+            });
+        }
     }
     if host_no_port.ends_with("rule34.xxx") {
-        return Some(SiteRef {
-            site: "rule34".into(),
-            kind: ItemKind::Post,
-            remote_id: query_param(url, "id").or_else(|| numeric_query_id(url)),
-            mode: Mode::BooruId,
-        });
+        let id = query_param(url, "id")
+            .or_else(|| numeric_query_id(url))
+            .or_else(|| {
+                // /index.php?...&id=N and /post/show/N both count
+                let i = segments.iter().position(|s| *s == "show")?;
+                segments.get(i + 1).filter(|s| s.chars().all(|c| c.is_ascii_digit())).map(|s| s.to_string())
+            });
+        if id.is_some() || media_ext(&path).is_none() {
+            return Some(SiteRef {
+                site: "rule34".into(),
+                kind: ItemKind::Post,
+                remote_id: id,
+                mode: Mode::BooruId,
+            });
+        }
     }
     if host_no_port.ends_with("e621.net") || host_no_port.ends_with("e926.net") {
         let id = segments
@@ -428,7 +441,7 @@ pub async fn fetch_meta(
         Mode::DlSite => dl_product(client, url).await,
         Mode::Offsite => offsite_product(client, url).await,
         Mode::F95 => f95_thread(client, url, ctx.cookie).await,
-        Mode::DirectMedia => direct_media(client, url).await,
+        Mode::DirectMedia => direct_media(client, url, Some(&s.site)).await,
         Mode::LocalFile => local_file(url),
     }
 }
@@ -708,7 +721,7 @@ async fn f95_thread(client: &reqwest::Client, url: &str, cookie: Option<&str>) -
 
 // ---- direct media & local files ----
 
-async fn direct_media(client: &reqwest::Client, url: &str) -> Result<Meta, String> {
+async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -> Result<Meta, String> {
     let kind = media_ext(&host_of(url).1).ok_or("not a recognizable media file")?;
     if kind == "video" {
         return Ok(Meta {
@@ -736,11 +749,96 @@ async fn direct_media(client: &reqwest::Client, url: &str) -> Result<Meta, Strin
                 .map_err(|_| first)?
         }
     };
+
+    // #39: booru CDN filenames embed the post's md5 (`<md5><crc32>.png`). If
+    // the site's API has exactly one post with that md5 AND the same byte
+    // size, upgrade the bare file link to full post tags. Verification is
+    // strict — a wrong post is worse than no post; otherwise we keep just the
+    // stored image and the user fixes sources/tags by hand later.
+    if matches!(site, Some("rule34") | Some("gelbooru") | Some("e621")) {
+        let stem = clean_path.rsplit('/').next().unwrap_or("");
+        let stem = stem.split('.').next().unwrap_or("").to_lowercase();
+        let hex = stem.chars().all(|c| c.is_ascii_hexdigit());
+        let md5 = if hex && stem.len() == 40 {
+            stem[..32].to_string()
+        } else if hex && stem.len() == 32 {
+            stem.clone()
+        } else {
+            String::new()
+        };
+        if !md5.is_empty() {
+            if let Some(post) = find_post_by_md5(client, site.unwrap_or(""), &md5).await {
+                let claimed_md5 = post
+                    .get("md5")
+                    .and_then(|m| m.as_str())
+                    .or_else(|| post.get("file").and_then(|f| f.get("md5")).and_then(|m| m.as_str()));
+                let claimed_size = post
+                    .get("filesize")
+                    .and_then(|f| f.as_i64())
+                    .or_else(|| post.get("file").and_then(|f| f.get("size")).and_then(|s| s.as_i64()));
+                let md5_ok = claimed_md5.is_some_and(|m| m.eq_ignore_ascii_case(&md5));
+                let size_ok = claimed_size.is_none_or(|s| s as usize == bytes.len());
+                if md5_ok && size_ok {
+                    let pid = post
+                        .get("id")
+                        .and_then(|i| i.as_i64())
+                        .map(|i| i.to_string())
+                        .unwrap_or_default();
+                    let tags: Vec<String> = post
+                        .get("tags")
+                        .and_then(|t| t.as_str())
+                        .map(|s| s.split_whitespace().map(String::from).collect())
+                        .or_else(|| {
+                            post.get("tags")
+                                .and_then(|t| t.get("general"))
+                                .and_then(|g| g.as_array())
+                                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                        })
+                        .unwrap_or_default();
+                    return Ok(Meta {
+                        store_bytes: Some(bytes.clone()),
+                        thumb_bytes: Some(bytes),
+                        tags,
+                        note: Some(format!(
+                            "reverse-matched to post {pid} by file hash — link the post page as a source if you want it official"
+                        )),
+                        ..Default::default()
+                    });
+                }
+            }
+        }
+    }
+
     Ok(Meta {
         store_bytes: Some(bytes.clone()),
         thumb_bytes: Some(bytes),
+        note: Some("direct file link — stored as-is; no post could be identified, edit tags/source later".into()),
         ..Default::default()
     })
+}
+
+/// One-post lookup by file md5 on the sites that support it. Anything but a
+/// clean single hit is treated as "no match".
+async fn find_post_by_md5(client: &reqwest::Client, site: &str, md5: &str) -> Option<Value> {
+    let (api, referer) = match site {
+        "rule34" => (
+            format!("https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&md5={md5}"),
+            "https://rule34.xxx",
+        ),
+        "gelbooru" => (
+            format!("https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&md5={md5}"),
+            "https://gelbooru.com",
+        ),
+        "e621" => (
+            format!("https://e621.net/posts.json?tags=md5%3A{md5}&limit=1"),
+            "https://e621.net",
+        ),
+        _ => return None,
+    };
+    let text = get_text(client, &api, referer, None).await.ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let posts = v.get("posts").or_else(|| v.get("post"))?;
+    posts.as_array()?.first().cloned()
 }
 
 fn percent_decode(s: &str) -> String {
@@ -1607,6 +1705,25 @@ mod tests {
         let s = classify("https://static1x1.e621.net/data/f1/2e/f12e32ab.jpg?a1b2c3").unwrap();
         assert_eq!(s.site, "e621");
         assert_eq!(s.mode, Mode::DirectMedia);
+    }
+
+    /// Field report #39: booru file links with *no* post id used to dead-end
+    /// with "no numeric post id in that url" and store nothing at all. They
+    /// must fall through to the direct-file path so the image lands in the
+    /// vault even when no post can be identified.
+    #[test]
+    fn idless_booru_file_links_still_store_the_image() {
+        let s = classify("https://img3.gelbooru.com/images/2b/34/2b34cd76ef.jpg").unwrap();
+        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("gelbooru", Mode::DirectMedia, None));
+
+        let s = classify("https://wimg.rule34.xxx/images/3868/7412ed67862b691cceef71b918028f66.jpeg").unwrap();
+        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::DirectMedia, None));
+
+        // a post page URL that carries its id in the path still resolves as a post
+        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=11353035").unwrap();
+        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::BooruId, Some("11353035")));
+        let s = classify("https://rule34.xxx/post/show/11353035").unwrap();
+        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::BooruId, Some("11353035")));
     }
 
     #[test]
