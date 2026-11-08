@@ -31,6 +31,9 @@ pub struct ModLaunch {
     pub args: Vec<String>,
     pub cwd: Option<String>,
     pub note: Option<String>,
+    /// text to place on the clipboard when the tool is started (NW.js MTool
+    /// has no CLI target — the game path has to reach it by drag-and-drop)
+    pub clipboard: Option<String>,
     /// filled only after a successful spawn
     pub pid: Option<u32>,
 }
@@ -74,6 +77,47 @@ fn expand_game(args: Vec<String>, game_exe: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// True when a folder is an NW.js MToolClient install (MTool 0.6x).
+///
+/// Field report #33: that build has no command-line target at all — its
+/// `package.json` is a NW.js app manifest and there is no `process.argv` /
+/// `App.argv` handling anywhere, so the game list is filled by drag-and-drop
+/// (`gameLib/*.gljson`). Passing the game exe as an argument can never work,
+/// and pretending it does would be a lie the user finds out about by the game
+/// not starting.
+pub fn is_nwjs_build(tool_dir: &Path) -> bool {
+    tool_dir.join("nw.dll").exists()
+}
+
+/// Game-side launcher that already knows how to start itself under MTool.
+/// Repacks ship these next to the game (`StartWithTool.bat`,
+/// `MTool_Game.exe`, `launchGameWithMTool.*`) — they are the honest way in,
+/// so the recipe uses them before it touches the tool itself.
+/// `game_dir` is the game folder; scan is one level deep.
+fn game_side_launcher(game_dir: &Path) -> Option<PathBuf> {
+    let rd = fs::read_dir(game_dir).ok()?;
+    for entry in rd.flatten() {
+        let p = entry.path();
+        if !p.is_file() {
+            continue;
+        }
+        let name = p.file_name()?.to_string_lossy().to_lowercase();
+        let stem = name.split('.').next().unwrap_or("");
+        let ext = name.rsplit('.').next().unwrap_or("");
+        if !matches!(ext, "bat" | "cmd" | "exe" | "lnk") {
+            continue;
+        }
+        // `_LAA_BAK` backups and config helpers are not launchers
+        if name.contains('_') && name.contains("bak") {
+            continue;
+        }
+        if stem.contains("withtool") || stem.contains("withmtool") || stem.starts_with("mtool_game") {
+            return Some(p);
+        }
+    }
+    None
+}
+
 /// What launching this recipe would run — never spawns.
 /// `game` is the game's own resolved launch plan (may be !ok).
 pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
@@ -84,6 +128,7 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
         args,
         cwd: path.parent().map(|p| p.display().to_string()),
         note,
+        clipboard: None,
         pid: None,
     };
 
@@ -115,6 +160,56 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
     let stored = split_args(&m.args);
     match m.kind.as_str() {
         "mtool" => {
+            // #33, layered — never pretend the tool takes a target it cannot
+            // read, and never invent behaviour for it:
+            //   1. the game's own MTool launcher (repacks ship one) — starts
+            //      the game under MTool exactly the way the user does by hand;
+            //   2. NW.js MToolClient: no CLI target, so start the tool and put
+            //      the game path on the clipboard for the drop box;
+            //   3. anything else: pass the game exe as an argument (the old
+            //      native MTool flow).
+            let game_dir = game
+                .cwd
+                .clone()
+                .map(PathBuf::from)
+                .or_else(|| game_exe.as_ref().map(|e| PathBuf::from(e).parent().unwrap_or(Path::new(".")).to_path_buf()));
+            if let Some(dir) = &game_dir {
+                if let Some(launcher) = game_side_launcher(dir) {
+                    return ModLaunch {
+                        ok: true,
+                        exe: Some(launcher.display().to_string()),
+                        args: Vec::new(),
+                        cwd: Some(dir.display().to_string()),
+                        note: Some(
+                            "using the game's own MTool launcher — that is what actually starts it \
+                             under the tool (the recipe never edits the tool's own game list)"
+                                .into(),
+                        ),
+                        clipboard: None,
+                        pid: None,
+                    };
+                }
+            }
+            let tool_dir = path.parent().unwrap_or(Path::new("."));
+            if is_nwjs_build(tool_dir) {
+                let note = match &game_exe {
+                    Some(_) => "this MTool build (NW.js) takes no game on the command line — \
+                                the tool is opening and the game's path is on your clipboard: \
+                                drag it into MTool's window",
+                    None => "this MTool build (NW.js) takes no game on the command line, and the \
+                            game has no resolvable launcher exe to hand over — open the game \
+                            folder and drag its exe into MTool",
+                };
+                return ModLaunch {
+                    ok: true,
+                    exe: Some(m.path.clone()),
+                    args: Vec::new(),
+                    cwd: Some(tool_dir.display().to_string()),
+                    note: Some(note.into()),
+                    clipboard: game_exe,
+                    pid: None,
+                };
+            }
             let note = match &game_exe {
                 Some(_) => None,
                 None => Some(
@@ -122,8 +217,7 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
                         .into(),
                 ),
             };
-            let args = game_exe.into_iter().collect();
-            base(Some(m.path.clone()), args, note)
+            base(Some(m.path.clone()), game_exe.into_iter().collect(), note)
         }
         "cheat" => base(
             Some(m.path.clone()),
@@ -136,6 +230,31 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
             None,
         ),
     }
+}
+
+/// Puts `text` on the Windows clipboard. clip.exe reads the console codepage,
+/// so the bytes go in as UTF-16LE with a BOM — game paths here routinely carry
+/// Japanese characters that would otherwise arrive as mojibake.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = match std::process::Command::new("clip.exe")
+        .stdin(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut sink) = child.stdin.take() {
+        let mut buf: Vec<u8> = vec![0xFF, 0xFE];
+        for u in text.encode_utf16() {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
+        if sink.write_all(&buf).is_err() {
+            return false;
+        }
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Actually start it. Returns the plan with `pid` filled.
@@ -154,6 +273,20 @@ pub fn launch(l: &ModLaunch) -> Result<ModLaunch, String> {
         .map_err(|e| format!("could not start {exe}: {e}"))?;
     let mut out = l.clone();
     out.pid = Some(child.id());
+    if let Some(text) = &l.clipboard {
+        // Only after the tool is up: the clipboard is the hand-off, and losing
+        // it silently is why users think the app "did nothing".
+        out.note = Some(match copy_to_clipboard(text) {
+            true => format!(
+                "{} — copied to the clipboard: {text}",
+                l.note.clone().unwrap_or_default()
+            ),
+            false => format!(
+                "{} — the clipboard refused, copy it yourself: {text}",
+                l.note.clone().unwrap_or_default()
+            ),
+        });
+    }
     // Like games: the tool runs independently of the app.
     Ok(out)
 }
@@ -412,6 +545,62 @@ mod tests {
         assert!(r.ok);
         assert!(r.args.is_empty());
         assert!(r.note.unwrap().contains("no resolvable launcher"));
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// Field report #33: the shipped MTool 0.6x is an NW.js app that accepts no
+    /// game on the command line. The recipe must stop lying about it: prefer the
+    /// game's own MTool launcher, otherwise open the tool and hand the path over
+    /// through the clipboard.
+    #[test]
+    fn nwjs_mtool_recipe_never_fakes_a_target() {
+        let b = std::env::temp_dir().join("goon-mods-nwjs");
+        let _ = std::fs::remove_dir_all(&b);
+        let tool_dir = b.join("Tool");
+        let game_dir = b.join("Princess of Light");
+        std::fs::create_dir_all(&tool_dir).unwrap();
+        std::fs::create_dir_all(&game_dir).unwrap();
+        let tool = tool_dir.join("MTool.exe");
+        std::fs::write(&tool, b"MZ").unwrap();
+        std::fs::write(tool_dir.join("nw.dll"), b"").unwrap(); // the NW.js tell
+        assert!(is_nwjs_build(&tool_dir));
+
+        // 1. game ships its own launcher → use it, no args, game folder as cwd
+        std::fs::write(game_dir.join("StartWithTool.bat"), b"@echo off").unwrap();
+        let game_exe = game_dir.join("GamePro.exe");
+        std::fs::write(&game_exe, b"MZ").unwrap();
+        let r = recipe(
+            &row("mtool", &tool, ""),
+            &plan(true, Some(game_exe.to_str().unwrap())),
+        );
+        assert!(r.ok);
+        assert!(r.exe.as_deref().unwrap().ends_with("StartWithTool.bat"));
+        assert!(r.args.is_empty());
+        assert!(r.note.unwrap().contains("game's own MTool launcher"));
+
+        // 2. no game-side launcher → tool opens, path goes to the clipboard
+        std::fs::remove_file(game_dir.join("StartWithTool.bat")).unwrap();
+        let r = recipe(
+            &row("mtool", &tool, ""),
+            &plan(true, Some(game_exe.to_str().unwrap())),
+        );
+        assert!(r.ok);
+        assert_eq!(r.exe.as_deref(), Some(tool.to_str().unwrap()));
+        assert!(r.args.is_empty(), "the NW.js build gets no arguments");
+        assert_eq!(r.clipboard.as_deref(), game_exe.to_str());
+        assert!(r.note.unwrap().contains("clipboard"));
+
+        // `_LAA_BAK` backups are not launchers
+        std::fs::write(game_dir.join("MTool_Game.exe_LAA_BAK"), b"MZ").unwrap();
+        assert!(game_side_launcher(&game_dir).is_none());
+
+        // 3. a non-NW.js tool keeps the old argument-passing flow
+        let plain = b.join("plain").join("MTool.exe");
+        std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
+        std::fs::write(&plain, b"MZ").unwrap();
+        let r = recipe(&row("mtool", &plain, ""), &plan(true, Some(r"D:\g\Karryn.exe")));
+        assert_eq!(r.args, vec![r"D:\g\Karryn.exe"]);
+        assert_eq!(r.clipboard, None);
         std::fs::remove_dir_all(&b).unwrap();
     }
 
