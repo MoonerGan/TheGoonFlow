@@ -263,10 +263,18 @@
 <p class="hint">
   Right now: <strong>{panic?.hotkey ?? "CommandOrControl+Alt+L"}</strong> (works even when this window
   isn't focused). A short press locks the vault and hides the window — press again to bring the
-  <em>locked</em> window back, your passphrase still guards it.
+  <em>locked</em> window back, your passphrase still guards it. If you have hidden it and forgotten,
+  just run the app again: it reveals the window instead of starting a second copy.
   <strong>Hold it down for 3+ seconds and the vault is crypto-erased</strong> — the same destruction as
   typing NUKE, with no confirmation dialog. Rehearse taps; never hold on the real vault.
 </p>
+{#if panic && !panic.armed}
+  <p class="error">
+    This key is <strong>not armed</strong>: {panic.fault ?? "registration failed"}. Pressing it does
+    nothing. Close the other GoonFlow instance (or the other program holding that combination), or
+    set a different key below.
+  </p>
+{/if}
 <div class="row">
   <input
     type="text"

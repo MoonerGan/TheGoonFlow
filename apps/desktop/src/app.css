@@ -171,6 +171,12 @@ button:disabled {
   background: var(--bg);
 }
 
+/* #41: an unarmed panic key has to be visible without hunting for it */
+.pill.danger {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
 .spacer {
   flex: 1;
 }

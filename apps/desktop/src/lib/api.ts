@@ -398,8 +398,17 @@ export type PanicInfo = {
   hotkey: string;
   stored: string | null;
   lastDrill: string | null;
+  // #41: the key is only real if registration succeeded. The UI must say so.
+  armed: boolean;
+  fault: string | null;
 };
 export const getPanicInfo = () => invoke<PanicInfo>("panic_info");
+export type PanicStatus = {
+  hotkey: string;
+  armed: boolean;
+  fault: string | null;
+};
+export const getPanicStatus = () => invoke<PanicStatus>("panic_status");
 export const setPanicHotkey = (hotkey: string | null) =>
   invoke<PanicInfo>("set_panic_hotkey", { hotkey });
 export const nukeDrill = () => invoke<string>("nuke_drill");

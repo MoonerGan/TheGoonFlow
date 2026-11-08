@@ -81,6 +81,11 @@ pub struct AppState {
     panic_gen: Arc<AtomicU64>,
     /// #23: set when a hold-erase fired, so the matching release does nothing
     nuked: Arc<AtomicBool>,
+    /// #41: why the panic key could NOT be registered (another program or an
+    /// earlier instance owns the combination). None = armed. The UI shows this:
+    /// a panic path that silently does not exist is the one failure mode this
+    /// feature must never have.
+    panic_fault: Arc<Mutex<Option<String>>>,
 }
 
 impl std::ops::Deref for AppState {
@@ -526,15 +531,53 @@ fn panic_event(
 }
 
 fn register_panic_keys(app: &tauri::AppHandle, extra: Option<&str>) {
+    use tauri::Manager;
     use tauri_plugin_global_shortcut::GlobalShortcutExt;
     let _ = app.global_shortcut().unregister_all();
+    let mut fault: Option<String> = None;
     if let Err(e) = app.global_shortcut().register(DEFAULT_PANIC_HOTKEY) {
         eprintln!("panic hotkey {DEFAULT_PANIC_HOTKEY} unavailable: {e}");
+        fault = Some(format!("{DEFAULT_PANIC_HOTKEY}: {e}"));
     }
     if let Some(hk) = extra.filter(|h| *h != DEFAULT_PANIC_HOTKEY) {
         if let Err(e) = app.global_shortcut().register(hk) {
             eprintln!("stored panic hotkey {hk} unavailable: {e}");
+            fault = Some(format!("{hk}: {e}"));
         }
+    }
+    // #41: an unarmed panic key must be visible in the UI, not just in stderr.
+    // Measured in the field: with a hidden instance already holding the
+    // combination, the copy the user was actually looking at registered nothing
+    // and said nothing about it.
+    if let Some(st) = app.try_state::<AppState>() {
+        *st.panic_fault.lock().unwrap() = fault;
+    }
+}
+
+/// #41: is the panic key live right now, and if not, why. Works whether or not
+/// a vault is open — this is about the process, not the vault.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PanicStatus {
+    hotkey: String,
+    armed: bool,
+    fault: Option<String>,
+}
+
+#[tauri::command]
+fn panic_status(state: tauri::State<'_, AppState>) -> PanicStatus {
+    let stored = {
+        let inner = state.inner.lock().unwrap();
+        inner
+            .opened
+            .as_ref()
+            .and_then(|o| goon_core::db::get_meta(&o.conn, "panic_hotkey"))
+    };
+    let fault = state.panic_fault.lock().unwrap().clone();
+    PanicStatus {
+        hotkey: stored.unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
+        armed: fault.is_none(),
+        fault,
     }
 }
 
@@ -547,6 +590,10 @@ struct PanicInfo {
     stored: Option<String>,
     /// when the last successful crypto-erase drill ran
     last_drill: Option<String>,
+    /// #41: is the key actually registered in this process?
+    armed: bool,
+    /// #41: why it is not, when it isn't
+    fault: Option<String>,
 }
 
 #[tauri::command]
@@ -554,10 +601,13 @@ fn panic_info(state: tauri::State<'_, AppState>) -> Result<PanicInfo, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     let stored = goon_core::db::get_meta(&opened.conn, "panic_hotkey");
+    let fault = state.panic_fault.lock().unwrap().clone();
     Ok(PanicInfo {
         hotkey: stored.clone().unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
         stored,
         last_drill: goon_core::db::get_meta(&opened.conn, "nuke_last_drill"),
+        armed: fault.is_none(),
+        fault,
     })
 }
 
@@ -585,10 +635,15 @@ fn set_panic_hotkey(
     register_panic_keys(&app, hk.as_deref());
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    // #41: report honestly whether the re-register worked (one guard: locking
+    // the same mutex twice in one expression would self-deadlock).
+    let fault = state.panic_fault.lock().unwrap().clone();
     Ok(PanicInfo {
         hotkey: hk.clone().unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
         stored: hk,
         last_drill: goon_core::db::get_meta(&opened.conn, "nuke_last_drill"),
+        armed: fault.is_none(),
+        fault,
     })
 }
 
@@ -1761,6 +1816,8 @@ fn cancel_job(state: tauri::State<'_, AppState>, id: u64) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::Manager;
+
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|d| d.to_path_buf()))
@@ -1800,9 +1857,25 @@ pub fn run() {
         panic_hold: Arc::new(AtomicBool::new(false)),
         panic_gen: Arc::new(AtomicU64::new(0)),
         nuked: Arc::new(AtomicBool::new(false)),
+        panic_fault: Arc::new(Mutex::new(None)),
     };
 
     let app = tauri::Builder::default()
+        // #41: first plugin, per the plugin's own requirement. A second launch
+        // reveals the instance that is already running (it may be sitting
+        // hidden after a panic tap — that is exactly when you launch again) and
+        // clears the hidden flag, instead of starting a second app that could
+        // never register the panic key because the first one owns it.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+            if let Some(st) = app.try_state::<AppState>() {
+                st.hidden.store(false, Ordering::SeqCst);
+            }
+        }))
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1881,6 +1954,7 @@ pub fn run() {
             get_proxy,
             set_proxy,
             panic_info,
+            panic_status,
             set_panic_hotkey,
             nuke_drill,
             get_chrome,
@@ -1900,10 +1974,7 @@ pub fn run() {
 
     // Decoy window title (#27). Config windows are only guaranteed to exist
     // once the loop is running, so push it on Ready.
-    let chrome_exe_dir = {
-        use tauri::Manager;
-        app.state::<AppState>().exe_dir.clone()
-    };
+    let chrome_exe_dir = app.state::<AppState>().exe_dir.clone();
 
     app.run(move |app, event| {
         if let tauri::RunEvent::Ready = event {
@@ -1997,6 +2068,7 @@ mod integration_tests {
             panic_hold: Arc::new(AtomicBool::new(false)),
             panic_gen: Arc::new(AtomicU64::new(0)),
             nuked: Arc::new(AtomicBool::new(false)),
+            panic_fault: Arc::new(Mutex::new(None)),
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();

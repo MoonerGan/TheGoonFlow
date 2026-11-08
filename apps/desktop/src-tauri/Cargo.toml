@@ -19,6 +19,10 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
+# #41: a second launch must reveal the running instance, not fork a second app
+# (a hidden instance was unreachable, and the extra copy silently lost the panic
+# hotkey because the first one owns it).
+tauri-plugin-single-instance = "2"
 serde = { workspace = true }
 serde_json = { workspace = true }
 rand = { workspace = true }

@@ -4,7 +4,7 @@
   // where it actually helps (editor, tiles) — pipeline state never leaks into
   // media, site/tag filters never clutter games.
   import { onMount } from "svelte";
-  import { getKindStats, getChrome, type AppStatus, type ClipReport, type ChromeInfo } from "../lib/api";
+  import { getKindStats, getChrome, getPanicStatus, type AppStatus, type ClipReport, type ChromeInfo, type PanicStatus } from "../lib/api";
   import { activityTick, startWatching, stopWatching } from "../lib/activity.svelte";
   import ActivityBar from "../components/ActivityBar.svelte";
   import ClipDialog from "../components/ClipDialog.svelte";
@@ -28,6 +28,10 @@
   // #27: when a decoy window title is stored beside the exe, the in-app
   // brand follows it — the forgot-to-lock case should say "Flow Notes" too.
   let chrome = $state<ChromeInfo | null>(null);
+  // #41: if the global panic key could not be registered (another instance or
+  // program owns the combination), the app must say so instead of letting the
+  // user believe the panic path works.
+  let panic = $state<PanicStatus | null>(null);
 
   // report strips must be dismissable and expire on their own (#4)
   let reportTimer: ReturnType<typeof setTimeout> | undefined;
@@ -56,6 +60,11 @@
   onMount(() => {
     startWatching();
     void loadCounts();
+    getPanicStatus()
+      .then((p) => (panic = p))
+      .catch(() => {
+        // advisory only: if the app can't answer, the strip stays hidden
+      });
     getChrome()
       .then((c) => (chrome = c))
       .catch(() => {
@@ -90,6 +99,11 @@
       </button>
     </nav>
     <span class="spacer"></span>
+    {#if panic && !panic.armed}
+      <span class="pill danger" title={panic.fault ?? "registration failed"}>
+        panic key NOT armed
+      </span>
+    {/if}
     {#if status.companion}
       <span class="pill" title="Companion API port">:{status.companion.port}</span>
     {/if}
@@ -99,6 +113,17 @@
   </header>
 
   <ActivityBar />
+
+  {#if panic && !panic.armed}
+    <div class="report error-strip">
+      <span class="report-text">
+        the panic key ({panic.hotkey}) did not register, so pressing it does
+        nothing: {panic.fault ?? "unknown reason"}. Close the other GoonFlow
+        window/instance (or whatever else owns that combination), or pick a
+        different key under Sources → Panic &amp; privacy.
+      </span>
+    </div>
+  {/if}
 
   {#if clipReport}
     <ReportBar text={clipReport} onDismiss={() => (clipReport = null)} />
