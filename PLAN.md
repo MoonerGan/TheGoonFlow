@@ -281,6 +281,15 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   reqwest's `socks` feature makes `socks5://127.0.0.1:9150` work with Tor
   Browser. Sources panel has the Proxy block. A wiring test with a local stub
   proxy proves the route without needing network.
+- **#17 started (increment 1: extraction + folder linking)** — `extract.rs`:
+  a game whose only local source is a `.zip` gains *Extract zip* in the editor:
+  unpacks next to the archive (`D:\games\Foo.zip` → `D:\games\Foo`), single
+  wrapper folders are unwrapped, job-cancellable, zip-slip entries abort the
+  whole run with nothing written, and the resulting folder is attached as a
+  `local` source (the launcher now prefers folders/exes over loose zips).
+  *Link folder…* attaches an existing folder directly.
+  Still open in #17: DLsite library sync, booru full-res downloads, seed-host
+  mirror picker.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

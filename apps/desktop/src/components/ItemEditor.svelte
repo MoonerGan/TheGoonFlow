@@ -19,10 +19,13 @@
     setComplete,
     setLaunchPath,
     removeStoredVideo,
+    extractGame,
+    extractPlan,
     storeVideo,
     updateItem,
     videoInfo,
     type EnrichReport,
+    type ExtractPlan,
     type ItemDetail,
     type ItemSummary,
     type LaunchPlan,
@@ -70,6 +73,11 @@
   let launching = $state(false);
   let launchMsg = $state<string | null>(null);
 
+  // archive extraction + folder linking (#17, games only)
+  let xplan = $state<ExtractPlan | null>(null);
+  let extracting = $state(false);
+  let confirmExtract = $state(false);
+
   // vault video storage (#16, media only, strictly opt-in)
   let vinfo = $state<VideoInfo | null>(null);
   let storing = $state(false);
@@ -89,6 +97,11 @@
           launchPlan = await previewLaunch(item.id);
         } catch {
           // launch preview is advisory; ignore
+        }
+        try {
+          xplan = await extractPlan(item.id);
+        } catch {
+          // advisory too
         }
       } else {
         try {
@@ -217,6 +230,38 @@
       await setLaunchPath(item.id, null);
       launchPlan = await previewLaunch(item.id);
       launchMsg = "launcher override cleared";
+    } catch (e) {
+      launchMsg = String(e);
+    }
+  }
+
+  async function doExtract() {
+    if (extracting) return;
+    extracting = true;
+    try {
+      const r = await extractGame(item.id);
+      launchMsg =
+        `extracted ${r.entries} entries → ${r.dest}` +
+        (r.sourceAdded ? " · folder linked as a source" : "") +
+        (r.note ? ` · ${r.note}` : "");
+      launchPlan = await previewLaunch(item.id);
+      xplan = await extractPlan(item.id);
+      onChanged();
+    } catch (e) {
+      launchMsg = String(e);
+    } finally {
+      extracting = false;
+    }
+  }
+
+  async function linkGameFolder() {
+    const dir = await open({ directory: true, multiple: false });
+    if (typeof dir !== "string") return;
+    try {
+      await addSource(item.id, `file:///${dir.replace(/\\/g, "/")}`);
+      launchMsg = `linked folder ${dir}`;
+      launchPlan = await previewLaunch(item.id);
+      onChanged();
     } catch (e) {
       launchMsg = String(e);
     }
@@ -368,9 +413,20 @@
       {:else if launchPlan?.note}
         <p class="hint">{launchPlan.note}</p>
       {/if}
+      {#if xplan}
+        <p class="hint">zip source: <span class="path">{xplan.zip}</span></p>
+      {/if}
       <div class="row">
         <button class="primary" disabled={launching || !launchPlan?.ok} onclick={doLaunch}>
           {launching ? "Launching…" : "▶ Launch"}
+        </button>
+        {#if xplan && !launchPlan?.ok}
+          <button class="primary" disabled={extracting} onclick={() => (confirmExtract = true)}>
+            {extracting ? "Extracting… (see strip)" : "Extract zip…"}
+          </button>
+        {/if}
+        <button onclick={linkGameFolder} title="Point the game at a folder on disk">
+          Link folder…
         </button>
         <button onclick={chooseLauncher} title="If auto-detect picked the wrong .exe, point at the right one">
           Set launcher…
@@ -382,6 +438,16 @@
       {#if launchMsg}
         <p class="report-inline">{launchMsg}</p>
       {/if}
+    {/if}
+
+    {#if confirmExtract && xplan}
+      <ConfirmDialog
+        title="Extract archive"
+        message={`Unpacks ${xplan.zip} into ${xplan.dest} and links that folder so the game can launch. The zip itself is never touched. If ${xplan.dest} already exists it is linked without re-extracting.`}
+        confirmLabel="Extract"
+        onConfirm={() => { confirmExtract = false; void doExtract(); }}
+        onCancel={() => (confirmExtract = false)}
+      />
     {/if}
 
     {#if !isGame && (vinfo?.hasSource || vinfo?.stored)}

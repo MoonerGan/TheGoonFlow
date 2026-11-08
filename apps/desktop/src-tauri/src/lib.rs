@@ -2,6 +2,7 @@ mod bookmarks;
 mod companion;
 mod importer;
 mod ingest;
+mod extract;
 mod http;
 mod jobs;
 mod launcher;
@@ -527,9 +528,22 @@ fn merge_items(
 
 /// The importer stores local files as `file:///<path>` — decode back.
 fn local_source_path(sources: &[goon_core::db::SourceRow]) -> Option<PathBuf> {
-    let s = sources.iter().find(|s| s.site == "local")?;
-    let rest = s.url.strip_prefix("file:///")?;
-    Some(PathBuf::from(rest))
+    let locals: Vec<PathBuf> = sources
+        .iter()
+        .filter(|s| s.site == "local")
+        .filter_map(|s| s.url.strip_prefix("file:///").map(PathBuf::from))
+        .collect();
+    // Prefer something launchable (folder or exe) over a loose archive, so an
+    // extracted folder (#17) wins over the zip it came from.
+    locals
+        .iter()
+        .find(|p| {
+            p.is_dir()
+                || p.extension()
+                    .is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case("exe"))
+        })
+        .cloned()
+        .or_else(|| locals.first().cloned())
 }
 
 fn plan_for(state: &AppState, item_id: &str) -> Result<launcher::LaunchPlan, String> {
@@ -658,6 +672,45 @@ async fn store_video(
 #[tauri::command]
 fn remove_stored_video(state: tauri::State<'_, AppState>, item_id: String) -> Result<(), String> {
     video::remove_stored_video(&state, &item_id)
+}
+
+// ---------- archive extraction (#17 increment 1) ----------
+
+#[tauri::command]
+fn extract_plan(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<Option<extract::ExtractPlan>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let Some(d) = goon_core::db::get_item(&opened.conn, &item_id).map_err(err)? else {
+        return Err("item not found".into());
+    };
+    Ok(extract::plan(&d.sources))
+}
+
+/// Unpack the item's zip source next to the archive and link the folder so
+/// the game can actually be launched. Runs as an observable job.
+#[tauri::command]
+async fn extract_game(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<extract::ExtractReport, String> {
+    let job = state
+        .jobs
+        .start("extract", &item_id)
+        .ok_or("another extraction is running — see the activity strip")?;
+    let report = extract::extract_for_item(&state, &item_id, &job);
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} → {} entries{}",
+            r.dest,
+            r.entries,
+            if r.source_added { " + linked" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 // ---------- proxy / Tor (#24) ----------
@@ -1008,6 +1061,8 @@ pub fn run() {
             video_info,
             store_video,
             remove_stored_video,
+            extract_plan,
+            extract_game,
             get_proxy,
             set_proxy,
             list_jobs,

@@ -67,6 +67,7 @@ apps/desktop/
       jobs.rs       job registry: progress, cancellation, one job per kind
       queue.rs      #15: per-site rate lanes shared by every network fetch
       http.rs       #24: single reqwest client policy (vault proxy_url)
+      extract.rs    #17: zip → launchable game folder (safe_join guards)
       launcher.rs   #18: engine-aware game-launch resolution + spawn
       video.rs      #16: opt-in vault video storage (cap, job, first-frame)
       videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler

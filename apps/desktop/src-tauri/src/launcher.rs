@@ -189,10 +189,13 @@ pub fn resolve(local_path: Option<&Path>, override_path: Option<&str>) -> Launch
             cwd: None,
             engine: None,
             note: Some(if is_zip {
-                format!("{} is a zip — extract it first, then add the folder as a source", path.display())
-            } else {
-                format!("{} is not an executable", path.display())
-            }),
+                    format!(
+                        "{} is a zip — press Extract zip below to extract it into a launchable folder (the archive is never touched)",
+                        path.display()
+                    )
+                } else {
+                    format!("{} is not an executable", path.display())
+                }),
             pid: None,
         };
     }

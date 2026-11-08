@@ -431,9 +431,18 @@ pub fn insert_source(
     Ok(n > 0)
 }
 
-/// Detach one source link from an item (source row id, from ItemDetail.sources).
-pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqlite::Result<bool> {
+/// Bump an item's updated_at without touching anything else (#17: linking a
+/// freshly extracted folder reorders the library).
+pub fn touch_item(conn: &Connection, id: &str, updated_at: &str) -> rusqlite::Result<bool> {
     let n = conn.execute(
+        "UPDATE items SET updated_at = ?2 WHERE id = ?1",
+        params![id, updated_at],
+    )?;
+    Ok(n > 0)
+}
+
+/// Detach one source link from an item (source row id, from ItemDetail.sources).
+pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqlite::Result<bool> {    let n = conn.execute(
         "DELETE FROM sources WHERE id = ?1 AND item_id = ?2",
         params![source_id, item_id],
     )?;

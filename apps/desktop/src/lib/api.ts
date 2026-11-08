@@ -361,6 +361,24 @@ export const getProxy = () => invoke<ProxySettings>("get_proxy");
 export const setProxy = (url: string | null) =>
   invoke<ProxySettings>("set_proxy", { url });
 
+// ---------- archive extraction (#17) ----------
+export type ExtractPlan = {
+  zip: string;
+  dest: string;
+  alreadyExtracted: boolean;
+};
+export type ExtractReport = {
+  dest: string;
+  entries: number;
+  bytes: number;
+  sourceAdded: boolean;
+  note: string | null;
+};
+export const extractPlan = (itemId: string) =>
+  invoke<ExtractPlan | null>("extract_plan", { itemId });
+export const extractGame = (itemId: string) =>
+  invoke<ExtractReport>("extract_game", { itemId });
+
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
