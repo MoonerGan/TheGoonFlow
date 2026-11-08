@@ -2,7 +2,7 @@
 //! DB (whole-vault nuke stays trivial); content-hash keyed for dedup.
 
 use crate::model::{Item, ItemKind, Status};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -106,6 +106,17 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             UNIQUE (item_id, site, url)
         );
 
+        CREATE TABLE IF NOT EXISTS mods (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id    TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            name       TEXT NOT NULL,
+            kind       TEXT NOT NULL DEFAULT 'other',
+            path       TEXT NOT NULL,
+            args       TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_mods_item ON mods(item_id);
+
         COMMIT;"
         ,
     )?;
@@ -171,6 +182,15 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "BEGIN;
             UPDATE meta SET value = '5' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
+    }
+    if v < 6 {
+        // #25: mod/tool launch recipes (D10). Like suggestions, the table lives
+        // in the base batch so existing vaults gain it in place.
+        conn.execute_batch(
+            "BEGIN;
+            UPDATE meta SET value = '6' WHERE key = 'schema_version';
             COMMIT;",
         )?;
     }
@@ -442,11 +462,103 @@ pub fn touch_item(conn: &Connection, id: &str, updated_at: &str) -> rusqlite::Re
 }
 
 /// Detach one source link from an item (source row id, from ItemDetail.sources).
-pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqlite::Result<bool> {    let n = conn.execute(
+pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
         "DELETE FROM sources WHERE id = ?1 AND item_id = ?2",
         params![source_id, item_id],
     )?;
     Ok(n > 0)
+}
+
+// ---------- mods / tools (#25, D10) ----------
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModRow {
+    pub id: i64,
+    pub name: String,
+    /// launch recipe: "mtool" | "cheat" | "other"
+    pub kind: String,
+    /// the tool's .exe on disk (plain path, not a URL)
+    pub path: String,
+    /// extra arguments recorded with the recipe (empty = none)
+    pub args: String,
+    pub created_at: String,
+}
+
+pub fn list_mods(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<ModRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, name, kind, path, args, created_at FROM mods
+         WHERE item_id = ?1 ORDER BY created_at, id",
+    )?;
+    let rows = stmt.query_map(params![item_id], |r| {
+        Ok(ModRow {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            kind: r.get(2)?,
+            path: r.get(3)?,
+            args: r.get(4)?,
+            created_at: r.get(5)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn get_mod(conn: &Connection, item_id: &str, mod_id: i64) -> rusqlite::Result<Option<ModRow>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, name, kind, path, args, created_at FROM mods
+             WHERE id = ?1 AND item_id = ?2",
+            params![mod_id, item_id],
+            |r| {
+                Ok(ModRow {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    kind: r.get(2)?,
+                    path: r.get(3)?,
+                    args: r.get(4)?,
+                    created_at: r.get(5)?,
+                })
+            },
+        )
+        .ok())
+}
+
+pub fn add_mod(
+    conn: &Connection,
+    item_id: &str,
+    name: &str,
+    kind: &str,
+    path: &str,
+    args: &str,
+    created_at: &str,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO mods (item_id, name, kind, path, args, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![item_id, name, kind, path, args, created_at],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_mod(conn: &Connection, item_id: &str, mod_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM mods WHERE id = ?1 AND item_id = ?2",
+        params![mod_id, item_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Does this game carry mods right now? (#25 update-clobber guard: a version
+/// bump on a modded game deserves the "update wipes mods" warning.)
+pub fn has_mods(conn: &Connection, item_id: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT 1 FROM mods WHERE item_id = ?1 LIMIT 1",
+        params![item_id],
+        |_| Ok(()),
+    )
+    .optional()
+    .map(|o| o.is_some())
 }
 
 // ---------- tags ----------
@@ -1292,6 +1404,35 @@ mod tests {
         assert_eq!(get_meta(&conn, "proxy_url").as_deref(), Some("socks5://127.0.0.1:9150"));
         set_meta(&conn, "proxy_url", None).unwrap();
         assert_eq!(get_meta(&conn, "proxy_url"), None);
+    }
+
+    /// #25: mod recipes are per-item CRUD; deleting the game takes them with it.
+    #[test]
+    fn mod_crud_and_cascade() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('g1','game','t','0','0')",
+            [],
+        )
+        .unwrap();
+
+        let m1 = add_mod(&conn, "g1", "MTool", "mtool", r"D:\games\Karryn\MTool.exe", "", "t1").unwrap();
+        let m2 = add_mod(&conn, "g1", "Cheat Engine", "cheat", r"C:\CE\cheatengine.exe", "", "t2").unwrap();
+        assert_eq!(list_mods(&conn, "g1").unwrap().len(), 2);
+        assert!(has_mods(&conn, "g1").unwrap());
+        assert_eq!(get_mod(&conn, "g1", m1).unwrap().unwrap().kind, "mtool");
+        // the row is scoped to its item: another game can't touch it
+        assert!(get_mod(&conn, "other", m1).unwrap().is_none());
+        assert!(!delete_mod(&conn, "other", m1).unwrap());
+
+        assert!(delete_mod(&conn, "g1", m1).unwrap());
+        assert_eq!(list_mods(&conn, "g1").unwrap().len(), 1);
+        assert_eq!(list_mods(&conn, "g1").unwrap()[0].id, m2);
+
+        delete_item(&conn, "g1").unwrap();
+        assert!(list_mods(&conn, "g1").unwrap().is_empty());
+        assert!(!has_mods(&conn, "g1").unwrap());
     }
 
     /// #14: suggestion rows survive re-inserts, delete individually, and

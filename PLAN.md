@@ -307,6 +307,16 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   a 96 MB inline cap (bigger ones show the poster + a hint), `i` jumps to the
   editor, Esc closes. New goon-core test for the full>video>thumb preference
   (69 green).
+- **#25 started (increment 1: mod/tool launch recipes, D10)** — schema v6
+  `mods` table (idempotent migration, cascades with the item). Per game you
+  register MTool / Cheat Engine / any tool `.exe` with stored arguments;
+  `mods::recipe` resolves the launch (mtool passes the game's resolved exe as
+  the argument; cheat starts CE with an "attach inside" hint; other supports
+  a `{game}` placeholder in args) and `launch_mod` starts it independently.
+  Thin recipes — the app never injects, wraps or patches. The game editor
+  gained a *Mods & tools* block (add via exe picker, ▶ launch, × remove).
+  Still open in #25: DLL apply/revert with `*.flowbak` backups + manifests,
+  and the update-clobber warning wired into the version watcher.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

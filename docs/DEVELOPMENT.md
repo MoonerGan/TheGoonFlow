@@ -53,7 +53,7 @@ crates/
   vault/        crypto core: Argon2id KDF → XChaCha20-Poly1305-wrapped data key
                 → SQLCipher PRAGMA key; nuke = shred keyfile first, then files
   locator/      flow.cfg pointer + volume-label resolution (drive-letter agnostic)
-  goon-core/    domain model, SQLite schema (v5), media pipeline (thumbnail gen,
+  goon-core/    domain model, SQLite schema (v6), media pipeline (thumbnail gen,
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
@@ -68,6 +68,7 @@ apps/desktop/
       queue.rs      #15: per-site rate lanes shared by every network fetch
       http.rs       #24: single reqwest client policy (vault proxy_url)
       extract.rs    #17: zip → launchable game folder (safe_join guards)
+      mods.rs       #25: tool launch recipes (mtool/cheat/other, {game} arg)
       launcher.rs   #18: engine-aware game-launch resolution + spawn
       video.rs      #16: opt-in vault video storage (cap, job, first-frame)
       videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler
@@ -85,7 +86,7 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v5, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v6, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
@@ -219,6 +220,14 @@ tools/
     second vault/job/queue inside a companion handler — take the shared `Core`
     clone. The companion token is per-run (rotates each launch); the
     extension's host_permissions are `127.0.0.1`/`localhost` only.
+17. **Mods are thin launch recipes (D10, #25).** `mods.rs::recipe` only
+    resolves what to *spawn* — the app never injects, wraps or patches a
+    game, and never runs anything that isn't a user-registered `.exe` path.
+    Kind semantics are fixed: `mtool` = tool exe + game exe as its one
+    argument, `cheat` = start the tool (attaching stays the tool's job),
+    `other` = stored args with `{game}` expansion. DLL apply/revert must
+    back up originals (`*.flowbak`) before touching game files — when that
+    increment lands, it grows the `mods` table, it does not fork it.
 
 ## 5. Testing
 

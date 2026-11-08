@@ -8,10 +8,14 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import {
     addItemTag,
+    addMod,
     addSource,
     deleteItem,
+    deleteMod,
     getItem,
     launchItem,
+    launchMod,
+    listMods,
     previewLaunch,
     removeItemTag,
     removeSource,
@@ -29,6 +33,7 @@
     type ItemDetail,
     type ItemSummary,
     type LaunchPlan,
+    type ModRow,
     type VideoInfo,
   } from "../lib/api";
   import ConfirmDialog from "./ConfirmDialog.svelte";
@@ -78,6 +83,15 @@
   let extracting = $state(false);
   let confirmExtract = $state(false);
 
+  // mods / tool recipes (#25, games only)
+  let mods = $state<ModRow[]>([]);
+  let modKind = $state<"mtool" | "cheat" | "other">("mtool");
+  let modName = $state("");
+  let modPath = $state("");
+  let modArgs = $state("");
+  let modMsg = $state<string | null>(null);
+  let launchingMod = $state<number | null>(null);
+
   // vault video storage (#16, media only, strictly opt-in)
   let vinfo = $state<VideoInfo | null>(null);
   let storing = $state(false);
@@ -100,6 +114,11 @@
         }
         try {
           xplan = await extractPlan(item.id);
+        } catch {
+          // advisory too
+        }
+        try {
+          mods = await listMods(item.id);
         } catch {
           // advisory too
         }
@@ -264,6 +283,57 @@
       onChanged();
     } catch (e) {
       launchMsg = String(e);
+    }
+  }
+
+  const KIND_HINT: Record<string, string> = {
+    mtool: "starts the tool with this game's exe passed to it (MTool's inject flow)",
+    cheat: "starts the tool; attach to the game inside it (Cheat Engine)",
+    other: "starts the tool with the arguments below ({game} = the game's exe)",
+  };
+
+  async function pickModExe() {
+    const p = await open({
+      multiple: false,
+      filters: [{ name: "Executable", extensions: ["exe"] }],
+    });
+    if (typeof p === "string") modPath = p;
+  }
+
+  async function doAddMod() {
+    modMsg = null;
+    try {
+      await addMod(item.id, modName, modKind, modPath, modArgs);
+      mods = await listMods(item.id);
+      modName = modPath = modArgs = "";
+      modMsg = "recipe added";
+      onChanged();
+    } catch (e) {
+      modMsg = String(e);
+    }
+  }
+
+  async function doDeleteMod(m: ModRow) {
+    modMsg = null;
+    try {
+      await deleteMod(item.id, m.id);
+      mods = await listMods(item.id);
+    } catch (e) {
+      modMsg = String(e);
+    }
+  }
+
+  async function doLaunchMod(m: ModRow) {
+    if (launchingMod !== null) return;
+    launchingMod = m.id;
+    modMsg = null;
+    try {
+      const r = await launchMod(item.id, m.id);
+      modMsg = `started ${m.name}` + (r.note ? ` · ${r.note}` : "");
+    } catch (e) {
+      modMsg = String(e);
+    } finally {
+      launchingMod = null;
     }
   }
 
@@ -437,6 +507,58 @@
       </div>
       {#if launchMsg}
         <p class="report-inline">{launchMsg}</p>
+      {/if}
+
+      <div class="field-label" style="margin-top:1.2rem">
+        Mods &amp; tools
+        <span class="hint">— launch recipes only; the app never injects or patches anything</span>
+      </div>
+      {#if mods.length}
+        {#each mods as m (m.id)}
+          <div class="row mod-row">
+            <button
+              class="primary"
+              disabled={launchingMod !== null}
+              onclick={() => doLaunchMod(m)}
+              title={KIND_HINT[m.kind]}
+            >
+              {launchingMod === m.id ? "Starting…" : `▶ ${m.name}`}
+            </button>
+            <span class="hint mod-kind">{m.kind}</span>
+            <span class="hint path mod-path" title={m.path + (m.args ? ` ${m.args}` : "")}>
+              {m.path}{#if m.args} <em>{m.args}</em>{/if}
+            </span>
+            <button class="ghost" onclick={() => doDeleteMod(m)} title="remove this recipe">×</button>
+          </div>
+        {/each}
+      {:else}
+        <p class="hint">Nothing registered — add MTool, Cheat Engine or any patcher tool for this game.</p>
+      {/if}
+      <p class="hint">{KIND_HINT[modKind]}</p>
+      <div class="row">
+        <select bind:value={modKind}>
+          <option value="mtool">MTool recipe</option>
+          <option value="cheat">Cheat Engine recipe</option>
+          <option value="other">Other tool</option>
+        </select>
+        <input type="text" placeholder="name (optional)" bind:value={modName} />
+      </div>
+      <div class="row">
+        <input type="text" class="proxy-input" placeholder={modPath || "tool .exe path"} bind:value={modPath} />
+        <button onclick={pickModExe}>Browse…</button>
+      </div>
+      <div class="row">
+        <input
+          type="text"
+          class="proxy-input"
+          placeholder={'extra arguments, e.g. --target "{game}" --silent'}
+          bind:value={modArgs}
+          onkeydown={(e) => e.key === "Enter" && modPath && doAddMod()}
+        />
+        <button disabled={!modPath} onclick={doAddMod}>Add recipe</button>
+      </div>
+      {#if modMsg}
+        <p class="report-inline">{modMsg}</p>
       {/if}
     {/if}
 

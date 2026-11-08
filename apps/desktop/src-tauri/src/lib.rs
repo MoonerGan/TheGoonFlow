@@ -6,6 +6,7 @@ mod extract;
 mod http;
 mod jobs;
 mod launcher;
+mod mods;
 mod queue;
 mod video;
 mod videothumb;
@@ -774,6 +775,107 @@ async fn extract_game(
     report
 }
 
+// ---------- mods / tools (#25, D10) ----------
+
+#[tauri::command]
+fn list_mods(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<Vec<goon_core::db::ModRow>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::list_mods(&opened.conn, &item_id).map_err(err)
+}
+
+#[tauri::command]
+fn add_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    name: String,
+    kind: String,
+    path: String,
+    args: Option<String>,
+) -> Result<goon_core::db::ModRow, String> {
+    if !matches!(kind.as_str(), "mtool" | "cheat" | "other") {
+        return Err("recipe kind must be mtool, cheat or other".into());
+    }
+    let path = path.trim().to_string();
+    if path.is_empty() {
+        return Err("pick the tool's .exe first".into());
+    }
+    let name = {
+        let n = name.trim().to_string();
+        if n.is_empty() {
+            std::path::Path::new(&path)
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "tool".into())
+        } else {
+            n
+        }
+    };
+    let args = args.unwrap_or_default().trim().to_string();
+    let now = crate::now_epoch();
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    let id = goon_core::db::add_mod(&opened.conn, &item_id, &name, &kind, &path, &args, &now)
+        .map_err(err)?;
+    let _ = goon_core::db::touch_item(&opened.conn, &item_id, &now);
+    goon_core::db::get_mod(&opened.conn, &item_id, id)
+        .map_err(err)?
+        .ok_or_else(|| "mod vanished immediately after adding".to_string())
+}
+
+#[tauri::command]
+fn delete_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    mod_id: i64,
+) -> Result<(), String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    if !goon_core::db::delete_mod(&opened.conn, &item_id, mod_id).map_err(err)? {
+        return Err("that recipe is not on this item".into());
+    }
+    Ok(())
+}
+
+/// What a recipe would run (and why not) — never spawns.
+#[tauri::command]
+fn preview_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    mod_id: i64,
+) -> Result<mods::ModLaunch, String> {
+    let (m, game) = {
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        let m = goon_core::db::get_mod(&opened.conn, &item_id, mod_id)
+            .map_err(err)?
+            .ok_or("recipe not found")?;
+        let Some(d) = goon_core::db::get_item(&opened.conn, &item_id).map_err(err)? else {
+            return Err("item not found".into());
+        };
+        let game = launcher::resolve(
+            local_source_path(&d.sources).as_deref(),
+            d.launch_path.as_deref(),
+        );
+        (m, game)
+    };
+    Ok(mods::recipe(&m, &game))
+}
+
+/// Start the tool with its stored recipe. Tools keep running after we exit.
+#[tauri::command]
+fn launch_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    mod_id: i64,
+) -> Result<mods::ModLaunch, String> {
+    let plan = preview_mod(state, item_id, mod_id)?;
+    mods::launch(&plan)
+}
+
 // ---------- proxy / Tor (#24) ----------
 
 #[derive(serde::Serialize)]
@@ -1129,6 +1231,11 @@ pub fn run() {
             remove_stored_video,
             extract_plan,
             extract_game,
+            list_mods,
+            add_mod,
+            delete_mod,
+            preview_mod,
+            launch_mod,
             get_proxy,
             set_proxy,
             list_jobs,

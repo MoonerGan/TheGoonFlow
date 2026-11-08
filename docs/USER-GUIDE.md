@@ -225,6 +225,13 @@ app reaches the content sites (and through your proxy if you set one).
   and links that folder, so **▶ Launch** lights up. **Link folder…** points a
   game at any folder already on disk. The game keeps running if you close the
   app.
+- **Mods & tools (game editor):** register the helper tools you already use —
+  **MTool** (started with the game's exe passed to it, exactly today's
+  inject flow), **Cheat Engine** (started; you attach inside it), or any
+  patcher with saved arguments (`{game}` expands to the game's exe). Each row
+  gets a ▶ button. These are *launch recipes only*: the app never injects,
+  wraps or patches anything itself. (Applying/reverting DLL mods with backups
+  is the next step for this feature.)
 - **Editor (media):** title and tags only — no status/version/circle and no
   Complete marker, because none of that applies to a post or gallery.
 - Both editors: add or remove **tags** (booru tags arrive on their own when you

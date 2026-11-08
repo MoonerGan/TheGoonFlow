@@ -389,6 +389,36 @@ export const extractPlan = (itemId: string) =>
 export const extractGame = (itemId: string) =>
   invoke<ExtractReport>("extract_game", { itemId });
 
+// ---------- mods / tools (#25) ----------
+export type ModRow = {
+  id: number;
+  name: string;
+  kind: "mtool" | "cheat" | "other";
+  path: string;
+  args: string;
+  createdAt: string;
+};
+export type ModLaunch = {
+  ok: boolean;
+  exe: string | null;
+  args: string[];
+  cwd: string | null;
+  note: string | null;
+  pid: number | null;
+};
+export const listMods = (itemId: string) => invoke<ModRow[]>("list_mods", { itemId });
+export const addMod = (
+  itemId: string,
+  name: string,
+  kind: string,
+  path: string,
+  args: string,
+) => invoke<ModRow>("add_mod", { itemId, name, kind, path, args });
+export const deleteMod = (itemId: string, modId: number) =>
+  invoke<void>("delete_mod", { itemId, modId });
+export const launchMod = (itemId: string, modId: number) =>
+  invoke<ModLaunch>("launch_mod", { itemId, modId });
+
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });

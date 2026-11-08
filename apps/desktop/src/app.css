@@ -547,6 +547,24 @@ textarea:focus {
   min-width: 0;
 }
 
+.mod-row {
+  align-items: center;
+}
+
+.mod-kind {
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+}
+
+.mod-path {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .token-chip {
   max-width: 22rem;
   overflow: hidden;
