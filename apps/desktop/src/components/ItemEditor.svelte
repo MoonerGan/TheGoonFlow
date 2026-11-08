@@ -18,11 +18,15 @@
     reEnrichItem,
     setComplete,
     setLaunchPath,
+    removeStoredVideo,
+    storeVideo,
     updateItem,
+    videoInfo,
     type EnrichReport,
     type ItemDetail,
     type ItemSummary,
     type LaunchPlan,
+    type VideoInfo,
   } from "../lib/api";
   import ConfirmDialog from "./ConfirmDialog.svelte";
 
@@ -66,6 +70,12 @@
   let launching = $state(false);
   let launchMsg = $state<string | null>(null);
 
+  // vault video storage (#16, media only, strictly opt-in)
+  let vinfo = $state<VideoInfo | null>(null);
+  let storing = $state(false);
+  let videoMsg = $state<string | null>(null);
+  let confirmStore = $state(false);
+
   onMount(async () => {
     try {
       const d = await getItem(item.id);
@@ -79,6 +89,12 @@
           launchPlan = await previewLaunch(item.id);
         } catch {
           // launch preview is advisory; ignore
+        }
+      } else {
+        try {
+          vinfo = await videoInfo(item.id);
+        } catch {
+          // advisory too
         }
       }
     } catch (e) {
@@ -203,6 +219,39 @@
       launchMsg = "launcher override cleared";
     } catch (e) {
       launchMsg = String(e);
+    }
+  }
+
+  function mb(n: number | null): string {
+    return n ? `${(n / (1024 * 1024)).toFixed(1)} MB` : "unknown size";
+  }
+
+  async function doStoreVideo() {
+    if (storing) return;
+    storing = true;
+    videoMsg = "storing… (watch the activity strip)";
+    try {
+      const r = await storeVideo(item.id);
+      videoMsg =
+        `stored ${mb(r.storedBytes)} in the vault` +
+        (r.thumbAdded ? " · first-frame thumbnail added" : "") +
+        (r.note ? ` · ${r.note}` : "");
+      vinfo = await videoInfo(item.id);
+      onChanged();
+    } catch (e) {
+      videoMsg = String(e);
+    } finally {
+      storing = false;
+    }
+  }
+
+  async function doRemoveVideo() {
+    try {
+      await removeStoredVideo(item.id);
+      videoMsg = "stored copy removed — the link is untouched";
+      vinfo = await videoInfo(item.id);
+    } catch (e) {
+      videoMsg = String(e);
     }
   }
 
@@ -333,6 +382,37 @@
       {#if launchMsg}
         <p class="report-inline">{launchMsg}</p>
       {/if}
+    {/if}
+
+    {#if !isGame && (vinfo?.hasSource || vinfo?.stored)}
+      <div class="field-label">
+        Video
+        <span class="hint">— kept as a {vinfo?.sourceKind ?? "link"} by default</span>
+      </div>
+      {#if vinfo?.stored}
+        <p class="hint path">encrypted copy in the vault · {mb(vinfo.storedSize)}</p>
+        <div class="row">
+          <button class="danger" onclick={doRemoveVideo}>Remove stored copy</button>
+        </div>
+      {:else}
+        <p class="hint">source size: {mb(vinfo?.sourceSize ?? null)}</p>
+        <div class="row">
+          <button disabled={storing} onclick={() => (confirmStore = true)}>Store copy in vault</button>
+        </div>
+      {/if}
+      {#if videoMsg}
+        <p class="report-inline">{videoMsg}</p>
+      {/if}
+    {/if}
+
+    {#if confirmStore}
+      <ConfirmDialog
+        title="Store video in the vault"
+        message={`This copies ${mb(vinfo?.sourceSize ?? null)} into the encrypted database. The vault (and your backups) grow accordingly; Nuke destroys this copy with everything else. The original link stays either way.`}
+        confirmLabel="Store copy"
+        onConfirm={() => { confirmStore = false; void doStoreVideo(); }}
+        onCancel={() => (confirmStore = false)}
+      />
     {/if}
 
     <div class="row modal-actions">

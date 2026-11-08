@@ -5,6 +5,8 @@ mod ingest;
 mod jobs;
 mod launcher;
 mod queue;
+mod video;
+mod videothumb;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -624,6 +626,39 @@ fn clear_item_suggestions(state: tauri::State<'_, AppState>, item_id: String) ->
     goon_core::db::clear_suggestions(&opened.conn, &item_id).map_err(err)
 }
 
+// ---------- vault video storage (#16, opt-in) ----------
+
+#[tauri::command]
+fn video_info(state: tauri::State<'_, AppState>, item_id: String) -> Result<video::VideoInfo, String> {
+    video::video_info(&state, &item_id)
+}
+
+#[tauri::command]
+async fn store_video(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<video::VideoStoreReport, String> {
+    let job = state
+        .jobs
+        .start("video", &item_id)
+        .ok_or("another video store is running — see the activity strip")?;
+    let report = video::store_video(&state, &item_id, &job).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "stored {} MB{}",
+            r.stored_bytes / (1024 * 1024),
+            if r.thumb_added { " + first-frame thumb" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
+}
+
+#[tauri::command]
+fn remove_stored_video(state: tauri::State<'_, AppState>, item_id: String) -> Result<(), String> {
+    video::remove_stored_video(&state, &item_id)
+}
+
 // ---------- import (D13) — every import runs as a job ----------
 // Async so Tauri runs them off the main thread: a 3000-link bookmark import
 // must never freeze the window or block other commands.
@@ -936,6 +971,9 @@ pub fn run() {
             list_match_suggestions,
             dismiss_suggestion,
             clear_item_suggestions,
+            video_info,
+            store_video,
+            remove_stored_video,
             list_jobs,
             cancel_job
         ])

@@ -44,6 +44,7 @@ Closest pieces worth stealing ideas from (see §3). Build custom.
 | D15 | Long work | **Jobs, never modal blocking** | Field report: a slow bookmark import greyed out every unrelated button. Imports/update checks run as observable jobs (progress, current item, Stop); vault lock taken per item so the grid fills live; Lock/Nuke cancels all jobs first. UI polls `list_jobs()` rather than tauri events (fewer moving parts, late webview still sees history). |
 | D16 | Completion semantics | **"Complete" is a game-only concept** | Field report round 2: "Images / video get a 'Complete' check mark which has nothing to do with them." The editor renders the Complete marker (and status/circle/version pipeline fields) only for `kind=game`; media items never expose it. Extends D9. |
 | D17 | Video storage | **Track by link; vault-stored video is opt-in later** | Field report: "+ Images" silently dropped .mp4 picks. Added `+ Video`: each picked video becomes a media item tracked by `file:///` path (no vault BLOB — nuke story + DB size). Copying videos *into* the encrypted vault + first-frame thumbs is #16 (M3). |
+| D18 | Video first-frame decoder | **Windows Shell thumbnail provider (Media Foundation)** — no FFmpeg, no pure-Rust gamble | #16's "ffmpeg vs pure-Rust" question, answered a third way: the OS already decodes everything this library meets (H.264/HEVC MP4, VP8/VP9 WebM via `IShellItem → BHID_ThumbnailHandler → GetThumbnail → GetDIBits`). Zero bundled bits, works offline, and Nuke/backup behavior is unchanged (thumb lands in the DB like any other). Missing codec → no thumbnail, item still stores/plays; verified live on an h264 mp4 (360x203 frame). Vault video storage stays opt-in: `media(kind='video')` BLOB, 512 MiB cap, size warning dialog, Remove restores link-only. |
 
 ---
 
@@ -266,6 +267,13 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   verified live) and f95 (login-cookie only), scores titles with bracket-strip +
   bigram-Dice (floor 0.6, top 3), and the Games view *Online matches* panel
   attaches or dismisses proposals. Never auto-merge (issue requirement).
+- **#16 (vault video storage + first-frame thumbs) landed** — D18: OS Shell
+  thumbnail provider, no ffmpeg dep (verified live on an h264 mp4).
+  `video.rs` store/remove/info commands (512 MiB cap, streaming download via
+  the queue lanes), `videothumb.rs` (IShellItem→IThumbnailProvider→GetDIBits),
+  importer tries a first-frame tile for every `+ Video` import, editor has the
+  opt-in Store/Remove block. `tools\smoke-release.ps1` now smoke-tests the
+  release exe's companion handshake automatically.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

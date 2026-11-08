@@ -67,6 +67,8 @@ apps/desktop/
       jobs.rs       job registry: progress, cancellation, one job per kind
       queue.rs      #15: per-site rate lanes shared by every network fetch
       launcher.rs   #18: engine-aware game-launch resolution + spawn
+      video.rs      #16: opt-in vault video storage (cap, job, first-frame)
+      videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler
       companion.rs  127.0.0.1 axum API (handshake/ping/clip stub)
       ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
@@ -74,6 +76,8 @@ apps/desktop/
     capabilities/   Tauri 2 permission sets (core + dialog)
 tools/
   dev-env.ps1       MSVC/toolchain env import
+  smoke-release.ps1 launches target\release\GoonFlow.exe, checks the companion
+                    handshake, closes it (run after every tauri build)
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
@@ -179,6 +183,15 @@ tools/
     Attaching = `add_source` + re-enrich, decided by the user in the Online
     matches panel. If live markup drifts, re-check with the ignored
     `match_live_search_smoke` test (`-- --ignored match_live`).
+13. **Videos: link by default, BLOB only on explicit opt-in (D17/D18).** A
+    stored video is one `media` row with kind='video' (hash-deduped), capped at
+    512 MiB — enforced pre-download and again mid-stream. First frames come
+    from the OS: `IShellItem.BindToHandler(BHID_ThumbnailHandler)` →
+    `IThumbnailProvider.GetThumbnail` → `GetDIBits` into RGBA (the `windows`
+    crate, gated `cfg(windows)`); never shell out to ffmpeg and never store
+    raw frames. Shell handlers are COM — `first_frame` CoInitializes per call
+    and tears down only what it initialized. A video item's thumbnail must
+    never overwrite an existing site cover tile (only set when thumb is absent).
 
 ## 5. Testing
 

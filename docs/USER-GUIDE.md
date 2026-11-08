@@ -137,7 +137,15 @@ removes the vault copy only.
 Pick video files (MP4/WebM/MKV/MOV/AVI). Videos are **tracked by path, not
 stored** — each file becomes its own media item pointing at `file:///…`, the
 file itself stays exactly where it is. That keeps the encrypted vault small and
-the nuke story simple. (Vault-stored video is planned as an opt-in later.)
+the nuke story simple. Whenever Windows can decode the file, the import also
+grabs a **first-frame preview** so the grid shows real tiles (no extra codecs
+are installed — it uses the same player Windows already has).
+
+**Store copy in vault** (per video item, in its editor): opt-in escape hatch —
+copies that one video into the encrypted database (up to 512 MB each, with a
+size warning first), so it survives even if the original file goes missing.
+**Remove stored copy** puts the item back to link-only; the original file was
+never touched either way. Nuke destroys stored videos with everything else.
 
 ### + Bookmarks
 Import a browser bookmarks export (Firefox: *Bookmarks → Export Bookmarks to

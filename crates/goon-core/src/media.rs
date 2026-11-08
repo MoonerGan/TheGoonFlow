@@ -76,6 +76,11 @@ pub fn put_thumbnail(conn: &Connection, item_id: &str, source_bytes: &[u8]) -> b
     let Some(t) = make_thumbnail(source_bytes) else {
         return false;
     };
+    set_thumbnail(conn, item_id, &t)
+}
+
+/// Replace the item's single `thumb` row with an already-generated thumbnail.
+pub fn set_thumbnail(conn: &Connection, item_id: &str, t: &Thumbnail) -> bool {
     let _ = conn.execute(
         "DELETE FROM media WHERE item_id = ?1 AND kind = 'thumb'",
         params![item_id],
@@ -86,6 +91,85 @@ pub fn put_thumbnail(conn: &Connection, item_id: &str, source_bytes: &[u8]) -> b
         params![item_id, sha256_hex(&t.bytes), t.mime, t.width as i64, t.height as i64, t.bytes],
     )
     .is_ok()
+}
+
+/// Thumbnail from raw RGBA pixels — the video first-frame path (#16). Alpha is
+/// forced opaque (video frames have none) and the result is always JPEG.
+pub fn make_thumbnail_from_rgba(rgba: &[u8], width: u32, height: u32) -> Option<Thumbnail> {
+    let w = usize::try_from(width).ok()?;
+    let h = usize::try_from(height).ok()?;
+    if w == 0 || h == 0 || rgba.len() != w * h * 4 {
+        return None;
+    }
+    let mut px = rgba.to_vec();
+    for p in px.chunks_mut(4) {
+        p[3] = 255;
+    }
+    let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_raw(width, height, px)?);
+    let thumb = img.thumbnail(THUMB_MAX, THUMB_MAX);
+    let (tw, th) = (thumb.width(), thumb.height());
+    let mut buf = Vec::new();
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 82);
+    enc.encode_image(&thumb.to_rgb8()).ok()?;
+    Some(Thumbnail {
+        mime: "image/jpeg",
+        width: tw,
+        height: th,
+        bytes: buf,
+    })
+}
+
+// ---------- vault-stored video (#16, strictly opt-in) ----------
+
+/// Extension → video mime; None for non-video extensions.
+pub fn video_mime(ext: &str) -> Option<&'static str> {
+    Some(match ext.to_ascii_lowercase().as_str() {
+        "mp4" | "m4v" => "video/mp4",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "mov" => "video/quicktime",
+        "avi" => "video/x-msvideo",
+        "wmv" => "video/x-ms-wmv",
+        "flv" => "video/x-flv",
+        "ts" => "video/mp2t",
+        _ => return None,
+    })
+}
+
+/// Store the video bytes as the item's single `video` row (deduped by hash).
+pub fn put_video(conn: &Connection, item_id: &str, mime: &str, bytes: &[u8]) -> bool {
+    conn.execute(
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data)
+         VALUES (?1, 'video', ?2, ?3, NULL, NULL, ?4)",
+        params![item_id, sha256_hex(bytes), mime, bytes],
+    )
+    .is_ok()
+}
+
+/// (mime, byte size) of the stored video, if the item has one.
+pub fn has_video(conn: &Connection, item_id: &str) -> Option<(String, i64)> {
+    conn.query_row(
+        "SELECT mime, length(data) FROM media WHERE item_id = ?1 AND kind = 'video' LIMIT 1",
+        params![item_id],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .ok()
+}
+
+pub fn get_video_bytes(conn: &Connection, item_id: &str) -> Option<Vec<u8>> {
+    conn.query_row(
+        "SELECT data FROM media WHERE item_id = ?1 AND kind = 'video' LIMIT 1",
+        params![item_id],
+        |r| r.get(0),
+    )
+    .ok()
+}
+
+pub fn delete_video(conn: &Connection, item_id: &str) {
+    let _ = conn.execute(
+        "DELETE FROM media WHERE item_id = ?1 AND kind = 'video'",
+        params![item_id],
+    );
 }
 
 /// Store original image bytes as a `full` media row (deduped by content hash).

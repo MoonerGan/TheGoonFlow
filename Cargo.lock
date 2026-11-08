@@ -1455,6 +1455,7 @@ dependencies = [
  "tauri-build",
  "tauri-plugin-dialog",
  "tokio",
+ "windows 0.61.3",
  "zip",
 ]
 

@@ -470,6 +470,7 @@ pub fn import_image_files(
 pub struct VideoImportReport {
     pub imported: usize,
     pub skipped: usize,
+    pub with_thumb: usize,
     pub stopped: bool,
     pub titles: Vec<String>,
 }
@@ -541,6 +542,20 @@ pub fn import_video_files(
         }
         report.imported += 1;
         report.titles.push(title);
+        // #16: try a first-frame tile right away (decoding happens with the
+        // vault unlocked so other commands stay responsive).
+        drop(inner);
+        if let Some(f) = crate::videothumb::first_frame(path) {
+            if let Some(t) = goon_core::media::make_thumbnail_from_rgba(&f.rgba, f.width, f.height)
+            {
+                let mut inner2 = state.inner.lock().unwrap();
+                if let Some(o) = inner2.opened.as_mut() {
+                    if goon_core::media::set_thumbnail(&o.conn, &id, &t) {
+                        report.with_thumb += 1;
+                    }
+                }
+            }
+        }
     }
     job.set_progress(paths.len(), paths.len(), "");
     Ok(report)

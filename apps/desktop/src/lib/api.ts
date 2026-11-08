@@ -112,6 +112,7 @@ export type ImageImportReport = {
 export type VideoImportReport = {
   imported: number;
   skipped: number;
+  withThumb: number;
   stopped: boolean;
   titles: string[];
 };
@@ -335,6 +336,24 @@ export const dismissSuggestion = (itemId: string, site: string, url: string) =>
   invoke<void>("dismiss_suggestion", { itemId, site, url });
 export const clearItemSuggestions = (itemId: string) =>
   invoke<void>("clear_item_suggestions", { itemId });
+
+// ---------- vault video storage (#16) ----------
+export type VideoInfo = {
+  hasSource: boolean;
+  sourceSize: number | null;
+  sourceKind: string | null;
+  stored: boolean;
+  storedSize: number | null;
+};
+export type VideoStoreReport = {
+  storedBytes: number;
+  thumbAdded: boolean;
+  note: string | null;
+};
+export const videoInfo = (itemId: string) => invoke<VideoInfo>("video_info", { itemId });
+export const storeVideo = (itemId: string) => invoke<VideoStoreReport>("store_video", { itemId });
+export const removeStoredVideo = (itemId: string) =>
+  invoke<void>("remove_stored_video", { itemId });
 
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");

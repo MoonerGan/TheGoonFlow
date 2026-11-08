@@ -168,9 +168,9 @@
     try {
       const r = await importVideoFiles(paths);
       report =
-        `videos: ${r.imported} tracked by path` +
+        `videos: ${r.imported} tracked by path (${r.withThumb} with first-frame previews)` +
         (r.skipped ? `, ${r.skipped} skipped (already tracked / not a video)` : "") +
-        " — the files stay on disk; only links live in the vault" +
+        " — the files stay on disk; only links live in the vault (Store copy is per item)" +
         (r.stopped ? ", stopped early" : "");
       await load();
     } catch (e) {
