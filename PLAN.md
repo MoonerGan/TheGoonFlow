@@ -42,6 +42,8 @@ Closest pieces worth stealing ideas from (see §3). Build custom.
 | D13 | Import existing media | **Part of M0** | (a) Games: pick a folder → per-engine fingerprinting (RPGM `System.json`/`Game.ini`, Unity `*_Data`/`boot.config`, NW `package.json`, Ren'Py layout, GameMaker `data.win`), version parsed from `[v1.23]`-style folder names, cover art extracted, local sources tracked as `site='local'`. (b) Images: batch file import → one Gallery item, originals as encrypted `full` BLOBs + thumbnail. (c) Bookmarks: Netscape HTML (browser export) parsed, host-classified, items+sources created; optional online enrichment fetches thumbnails+tags for gelbooru/rule34/e621 JSON APIs and DLsite `og:image` (rate-limited, user-initiated). All best-effort; every field correctable in the item editor. |
 | D14 | View separation | **Games and Media are separate views; share only what fits** | Field report: "what sense does it make that I can filter by seen/tracking/wishlist for an image?" Games own the pipeline (status filters, version, updates, dupes); Media owns provenance (source-site + tag filters). Shared components strictly as-needed: `TileGrid`, `ItemEditor` (hides pipeline fields for media), Clip/source/nuke logic. |
 | D15 | Long work | **Jobs, never modal blocking** | Field report: a slow bookmark import greyed out every unrelated button. Imports/update checks run as observable jobs (progress, current item, Stop); vault lock taken per item so the grid fills live; Lock/Nuke cancels all jobs first. UI polls `list_jobs()` rather than tauri events (fewer moving parts, late webview still sees history). |
+| D16 | Completion semantics | **"Complete" is a game-only concept** | Field report round 2: "Images / video get a 'Complete' check mark which has nothing to do with them." The editor renders the Complete marker (and status/circle/version pipeline fields) only for `kind=game`; media items never expose it. Extends D9. |
+| D17 | Video storage | **Track by link; vault-stored video is opt-in later** | Field report: "+ Images" silently dropped .mp4 picks. Added `+ Video`: each picked video becomes a media item tracked by `file:///` path (no vault BLOB — nuke story + DB size). Copying videos *into* the encrypted vault + first-frame thumbs is #16 (M3). |
 
 ---
 
@@ -182,6 +184,7 @@ Ships behind an experimental flag; never auto-deletes. Target: post-M5.
 | **M1** ✅ | Booru ingestors (gelbooru, rule34, e621) + URL clip + thumbnail BLOB cache + tag grid + tag types w/ Complete chip. Also landed here: one shared ingest path (`ingest.rs`) covering `file:///…` and direct media URLs, so bookmarks to local media resolve as media (field report) | Usable daily |
 | **M2** ✅ | DLsite + f95zone ingest; cross-site pairing (suggest, never auto-merge) + merge UI; versions/update feed + "check updates"; repack mirrors (off default) + per-site enable/cookie/rate under *Sources*; e-hentai gate pass-through. **Not in this pass:** e-hentai cookie-gated *enrichment* is wired but untested against the live site, and `/api/clip` still returns 501 (needs `Arc<AppState>` in the companion — M4) | Game half works |
 | **M2.5** ✅ | Field-test follow-up (D14/D15): separate **Games** and **Media** views (pipeline filters gone from media; site/tag filters gone from games), shared `TileGrid`/`ItemEditor` only; **job queue** — imports/updates run background, observable (per-item progress + current URL + Stop), per-item vault locking so the grid fills live and Lock/Nuke cleanly cancels everything; bigger default window | Nothing blocks anything; imports are watchable |
+| **M2.6** ✅ | Trust & cleanup (field report round 2, GitHub #1–#13): `4cdn`→**4chan** site naming + idempotent schema v3 migration for existing vaults; booru-CDN file links (`wimg.rule34.xxx//…?11353035`) route through the site API via the numeric query id (that was the missing-thumbnail cause), direct fetches send site-referer + normalized `//` paths; Complete/status hidden for media (D16); `+ Video` tracked-by-link import (D17); content-hash **dupe suggestions in Media**; search boxes both views; multi-select + batch `delete_items`; per-item source add/remove + **Re-fetch metadata** (`reenrich_item`); dismissable report strips + expiring finished-job rows; in-app `ConfirmDialog` replaces `confirm()`; enrich phase round-robins per site | Everything the round-2 report flagged is fixed or ticketed |
 | **M3** | Downloader: DLsite library sync + downloads, booru full-res, seed-host mirror picker, archive extract, local game folder linking + launch; container-encryption perf decision | Full pipeline |
 | **M4** | MV3 extension (Chrome+Firefox) w/ per-site clip extractors from site-packs; embedded WebView2 tabs + clip bar + metadata-only mode; token pairing | The "wrapper" feel |
 | **M5** | Nuke + panic hotkey + crypto-erase; scrubber; deniability (renaming, decoy chrome); proxy/Tor; mods/MTool/CE layer; settings polish; portable packaging | Hardened 1.0 |
@@ -220,9 +223,9 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
 - Shipped artifact for testing: `target\release\GoonFlow.exe` (single file, ~19 MB,
   frontend embedded; only WebView2 runtime required). Debug builds of the UI are a
   trap — they point at the Vite dev server and show "connection refused" without it.
-- Schema is at **v2** (`site_settings`, `updates`). `init_schema` is idempotent,
-  so unlocking an older vault upgrades it in place; no migration path exists yet
-  because nothing is published — add one before any release tag.
+- Schema is at **v3** (`site_settings`, `updates` at v2; v3 renames mislabeled CDN
+  sites like `i`/`wimg` to their real names). `init_schema` is idempotent and runs
+  versioned migrations, so unlocking an older vault upgrades it in place.
 - Deliberate gaps left for M3/M4: companion `/api/clip` (needs the shared state
   refactor), downloads, selector site-packs + raw HTML snapshots for rot recovery,
   and a fixture suite for the HTML parsers (currently string-literal fixtures).
@@ -232,7 +235,22 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   (progress + Stop) and shared `TileGrid`/`ItemEditor`/`ClipDialog`; import
   commands are async and take the vault lock per item; Lock/Nuke/forget-pointer
   cancel every job first, Nuke also wipes job history. Window default raised to
-  1380×860 (min 1100×640). 35 workspace tests green.
-- Field-test resume point: re-run the bookmark import that was mid-flight —
-  progress is now visible in the activity strip and Stop/Lock interrupt it
-  cleanly; partial imports are kept, re-runs dedupe by (site, url).
+  1380×860 (min 1100×640).
+- M2.6 landed (GitHub issues #1–#13, trust & cleanup): `HOST_SUFFIXES` +
+  `site_for_host` in `ingest.rs` (4cdn → 4chan; booru-CDN file URLs with a
+  numeric query id route through the booru API — the real cause of missing
+  rule34 thumbnails); `apply_meta` + `reenrich_item` shared by clip/bookmark
+  enrich and the new per-item **Re-fetch metadata**; `add_source`/
+  `remove_source`/`delete_items` (batch) commands; `import_video_files`
+  (file:/// links, no BLOB); `db::pairing_suggestions(conn, kind)` — games by
+  title key, **media by shared stored-image hash**; bookmark enrich round-
+  robins across sites; schema v3. Frontend: search boxes (debounced), multi-
+  select + batch delete in both grids, `ConfirmDialog` (no more native
+  confirm), `ReportBar` (dismissible strips), ActivityBar expires finished
+  job rows after ~12 s. 40 workspace tests green.
+- Repo is now on GitHub (`MoonerGan/TheGoonFlow`); milestones + the whole
+  backlog live in GitHub Issues/Project (project 1). M2.6 items are P0;
+  M3–M5 sit in Backlog. Field reports continue as issues.
+- Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
+  migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
+  rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

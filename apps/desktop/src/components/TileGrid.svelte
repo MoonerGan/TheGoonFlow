@@ -1,18 +1,25 @@
 <script lang="ts">
   // The one piece both views genuinely share: card layout + lazy thumbs.
+  // In select mode a click toggles selection (batch delete); otherwise it opens.
   import type { ItemSummary } from "../lib/api";
 
   let {
     items,
     thumbs,
     showStatus = true,
+    selectMode = false,
+    selected = new Set<string>(),
     onOpen,
+    onToggle,
   }: {
     items: ItemSummary[];
     thumbs: Record<string, string>;
     /** pipeline status only makes sense on game cards */
     showStatus?: boolean;
-    onOpen: (item: ItemSummary) => void;
+    selectMode?: boolean;
+    selected?: Set<string>;
+    onOpen?: (item: ItemSummary) => void;
+    onToggle?: (item: ItemSummary) => void;
   } = $props();
 
   const VIEW_LABEL: Record<string, string> = {
@@ -24,7 +31,15 @@
 
 <div class="grid">
   {#each items as item (item.id)}
-    <button class="tile" onclick={() => onOpen(item)}>
+    {@const isSel = selected.has(item.id)}
+    <button
+      class="tile"
+      class:selected={isSel}
+      onclick={() => (selectMode ? onToggle?.(item) : onOpen?.(item))}
+    >
+      {#if selectMode}
+        <span class="tile-check" aria-hidden="true">{isSel ? "✓" : ""}</span>
+      {/if}
       {#if thumbs[item.id]}
         <img src={thumbs[item.id]} alt="" loading="lazy" />
       {:else}

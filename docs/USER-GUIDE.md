@@ -132,6 +132,12 @@ Pick image files (PNG/JPG/WebP/GIF/BMP). They are **stored inside the encrypted
 vault** (originals + thumbnail) as a single Gallery item. A delete in the app
 removes the vault copy only.
 
+### + Video
+Pick video files (MP4/WebM/MKV/MOV/AVI). Videos are **tracked by path, not
+stored** — each file becomes its own media item pointing at `file:///…`, the
+file itself stays exactly where it is. That keeps the encrypted vault small and
+the nuke story simple. (Vault-stored video is planned as an opt-in later.)
+
 ### + Bookmarks
 Import a browser bookmarks export (Firefox: *Bookmarks → Export Bookmarks to
 HTML*; Chrome: *Bookmarks Manager → Export*). Each bookmark is classified the
@@ -165,15 +171,25 @@ fetch.
 
 - Grid of cards (thumbnail + title + kind/version/status). Click for the
   editor. Cards arrive live during imports.
+- **Search box** (both views): matches title/circle as you type — the quick
+  way to confirm something actually landed.
+- **Select… mode** (both views): click cards to tick them, *Select all* /
+  *Done* in the toolbar, then **Delete selected** removes the whole batch in
+  one confirmed step. Great after a messy import.
 - **Editor (games):** title, circle/developer, version, pipeline **status**
   (`seen / tracking / wishlist / downloaded / played`), and the **✓ Complete**
   personal marker (green chip — it means *"I finished this"*, independent of
   status, and it survives game updates).
-- **Editor (media):** title and tags only — no status/version/circle fields,
-  because none of that applies to a post or gallery.
+- **Editor (media):** title and tags only — no status/version/circle and no
+  Complete marker, because none of that applies to a post or gallery.
 - Both editors: add or remove **tags** (booru tags arrive on their own when you
-  clip/enrich; add your own, e.g. `renpy`, `dnf`) and see every **source** link
-  an item has.
+  clip/enrich; add your own, e.g. `renpy`, `dnf`).
+- **Sources inside the editor:** every source link an item has, with an × to
+  detach a wrong one, and a box to **paste a new source link** — for example
+  the DLsite or f95 page of a game you imported as a bare folder. Press
+  **Re-fetch metadata** to visit all of the item's sources and pull in cover
+  art, tags, title and version it was missing. Each source reports what it
+  gave (or why it failed) right in the editor.
 - **Tagged** (sidebar): the most used tags *in the current view* (game tags
   and media tags are kept apart); click one to filter, click again (or *clear*)
   to unfilter.
@@ -182,9 +198,11 @@ fetch.
 - **Updates** (Games view): re-visits the DLsite pages and f95 threads of games
   you track and records version changes. A game marked Complete still surfaces
   here — completion is a tag, not a full stop.
-- **Possible dupes** (Games view): the same title from DLsite + f95 + a local
-  folder is almost certainly one work. Nothing merges itself; you pick which
-  entry to keep and the other's sources/tags/art are folded into it.
+- **Possible dupes** (both views): in Games, the same title from DLsite + f95 +
+  a local folder is almost certainly one work. In Media, two entries holding
+  the **exact same image bytes** (reposted across boorus, imported twice) show
+  up here. Nothing merges itself; you pick which entry to keep and the other's
+  sources/tags/art are folded into it.
 - **Sources** (tab): turn each site on or off, set how polite it should be (ms
   between requests), paste a **cookie** for sites that need a login (e-hentai,
   f95 threads), and see how many items each site currently accounts for.
@@ -192,7 +210,10 @@ fetch.
   their links fold into the original through *Possible dupes* rather than
   staying separate entries.
 - **Remove from vault:** deletes the entry (and vault-stored images) — your
-  game folders on disk are never touched.
+  game folders on disk are never touched. Destructive actions ask in an
+  in-app dialog, not a system popup.
+- Report strips (the grey lines under the toolbar) have an **×** and expire
+  on their own; finished jobs leave the activity strip after a few seconds.
 - The `:port` pill shows the companion API port (used by the future browser
   extension; it listens on 127.0.0.1 only).
 
@@ -218,5 +239,6 @@ fetch.
 | Clip says "…is disabled — enable it under Sources" | That site is switched off (repack mirrors ship off). Turn it on in *Sources* and clip again. |
 | Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
 | Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |
-| Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. |
+| Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. Direct file links like `wimg.rule34.xxx/images/….jpeg?12345` now resolve through the site's API — old items imported before that fix can be repaired with **Re-fetch metadata** in the item editor. |
+| An old item shows site "i" or "wimg" | Fixed automatically: on the next unlock, a schema (v3) migration renames those mislabeled sources to their real site (`4chan`, `rule34`, …). |
 | White/blank window at launch | WebView2 runtime missing — install "Microsoft Edge WebView2 Runtime". |

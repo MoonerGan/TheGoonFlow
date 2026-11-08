@@ -77,18 +77,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         CREATE INDEX IF NOT EXISTS items_updated_idx ON items (updated_at DESC);
         CREATE INDEX IF NOT EXISTS sources_item_idx ON sources (item_id);
 
-        INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '2');
-        UPDATE meta SET value = '2' WHERE key = 'schema_version';
-
-        INSERT OR IGNORE INTO tag_types (id, key, label, priority, color) VALUES
-            (1, 'user_status', 'Personal', 100, '#4ade80'),
-            (2, 'site_flag',   'Site',      50, NULL),
-            (3, 'content',     'Content',   10, NULL);
-
-        INSERT OR IGNORE INTO tags (id, name, type_id) VALUES
-            (1, 'complete', 1),
-            (2, 'dnf',      1),
-            (3, 'replay',   1);
+        INSERT OR IGNORE INTO meta (key, value) VALUES ('schema_version', '1');
 
         CREATE TABLE IF NOT EXISTS site_settings (
             site    TEXT PRIMARY KEY,
@@ -110,6 +99,41 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         COMMIT;"
         ,
     )?;
+
+    // Versioned migrations, run in order. Every step is idempotent so opening
+    // an old vault upgrades it in place (PLAN §13: no vault has been published
+    // yet, but field-test vaults exist and must keep working).
+    let v = schema_version(conn).unwrap_or(1);
+    if v < 2 {
+        conn.execute_batch(
+            "BEGIN;
+            INSERT OR IGNORE INTO tag_types (id, key, label, priority, color) VALUES
+                (1, 'user_status', 'Personal', 100, '#4ade80'),
+                (2, 'site_flag',   'Site',      50, NULL),
+                (3, 'content',     'Content',   10, NULL);
+
+            INSERT OR IGNORE INTO tags (id, name, type_id) VALUES
+                (1, 'complete', 1),
+                (2, 'dnf',      1),
+                (3, 'replay',   1);
+
+            UPDATE meta SET value = '2' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
+    }
+    if v < 3 {
+        // Field report: direct-file sites named after the first host label
+        // ("i" for i.4cdn.org, "wimg" for wimg.rule34.xxx, "booru" for
+        // booru.allthefallen.moe). Fold them into their real sites.
+        conn.execute_batch(
+            "BEGIN;
+            UPDATE sources SET site = '4chan' WHERE site = 'i' AND url LIKE '%4cdn.org%';
+            UPDATE sources SET site = 'rule34' WHERE site = 'wimg' AND url LIKE '%rule34%';
+            UPDATE sources SET site = 'allthefallen' WHERE site = 'booru' AND url LIKE '%allthefallen%';
+            UPDATE meta SET value = '3' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
+    }
     Ok(())
 }
 
@@ -343,6 +367,15 @@ pub fn insert_source(
         "INSERT OR IGNORE INTO sources (item_id, site, url, source_id, fetched_at)
          VALUES (?1, ?2, ?3, ?4, ?5)",
         params![item_id, site, url, source_id, fetched_at],
+    )?;
+    Ok(n > 0)
+}
+
+/// Detach one source link from an item (source row id, from ItemDetail.sources).
+pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "DELETE FROM sources WHERE id = ?1 AND item_id = ?2",
+        params![source_id, item_id],
     )?;
     Ok(n > 0)
 }
@@ -748,53 +781,110 @@ fn pairing_key(title: &str) -> String {
     out
 }
 
-/// Games whose titles match once version/engine brackets are stripped — the
-/// usual DLsite origin ↔ f95 thread ↔ local folder triple. These are only ever
-/// *suggestions*; a human confirms the merge.
-pub fn pairing_suggestions(conn: &Connection) -> rusqlite::Result<Vec<PairSuggestion>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, title,
-                (SELECT group_concat(DISTINCT site) FROM sources s WHERE s.item_id = items.id)
-         FROM items WHERE kind = 'game' ORDER BY title",
-    )?;
-    let rows = stmt
-        .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            ))
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
-    for (id, title, sites) in rows {
-        let key = pairing_key(&title);
-        if key.is_empty() {
-            continue;
-        }
-        groups.entry(key).or_default().push((id, title, sites));
-    }
-
+/// Suggestions grouped by view. `kind` = 'game' | 'media' | None(all).
+/// - Games: titles that match once version/engine brackets are stripped — the
+///   usual DLsite origin ↔ f95 thread ↔ local folder triple.
+/// - Media: **the same stored bytes** (media.hash) on two items — a repost of
+///   one image across boorus, or the same file imported twice. Title matching
+///   is useless for `1743761874698456.jpg`, so we match content instead.
+/// These are only ever *suggestions*; a human confirms the merge.
+pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<Vec<PairSuggestion>> {
+    let want_games = matches!(kind, None | Some("game"));
+    let want_media = matches!(kind, None | Some("media"));
     let mut out = Vec::new();
-    for mut g in groups.into_values() {
-        if g.len() < 2 {
-            continue;
+
+    if want_games {
+        let mut stmt = conn.prepare(
+            "SELECT id, title,
+                    (SELECT group_concat(DISTINCT site) FROM sources s WHERE s.item_id = items.id)
+             FROM items WHERE kind = 'game' ORDER BY title",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+        for (id, title, sites) in rows {
+            let key = pairing_key(&title);
+            if key.is_empty() {
+                continue;
+            }
+            groups.entry(key).or_default().push((id, title, sites));
         }
-        g.sort_by(|a, b| a.0.cmp(&b.0));
-        for i in 0..g.len() {
-            for j in (i + 1)..g.len() {
-                out.push(PairSuggestion {
-                    a_id: g[i].0.clone(),
-                    a_title: g[i].1.clone(),
-                    a_sites: g[i].2.clone(),
-                    b_id: g[j].0.clone(),
-                    b_title: g[j].1.clone(),
-                    b_sites: g[j].2.clone(),
-                });
+
+        for mut g in groups.into_values() {
+            if g.len() < 2 {
+                continue;
+            }
+            g.sort_by(|a, b| a.0.cmp(&b.0));
+            for i in 0..g.len() {
+                for j in (i + 1)..g.len() {
+                    out.push(PairSuggestion {
+                        a_id: g[i].0.clone(),
+                        a_title: g[i].1.clone(),
+                        a_sites: g[i].2.clone(),
+                        b_id: g[j].0.clone(),
+                        b_title: g[j].1.clone(),
+                        b_sites: g[j].2.clone(),
+                    });
+                }
             }
         }
     }
+
+    if want_media {
+        // Two items sharing one stored image/video hash are the same media.
+        let mut stmt = conn.prepare(
+            "SELECT m.hash, m.item_id, i.title,
+                    (SELECT group_concat(DISTINCT s.site) FROM sources s WHERE s.item_id = m.item_id)
+             FROM media m JOIN items i ON i.id = m.item_id
+             WHERE i.kind IN ('gallery','post')
+             GROUP BY m.hash, m.item_id",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
+        for (_hash, id, title, sites) in rows {
+            groups.entry(_hash).or_default().push((id, title, sites));
+        }
+        for mut g in groups.into_values() {
+            // distinct items only (same item can store thumb + full with the
+            // same hash)
+            g.sort_by(|a, b| a.0.cmp(&b.0));
+            g.dedup_by(|a, b| a.0 == b.0);
+            if g.len() < 2 {
+                continue;
+            }
+            for i in 0..g.len() {
+                for j in (i + 1)..g.len() {
+                    out.push(PairSuggestion {
+                        a_id: g[i].0.clone(),
+                        a_title: g[i].1.clone(),
+                        a_sites: g[i].2.clone(),
+                        b_id: g[j].0.clone(),
+                        b_title: g[j].1.clone(),
+                        b_sites: g[j].2.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     out.truncate(40);
     Ok(out)
 }
@@ -885,7 +975,7 @@ mod tests {
     fn tags_settings_updates_and_merge() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
-        assert_eq!(schema_version(&conn).unwrap(), 2);
+        assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
 
         for (id, kind, title) in [
             ("g1", "game", "Summer Witch"),
@@ -947,12 +1037,72 @@ mod tests {
         assert_eq!(d.tags.len(), 1);
 
         // Pairing finds the near-identical titles; merge folds g2 into g1.
-        let sugg = pairing_suggestions(&conn).unwrap();
+        let sugg = pairing_suggestions(&conn, Some("game")).unwrap();
         assert_eq!(sugg.len(), 1);
+        assert!(pairing_suggestions(&conn, Some("media")).unwrap().is_empty());
         merge_items(&conn, "g1", "g2").unwrap();
         assert!(get_item(&conn, "g2").unwrap().is_none());
         let d = get_item(&conn, "g1").unwrap().unwrap();
         assert_eq!(d.sources.len(), 2);
         assert_eq!(d.tags.len(), 1);
+    }
+
+    /// Field report #1: direct-file bookmarks stored site "i"/"wimg" — opening
+    /// an old vault renames them to their real site, once.
+    #[test]
+    fn v3_migration_renames_mislabeled_cdn_sites() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('m1','post','art','0','1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','i','https://i.4cdn.org/h/1743761874698456.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','wimg','https://wimg.rule34.xxx//images/3868/x.jpeg?11353035')",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'", [])
+            .unwrap();
+
+        init_schema(&conn).unwrap(); // simulate re-opening an old vault
+        assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
+        let d = get_item(&conn, "m1").unwrap().unwrap();
+        let sites: Vec<String> = d.sources.iter().map(|s| s.site.clone()).collect();
+        assert!(sites.contains(&"4chan".to_string()), "sites = {sites:?}");
+        assert!(sites.contains(&"rule34".to_string()), "sites = {sites:?}");
+    }
+
+    /// Field report #10: the same image imported twice must surface as a dupe
+    /// in the *media* view, matched by content hash.
+    #[test]
+    fn media_pairing_by_shared_content_hash() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, title) in [("m1", "1743761874698456.jpg"), ("m2", "untitled jpeg")] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post',?2,'0','1')",
+                params![id, title],
+            )
+            .unwrap();
+        }
+        for id in ["m1", "m2"] {
+            conn.execute(
+                "INSERT INTO media (item_id, kind, hash, mime, data) VALUES (?1,'full','deadbeef','image/jpeg',X'00')",
+                params![id],
+            )
+            .unwrap();
+        }
+
+        let sugg = pairing_suggestions(&conn, Some("media")).unwrap();
+        assert_eq!(sugg.len(), 1);
+        // the games panel must not offer media pairs
+        assert!(pairing_suggestions(&conn, Some("game")).unwrap().is_empty());
     }
 }

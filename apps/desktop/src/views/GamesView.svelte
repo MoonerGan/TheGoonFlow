@@ -5,6 +5,7 @@
   import { open } from "@tauri-apps/plugin-dialog";
   import {
     checkUpdates,
+    deleteItems,
     getKindStats,
     getStats,
     getThumbs,
@@ -25,7 +26,9 @@
     type UpdateRow,
   } from "../lib/api";
   import { jobState, onActivityChange } from "../lib/activity.svelte";
+  import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import ItemEditor from "../components/ItemEditor.svelte";
+  import ReportBar from "../components/ReportBar.svelte";
   import TileGrid from "../components/TileGrid.svelte";
 
   let { status }: { status: AppStatus } = $props();
@@ -35,6 +38,7 @@
   let tags = $state<TagCount[]>([]);
   let thumbs = $state<Record<string, string>>({});
   let gameCount = $state(0);
+  let search = $state("");
   let filter = $state("all");
   let tagFilter = $state<string | null>(null);
   let panel = $state<"library" | "updates" | "pairs">("library");
@@ -55,11 +59,51 @@
   );
   const updateCount = $derived(updates.length);
 
+  // debounced search (#8)
+  let searchFor = $state("");
+  let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  function onSearch(v: string) {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => (searchFor = v.trim()), 300);
+  }
+
+  // batch selection (#12)
+  let selectMode = $state(false);
+  let selectedIds = $state<Set<string>>(new Set());
+  let confirmBatchDelete = $state(false);
+
+  function toggleSelect(item: ItemSummary) {
+    const next = new Set(selectedIds);
+    if (next.has(item.id)) next.delete(item.id);
+    else next.add(item.id);
+    selectedIds = next;
+  }
+
+  async function doBatchDelete() {
+    const ids = [...selectedIds];
+    confirmBatchDelete = false;
+    if (ids.length === 0) return;
+    try {
+      await deleteItems(ids);
+      selectedIds = new Set();
+      selectMode = false;
+      await load();
+    } catch (e) {
+      report = `batch delete failed: ${e}`;
+    }
+  }
+
   async function load() {
     loadError = null;
     try {
       stats = await getStats("game");
-      items = await listItems(300, 0, undefined, "game", tagFilter ?? undefined);
+      items = await listItems(
+        300,
+        0,
+        searchFor || undefined,
+        "game",
+        tagFilter ?? undefined,
+      );
       const t = await getThumbs(items.filter((i) => i.hasThumb).map((i) => i.id));
       thumbs = Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`]));
       const kinds = await getKindStats();
@@ -79,6 +123,7 @@
   $effect(() => {
     filter;
     tagFilter;
+    searchFor;
     void load();
   });
 
@@ -159,7 +204,7 @@
   function openPairs() {
     panel = "pairs";
     pairNote = null;
-    pairingSuggestions()
+    pairingSuggestions("game")
       .then((p) => (pairs = p))
       .catch((e) => (pairNote = String(e)));
   }
@@ -191,16 +236,38 @@
   <button disabled={importJob === "running"} onclick={doImportExe} title="Point straight at the launcher; its folder becomes the game">
     + Game .exe
   </button>
+  <input
+    class="search-box"
+    type="text"
+    placeholder="search title / circle…"
+    aria-label="Search games"
+    value={search}
+    oninput={(e) => onSearch(e.currentTarget.value)}
+  />
   <span class="spacer"></span>
+  {#if selectMode}
+    <span class="hint">{selectedIds.size} selected</span>
+    <button onclick={() => (selectedIds = new Set(filtered.map((i) => i.id)))}>Select all</button>
+    <button
+      class="danger"
+      disabled={selectedIds.size === 0}
+      onclick={() => (confirmBatchDelete = true)}
+    >
+      Delete selected
+    </button>
+    <button class="ghost" onclick={() => { selectMode = false; selectedIds = new Set(); }}>Done</button>
+  {:else}
+    <button class="ghost" onclick={() => (selectMode = true)}>Select…</button>
+  {/if}
   {#if importJob === "running"}
     <span class="hint">import running — other buttons stay usable, watch the strip above</span>
   {/if}
 </div>
 
 {#if report}
-  <div class="report">
-    {report}
-    {#if gameFailures.length > 0}
+  <ReportBar text={report} onDismiss={() => (report = null)} />
+  {#if gameFailures.length > 0}
+    <div class="report">
       <details class="details">
         <summary>details ({gameFailures.length} problems)</summary>
         <ul>
@@ -209,11 +276,11 @@
           {/each}
         </ul>
       </details>
-    {/if}
-  </div>
+    </div>
+  {/if}
 {/if}
 {#if loadError}
-  <div class="report error-strip">{loadError}</div>
+  <ReportBar text={loadError} tone="error" onDismiss={() => (loadError = null)} />
 {/if}
 
 <div class="main">
@@ -316,14 +383,21 @@
 
     {:else if filtered.length === 0}
       <div class="empty">
-        <strong>{loadError ? "Couldn't load games." : tagFilter ? `Nothing tagged "${tagFilter}".` : "No games in this view."}</strong><br />
+        <strong>{loadError ? "Couldn't load games." : searchFor ? `Nothing matches "${searchFor}".` : tagFilter ? `Nothing tagged "${tagFilter}".` : "No games in this view."}</strong><br />
         Import games with <em>+ Game folder</em> (nested layouts OK), <em>+ Game zip</em>
         (zipped repacks), or <em>+ Game .exe</em> (point straight at the launcher).
         <br /><br />
         <span class="hint">Everything imported is editable — click any card to correct it.</span>
       </div>
     {:else}
-      <TileGrid items={filtered} {thumbs} onOpen={(item) => (selected = item)} />
+      <TileGrid
+        items={filtered}
+        {thumbs}
+        {selectMode}
+        selected={selectedIds}
+        onOpen={(item) => (selected = item)}
+        onToggle={toggleSelect}
+      />
     {/if}
   </main>
 </div>
@@ -333,5 +407,15 @@
     item={selected}
     onClose={() => (selected = null)}
     onChanged={() => void load()}
+  />
+{/if}
+
+{#if confirmBatchDelete}
+  <ConfirmDialog
+    title="Remove selected from vault"
+    message={`Remove ${selectedIds.size} entries? Game folders on disk are never touched.`}
+    confirmLabel="Remove {selectedIds.size}"
+    onConfirm={doBatchDelete}
+    onCancel={() => (confirmBatchDelete = false)}
   />
 {/if}

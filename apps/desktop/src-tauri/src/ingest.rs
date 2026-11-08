@@ -76,15 +76,67 @@ pub const KNOWN_SITES: &[(&str, &'static str)] = &[
     ("ryuugames", "games (repack mirror)"),
     ("nagadoki", "games (repack mirror)"),
     ("hentaihaven", "games (repack mirror)"),
+    ("4chan", "posts"),
     ("local", "files on this machine"),
 ];
+
+// ---------- host → site ----------
+
+/// Host-suffix → canonical site name, so CDN subdomains and mirrors fold into
+/// the site the user knows (and can toggle under Sources). Order is irrelevant;
+/// longest suffix wins because matching is suffix-boundary aware.
+const HOST_SUFFIXES: &[(&str, &str)] = &[
+    ("gelbooru.com", "gelbooru"),
+    ("rule34.xxx", "rule34"),
+    ("e621.net", "e621"),
+    ("e926.net", "e621"),
+    ("e-hentai.org", "ehentai"),
+    ("exhentai.org", "exhentai"),
+    ("dlsite.com", "dlsite"),
+    ("f95zone.to", "f95"),
+    ("kimochi.net", "kimochi"),
+    ("otomi.xyz", "otomi"),
+    ("ryuugames.com", "ryuugames"),
+    ("nagadoki.net", "nagadoki"),
+    ("hentaihaven.xxx", "hentaihaven"),
+    ("danbooru.donmai.us", "danbooru"),
+    ("safebooru.donmai.us", "safebooru"),
+    ("yande.re", "yande"),
+    ("konachan.com", "konachan"),
+    ("rule34hentai.net", "rule34hentai"),
+    ("realbooru.com", "realbooru"),
+    ("hypnohub.net", "hypnohub"),
+    ("booru.allthefallen.moe", "allthefallen"),
+    // 4cdn.org is 4chan's image host — "4cdn" used to leak out as site "i"
+    // because the first host label was taken as the name.
+    ("4cdn.org", "4chan"),
+    ("4chan.org", "4chan"),
+    ("4channel.org", "4chan"),
+];
+
+fn site_for_host(host: &str) -> Option<&'static str> {
+    HOST_SUFFIXES
+        .iter()
+        .find(|(h, _)| host == *h || host.ends_with(&format!(".{h}")))
+        .map(|(_, s)| *s)
+}
+
+/// Rough registrable domain: last two labels (enough for the hosts we meet).
+fn registrable_domain(host: &str) -> String {
+    let parts: Vec<&str> = host.split('.').collect();
+    if parts.len() >= 2 {
+        parts[parts.len() - 2..].join(".")
+    } else {
+        host.to_string()
+    }
+}
 
 // ---------- identify ----------
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"];
 const VIDEO_EXTS: &[&str] = &["mp4", "webm", "mkv", "mov", "avi"];
 
-fn media_ext(path: &str) -> Option<&'static str> {
+pub fn media_ext(path: &str) -> Option<&'static str> {
     let last = path.rsplit('/').next()?;
     let stem = last.split('?').next()?;
     let ext = stem.rsplit('.').next()?.to_lowercase();
@@ -170,7 +222,11 @@ pub fn classify(url: &str) -> Option<SiteRef> {
         return Some(SiteRef {
             site: "gelbooru".into(),
             kind: ItemKind::Post,
-            remote_id: query_param(url, "id").or_else(|| query_param(url, "pid")),
+            // file-cache links (`img3.gelbooru.com//images/….jpg?4765984`)
+            // carry the post id as the whole query string
+            remote_id: query_param(url, "id")
+                .or_else(|| query_param(url, "pid"))
+                .or_else(|| numeric_query_id(url)),
             mode: Mode::BooruId,
         });
     }
@@ -178,7 +234,7 @@ pub fn classify(url: &str) -> Option<SiteRef> {
         return Some(SiteRef {
             site: "rule34".into(),
             kind: ItemKind::Post,
-            remote_id: query_param(url, "id"),
+            remote_id: query_param(url, "id").or_else(|| numeric_query_id(url)),
             mode: Mode::BooruId,
         });
     }
@@ -189,12 +245,17 @@ pub fn classify(url: &str) -> Option<SiteRef> {
             .and_then(|i| segments.get(i + 1))
             .map(|s| s.trim_end_matches(".json").to_string())
             .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()));
-        return Some(SiteRef {
-            site: "e621".into(),
-            kind: ItemKind::Post,
-            remote_id: id,
-            mode: Mode::BooruId,
-        });
+        // e621's own file CDN (`static1x1.e621.net/data/….jpg?md5`) is not a
+        // post page — let it fall through to the direct-file branch instead of
+        // dead-ending in BooruId with no id.
+        if id.is_some() || media_ext(&path).is_none() {
+            return Some(SiteRef {
+                site: "e621".into(),
+                kind: ItemKind::Post,
+                remote_id: id,
+                mode: Mode::BooruId,
+            });
+        }
     }
     if host_no_port.ends_with("e-hentai.org") {
         return Some(SiteRef {
@@ -248,19 +309,10 @@ pub fn classify(url: &str) -> Option<SiteRef> {
     }
     // Known booru-family hosts: post pages are title-only until site-packs;
     // their direct file links fall through to DirectMedia below.
-    for known in [
-        "danbooru.donmai.us",
-        "safebooru.donmai.us",
-        "yande.re",
-        "konachan.com",
-        "rule34hentai.net",
-        "realbooru.com",
-        "hypnohub.net",
-        "booru.allthefallen.moe",
-    ] {
-        if host_no_port.ends_with(known) && media_ext(&path).is_none() {
+    if media_ext(&path).is_none() {
+        if let Some(site) = site_for_host(&host_no_port) {
             return Some(SiteRef {
-                site: known.split('.').next().unwrap_or(known).to_string(),
+                site: site.to_string(),
                 kind: ItemKind::Post,
                 remote_id: query_param(url, "id"),
                 mode: Mode::BooruId,
@@ -271,9 +323,32 @@ pub fn classify(url: &str) -> Option<SiteRef> {
     // Direct media file on any host — catches hypnohub `//images/….mp4?NN`
     // style file links, CDNs, anything ending in a media extension.
     if path.starts_with('/') && media_ext(&path).is_some() {
-        let slug = host_no_port.split('.').next().unwrap_or(&host_no_port).to_string();
+        let site = site_for_host(&host_no_port)
+            .map(str::to_string)
+            .unwrap_or_else(|| registrable_domain(&host_no_port));
+        // Booru file-cache links (`wimg.rule34.xxx//images/…jpeg?11353035`)
+        // carry the post id as a numeric query. Going through the site's API
+        // gets tags + file with the *right* referer — pulling bytes straight
+        // from the CDN with the CDN as its own referer is what hotlink
+        // protection kills.
+        if site_for_host(&host_no_port).is_some() && media_ext(&path) == Some("image") {
+            if let Some(id) = numeric_query_id(url) {
+                let mode = match site.as_str() {
+                    "gelbooru" | "rule34" | "e621" => Mode::BooruId,
+                    _ => Mode::DirectMedia,
+                };
+                if mode == Mode::BooruId {
+                    return Some(SiteRef {
+                        site,
+                        kind: ItemKind::Post,
+                        remote_id: Some(id),
+                        mode,
+                    });
+                }
+            }
+        }
         return Some(SiteRef {
-            site: slug,
+            site,
             kind: ItemKind::Post,
             remote_id: numeric_query_id(url),
             mode: Mode::DirectMedia,
@@ -642,8 +717,26 @@ async fn direct_media(client: &reqwest::Client, url: &str) -> Result<Meta, Strin
             ..Default::default()
         });
     }
-    let referer = format!("https://{}", host_of(url).0);
-    let bytes = get_bytes(client, url, &referer, None).await?;
+    // Hotlink protection checks the *site* as referer, not the CDN host, and
+    // some bookmarks carry malformed `//images/…` paths — normalize both.
+    let (host, path) = host_of(url);
+    let clean_path = path.replace("//", "/");
+    let clean = format!(
+        "{}://{}{}",
+        "https",
+        host,
+        clean_path
+    );
+    let referer = format!("https://{}/", registrable_domain(&host.split(':').next().unwrap_or(&host)));
+    let bytes = match get_bytes(client, &clean, &referer, None).await {
+        Ok(b) => b,
+        Err(first) => {
+            // second chance: the original URL (some CDNs are picky about paths)
+            get_bytes(client, url, &referer, None)
+                .await
+                .map_err(|_| first)?
+        }
+    };
     Ok(Meta {
         store_bytes: Some(bytes.clone()),
         thumb_bytes: Some(bytes),
@@ -948,6 +1041,180 @@ pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateRe
     Ok(report)
 }
 
+// ---------- apply fetched metadata + per-item re-enrichment (M2.6) ----------
+
+/// Apply a fetched [`Meta`] onto an existing item: stored image, thumbnail,
+/// tags, and — only where the current title is a placeholder — title/version.
+/// Returns `(thumbnail, tags_added, title_updated)`.
+pub fn apply_meta(conn: &rusqlite::Connection, item_id: &str, site: &str, meta: &Meta) -> (bool, usize, bool) {
+    let mut thumb = false;
+    if let Some(bytes) = &meta.store_bytes {
+        media::put_full_image(conn, item_id, bytes);
+    }
+    if let Some(bytes) = &meta.thumb_bytes {
+        thumb = media::put_thumbnail(conn, item_id, bytes);
+    }
+    let mut tags = 0usize;
+    for t in meta.tags.iter().take(40) {
+        if db::add_item_tag(conn, item_id, t, db::TYPE_CONTENT).is_ok() {
+            tags += 1;
+        }
+    }
+    let mut title_updated = false;
+    if let Ok(Some(d)) = db::get_item(conn, item_id) {
+        let looks_like_url = d.title.contains("://")
+            || d.title.starts_with("www.")
+            || d.title == site
+            || d.title.starts_with(&format!("{site} "));
+        let placeholder = d.title.trim().is_empty() || looks_like_url;
+        let new_title = meta
+            .title
+            .as_deref()
+            .filter(|t| !t.trim().is_empty() && placeholder);
+        if new_title.is_some() || meta.version.is_some() {
+            let _ = db::update_item(
+                conn,
+                item_id,
+                new_title.unwrap_or(&d.title),
+                d.circle.as_deref(),
+                Status::from_str(&d.status).unwrap_or(Status::Seen),
+                meta.version.as_deref().or(d.version.as_deref()),
+                None,
+                &now_epoch(),
+            );
+            title_updated = true;
+        }
+    }
+    (thumb, tags, title_updated)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrichFailure {
+    pub url: String,
+    pub reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EnrichReport {
+    pub sources: usize,
+    pub enriched: usize,
+    pub stopped: bool,
+    pub notes: Vec<String>,
+    pub failures: Vec<EnrichFailure>,
+}
+
+/// "Re-fetch metadata" (#11): re-run every source of an item through the same
+/// classify → fetch_meta → apply_meta pipeline that clip/bookmark-enrich use.
+/// Local sources are re-read from disk (fixes covers that failed the first
+/// time); remote sources honour their site rate and cookie.
+pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> Result<EnrichReport, String> {
+    let sources = {
+        let inner = state.inner.lock().unwrap();
+        let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
+        let detail = db::get_item(conn, item_id).map_err(|e| e.to_string())?;
+        let Some(d) = detail else {
+            return Err("item not found".into());
+        };
+        d.sources
+            .into_iter()
+            .map(|s| (s.site, s.url))
+            .collect::<Vec<_>>()
+    };
+
+    let mut report = EnrichReport {
+        sources: sources.len(),
+        enriched: 0,
+        stopped: false,
+        notes: Vec::new(),
+        failures: Vec::new(),
+    };
+    if sources.is_empty() {
+        report.notes.push("this item has no sources to fetch from".into());
+        return Ok(report);
+    }
+
+    let client = reqwest::Client::builder()
+        .user_agent(UA)
+        .timeout(Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut last: Option<(String, std::time::Instant)> = None;
+    for (i, (site, url)) in sources.iter().enumerate() {
+        if job.cancelled() {
+            report.stopped = true;
+            break;
+        }
+        job.set_progress(i, sources.len(), url);
+
+        let Some(cls) = classify(url) else {
+            report.failures.push(EnrichFailure {
+                url: url.clone(),
+                reason: "no longer classifiable — remove or fix this source".into(),
+            });
+            continue;
+        };
+
+        // remote fetches are polite per site; local files need no delay
+        if !matches!(cls.mode, Mode::LocalFile) {
+            let rate = {
+                let inner = state.inner.lock().unwrap();
+                match inner.opened.as_ref() {
+                    Some(o) => db::site_rate_ms(&o.conn, site, default_rate_ms(site)),
+                    None => {
+                        report.stopped = true; // vault gone mid-run
+                        break;
+                    }
+                }
+            };
+            if let Some((prev_site, when)) = &last {
+                if prev_site == site {
+                    let need = Duration::from_millis(rate as u64);
+                    if when.elapsed() < need {
+                        tokio::time::sleep(need - when.elapsed()).await;
+                    }
+                }
+            }
+            last = Some((site.clone(), std::time::Instant::now()));
+        }
+
+        let cookie = {
+            let inner = state.inner.lock().unwrap();
+            inner.opened.as_ref().and_then(|o| db::site_cookie(&o.conn, site))
+        };
+        let ctx = FetchCtx { cookie: cookie.as_deref() };
+        let meta = match fetch_meta(&client, &cls, url, &ctx).await {
+            Ok(m) => m,
+            Err(e) => {
+                report.failures.push(EnrichFailure { url: url.clone(), reason: e });
+                continue;
+            }
+        };
+
+        let mut inner = state.inner.lock().unwrap();
+        let Some(opened) = inner.opened.as_mut() else {
+            report.stopped = true;
+            break;
+        };
+        let (thumb, tags, title_updated) = apply_meta(&opened.conn, item_id, site, &meta);
+        if thumb || tags > 0 || title_updated {
+            report.enriched += 1;
+        }
+        if let Some(note) = &meta.note {
+            report.notes.push(format!("{site}: {note}"));
+        }
+        if !thumb && tags == 0 && !title_updated && meta.note.is_none() {
+            report.failures.push(EnrichFailure {
+                url: url.clone(),
+                reason: "the source answered but carried nothing new".into(),
+            });
+        }
+    }
+    Ok(report)
+}
+
 // ---------- tests: parsing only (no network) ----------
 
 #[cfg(test)]
@@ -964,6 +1231,46 @@ mod tests {
         assert_eq!(s.mode, Mode::LocalFile);
         // non-media file urls stay unrecognized
         assert!(classify("file:///C:/Users/u/notes.txt").is_none());
+    }
+
+    /// Field report #1: `i.4cdn.org` used to become site "i" (first host label).
+    #[test]
+    fn cdn_hosts_fold_into_their_real_site() {
+        let s = classify("https://i.4cdn.org/h/1743761874698456.jpg").unwrap();
+        assert_eq!(s.site, "4chan", "4cdn must be 4chan, not 'i'");
+        assert_eq!(s.mode, Mode::DirectMedia);
+
+        // unknown hosts keep a sane name: registrable domain, not 'www'
+        let s = classify("https://cdn.example-media.net/x/img.webp").unwrap();
+        assert_eq!(s.site, "example-media.net");
+    }
+
+    /// Field report #7: `wimg.rule34.xxx//images/…jpeg?11353035` must route
+    /// through the rule34 API (numeric query = post id), not the CDN directly —
+    /// that is where the thumbnail 403 was coming from.
+    #[test]
+    fn booru_cdn_file_links_route_through_the_api() {
+        let s = classify("https://wimg.rule34.xxx//images/3868/7412ed67862b691cceef71b918028f66.jpeg?11353035")
+            .unwrap();
+        assert_eq!(s.site, "rule34");
+        assert_eq!(s.mode, Mode::BooruId);
+        assert_eq!(s.remote_id.as_deref(), Some("11353035"));
+
+        let s = classify("https://img3.gelbooru.com//images/2b/34/2b34cd.jpg?4765984").unwrap();
+        assert_eq!(s.site, "gelbooru");
+        assert_eq!(s.mode, Mode::BooruId);
+        assert_eq!(s.remote_id.as_deref(), Some("4765984"));
+
+        // hypnohub has no API wired → stays a direct file, but named correctly
+        let s = classify("https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940")
+            .unwrap();
+        assert_eq!(s.site, "hypnohub");
+        assert_eq!(s.mode, Mode::DirectMedia);
+
+        // e621's file CDN (md5 query, not a post page) must fetch directly
+        let s = classify("https://static1x1.e621.net/data/f1/2e/f12e32ab.jpg?a1b2c3").unwrap();
+        assert_eq!(s.site, "e621");
+        assert_eq!(s.mode, Mode::DirectMedia);
     }
 
     #[test]

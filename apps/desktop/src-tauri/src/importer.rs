@@ -383,6 +383,87 @@ pub fn import_image_files(
     })
 }
 
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VideoImportReport {
+    pub imported: usize,
+    pub skipped: usize,
+    pub stopped: bool,
+    pub titles: Vec<String>,
+}
+
+/// D13 + policy "videos stay links": picked video files become one media item
+/// each (kind=post), tracked by their `file:///` path — nothing is copied into
+/// the vault (vault-stored video is the M3 issue). Re-runs skip known paths.
+pub fn import_video_files(
+    state: &AppState,
+    paths: Vec<String>,
+    job: &JobHandle,
+) -> Result<VideoImportReport, String> {
+    if paths.is_empty() {
+        return Err("no files selected".into());
+    }
+    let mut report = VideoImportReport::default();
+    for (i, p) in paths.iter().enumerate() {
+        if job.cancelled() {
+            report.stopped = true;
+            break;
+        }
+        job.set_progress(i, paths.len(), p);
+        let path = Path::new(p);
+        if crate::ingest::media_ext(&path.to_string_lossy().replace('\\', "/")) != Some("video") {
+            report.skipped += 1;
+            continue;
+        }
+        let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+        let title = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().trim().to_string())
+            .filter(|t| !t.is_empty())
+            .unwrap_or_else(|| "Untitled".into());
+
+        let mut inner = state.inner.lock().unwrap();
+        let Some(opened) = inner.opened.as_mut() else {
+            report.stopped = true; // vault locked/nuke'd underneath us
+            break;
+        };
+        let conn = &mut opened.conn;
+        if db::source_exists(conn, "local", &url) {
+            report.skipped += 1;
+            continue;
+        }
+        let now = now_epoch();
+        let id = new_id("v");
+        let item = Item {
+            id: id.clone(),
+            kind: ItemKind::Post,
+            title: title.clone(),
+            original_title: None,
+            circle: None,
+            status: Status::Seen,
+            dnf: false,
+            rating: None,
+            notes: "video — tracked by path; the file itself is not stored in the vault".into(),
+            version: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        if db::insert_item(conn, &item).is_err() {
+            report.skipped += 1;
+            continue;
+        }
+        if !db::insert_source(conn, &id, "local", &url, None, Some(&now)).unwrap_or(false) {
+            let _ = db::delete_item(conn, &id);
+            report.skipped += 1;
+            continue;
+        }
+        report.imported += 1;
+        report.titles.push(title);
+    }
+    job.set_progress(paths.len(), paths.len(), "");
+    Ok(report)
+}
+
 // ---------- zip archives ----------
 
 /// Same fingerprinting as on-disk folders, but reading the archive's central

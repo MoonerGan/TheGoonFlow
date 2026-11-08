@@ -8,6 +8,7 @@
   import { activityTick, startWatching, stopWatching } from "../lib/activity.svelte";
   import ActivityBar from "../components/ActivityBar.svelte";
   import ClipDialog from "../components/ClipDialog.svelte";
+  import ReportBar from "../components/ReportBar.svelte";
   import SourcesPanel from "../components/SourcesPanel.svelte";
   import GamesView from "./GamesView.svelte";
   import MediaView from "./MediaView.svelte";
@@ -24,6 +25,14 @@
   let clipOpen = $state(false);
   let clipReport = $state<string | null>(null);
   let counts = $state<Record<string, number>>({});
+
+  // report strips must be dismissable and expire on their own (#4)
+  let reportTimer: ReturnType<typeof setTimeout> | undefined;
+  function showReport(text: string) {
+    clipReport = text;
+    clearTimeout(reportTimer);
+    reportTimer = setTimeout(() => (clipReport = null), 30_000);
+  }
 
   const gamesCount = $derived(counts["game"] ?? 0);
   const mediaCount = $derived((counts["gallery"] ?? 0) + (counts["post"] ?? 0));
@@ -84,7 +93,7 @@
   <ActivityBar />
 
   {#if clipReport}
-    <div class="report">{clipReport}</div>
+    <ReportBar text={clipReport} onDismiss={() => (clipReport = null)} />
   {/if}
 
   {#if tab === "games"}

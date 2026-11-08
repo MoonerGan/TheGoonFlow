@@ -663,5 +663,106 @@ textarea:focus {
 }
 
 .sources-page {
+  /* full-width pane so the scrollbar hugs the window edge, not mid-screen;
+     the rows themselves are capped by .site-row's own layout */
+  max-width: none;
+}
+
+.sources-page > * {
   max-width: 980px;
+}
+
+/* dark scrollbars — the default white slider on a #0f1115 app is jarring (#3) */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3a4150 transparent;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3a4150;
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4a5364;
+}
+
+/* search input in view toolbars (#8) */
+.search-box {
+  width: 220px;
+  padding: 0.45rem 0.7rem;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #0b0d11;
+  color: var(--text);
+}
+
+.search-box:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* dismissable report strips (#4) */
+.report {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.report-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.report-x {
+  border: none;
+  background: none;
+  color: inherit;
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0.1rem 0.35rem;
+}
+
+.report-x:hover {
+  color: var(--text);
+}
+
+/* grid selection mode (#12) */
+.tile.selected {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.tile-check {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  width: 1.35rem;
+  height: 1.35rem;
+  display: grid;
+  place-items: center;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid var(--muted);
+  color: var(--accent);
+  font-size: 0.85rem;
+}
+
+.tile {
+  position: relative;
+}
+
+/* in-app confirm dialog (#6) */
+.confirm-card {
+  width: min(420px, calc(100vw - 2rem));
 }

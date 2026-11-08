@@ -74,29 +74,38 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v2, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v3, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
   first-class column. **Completion is NOT a status** — it's a `user_status`
   tag (D9): exactly one per item, e.g. `complete` (green, priority 100).
+  Media items never get it (D16 — enforced in the editor UI).
 - `sources` — many→one to items; `UNIQUE(site, url)`; `site='local'` +
-  `file:///…` url for imported games **and local media bookmarks**; raw
-  snapshot column reserved for M3 selector recovery. Because of that unique
-  key, `merge_items` moves sources with `UPDATE OR IGNORE` (a copy would
-  collide with the keeper's own rows).
+  `file:///…` url for imported games, **local media bookmarks and `+ Video`
+  entries**; raw snapshot column reserved for M3 selector recovery. Because of
+  that unique key, `merge_items` moves sources with `UPDATE OR IGNORE` (a copy
+  would collide with the keeper's own rows). `delete_source(item_id, row_id)`
+  detaches one link from the item editor.
 - `tags`/`tag_types`/`item_tags` — types 1 `user_status`, 2 `site_flag`,
   3 `content`. `add_item_tag` / `remove_item_tag` / `top_tags` are the M1
   read+write paths; `list_items(…, tag)` filters on them.
 - `media` — thumbnails (`kind='thumb'`, one per item, replaced on update) and
   originals (`kind='full'`), content-hash deduped BLOBs. Keeping them in the
-  DB keeps the wipe story to "shred one directory".
+  DB keeps the wipe story to "shred one directory". Media dupe suggestions
+  (`pairing_suggestions(conn, Some("media"))`) pair *different items sharing
+  one stored hash* — titles are useless for `1743761874698456.jpg`.
 - `site_settings` (v2) — per site: `enabled`, `cookie`, `rate_ms`. Read with
   `site_enabled(conn, site, default)` — the default differs per site (repack
   mirrors ship **off**, D8), so never assume `true`.
 - `updates` (v2) — the change feed: `record_update` + `list_updates`;
   `update_targets` picks the game rows worth re-visiting (dlsite/f95 sources,
   non-DNF statuses).
+- **Migrations (v3)**: `init_schema` seeds at v1 then runs ordered, idempotent
+  `if v < N` steps. v3 renames hosts-labeled sites from early field reports
+  (`i` → `4chan`, `wimg` → `rule34`, `booru` → `allthefallen`). Any new schema
+  change is a new numbered step — never edit the `CREATE TABLE` batch for
+  existing columns.
 
 ## 4. Invariants (do not break without updating PLAN.md)
 
@@ -138,6 +147,13 @@ tools/
    exist only in the Games view; site filters only in the Media view; the
    backend helpers take `kind` (`list_items(…, kind, site)`, `top_tags(…, kind)`,
    `counts_by_site(…)`) so each view's sidebar counts are always scoped.
+10. **Site names come from `HOST_SUFFIXES`, never from a host label.** Early
+    field reports got site "i" (from `i.4cdn.org`) and "wimg". Unknown hosts
+    fall back to the *registrable domain*, and booru-CDN file links carrying a
+    numeric query id (`?11353035`) route through the site API (`Mode::BooruId`)
+    — pulling bytes from a CDN with the CDN as referer is what hotlink
+    protection kills. `JobInfo.finished_at` exists so the ActivityBar can
+    expire finished rows; don't remove it.
 
 ## 5. Testing
 

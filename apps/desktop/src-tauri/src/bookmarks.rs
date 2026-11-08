@@ -259,15 +259,32 @@ pub async fn import_bookmarks(
 
     // Phase 2 — optional online enrichment, politely rate-limited per site.
     if !pending.is_empty() && !report.stopped {
+        // Round-robin across sites: with e-hentai at ~10.5 s/request a strict
+        // file order stalls the whole queue on one slow lane. Interleaving
+        // keeps every site visibly progressing while each still honours its
+        // own delay.
+        let mut queues: BTreeMap<String, std::collections::VecDeque<Pending>> = BTreeMap::new();
+        for p in pending {
+            queues.entry(p.site.clone()).or_default().push_back(p);
+        }
+        let mut ordered: Vec<Pending> = Vec::new();
+        while queues.values().any(|q| !q.is_empty()) {
+            for q in queues.values_mut() {
+                if let Some(p) = q.pop_front() {
+                    ordered.push(p);
+                }
+            }
+        }
+
         let client = reqwest::Client::builder()
             .user_agent(ingest::UA)
             .timeout(Duration::from_secs(15))
             .build()
             .map_err(|e| e.to_string())?;
-        let total = bookmarks.len() + pending.len();
+        let total = bookmarks.len() + ordered.len();
         let mut done = bookmarks.len();
         let mut last: Option<(String, std::time::Instant)> = None;
-        for p in pending {
+        for p in ordered {
             if job.cancelled() {
                 report.stopped = true;
                 break;
@@ -315,47 +332,12 @@ pub async fn import_bookmarks(
             };
             let conn = &mut opened.conn;
 
-            let mut enriched = false;
-            if let Some(bytes) = &meta.store_bytes {
-                media::put_full_image(conn, &p.item_id, bytes);
-                enriched = true;
+            let (thumb, tags, _title_updated) = ingest::apply_meta(conn, &p.item_id, &p.site, &meta);
+            if thumb {
+                report.thumbnailed += 1;
             }
-            if let Some(bytes) = &meta.thumb_bytes {
-                if media::put_thumbnail(conn, &p.item_id, bytes) {
-                    report.thumbnailed += 1;
-                    enriched = true;
-                }
-            }
-            for t in meta.tags.iter().take(40) {
-                if db::add_item_tag(conn, &p.item_id, t, db::TYPE_CONTENT).is_ok() {
-                    report.tags_added += 1;
-                    enriched = true;
-                }
-            }
-            // Enriched title/version only overwrite obvious placeholders.
-            if let Some(detail) = db::get_item(conn, &p.item_id).map_err(|e| e.to_string())? {
-                let placeholder = detail.title.is_empty()
-                    || looks_like_url(&detail.title)
-                    || detail.title == p.site
-                    || detail.title.starts_with(&format!("{} ", p.site));
-                let new_title = meta
-                    .title
-                    .as_deref()
-                    .filter(|t| !t.trim().is_empty() && placeholder);
-                if new_title.is_some() || meta.version.is_some() {
-                    let _ = db::update_item(
-                        conn,
-                        &p.item_id,
-                        new_title.unwrap_or(&detail.title),
-                        detail.circle.as_deref(),
-                        Status::from_str(&detail.status).unwrap_or(Status::Seen),
-                        meta.version.as_deref().or(detail.version.as_deref()),
-                        None,
-                        &now_epoch(),
-                    );
-                }
-            }
-            if !enriched {
+            report.tags_added += tags;
+            if !thumb && tags == 0 && meta.title.is_none() && meta.version.is_none() {
                 report.fetch_failures += 1;
                 if report.failures.len() < MAX_FAILURE_DETAILS {
                     report.failures.push(FailureDetail {

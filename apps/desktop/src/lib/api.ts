@@ -108,6 +108,21 @@ export type ImageImportReport = {
   stopped: boolean;
 };
 
+export type VideoImportReport = {
+  imported: number;
+  skipped: number;
+  stopped: boolean;
+  titles: string[];
+};
+
+export type EnrichReport = {
+  sources: number;
+  enriched: number;
+  stopped: boolean;
+  notes: string[];
+  failures: { url: string; reason: string }[];
+};
+
 export type JobInfo = {
   id: number;
   kind: string;
@@ -119,6 +134,7 @@ export type JobInfo = {
   finished: boolean;
   cancelled: boolean;
   startedAt: number;
+  finishedAt: number;
 };
 
 export type FailureDetail = { url: string; reason: string };
@@ -222,6 +238,7 @@ export const updateItem = (
   version: string | null,
 ) => invoke<void>("update_item", { id, title, circle, status, version });
 export const deleteItem = (id: string) => invoke<void>("delete_item", { id });
+export const deleteItems = (ids: string[]) => invoke<number>("delete_items", { ids });
 export const setComplete = (id: string, complete: boolean) =>
   invoke<void>("set_complete", { id, complete });
 export const importGameFolder = (dir: string) =>
@@ -232,6 +249,8 @@ export const importGameZip = (zipPath: string) =>
   invoke<GameImportReport>("import_game_zip", { zipPath });
 export const importImageFiles = (paths: string[]) =>
   invoke<ImageImportReport>("import_image_files", { paths });
+export const importVideoFiles = (paths: string[]) =>
+  invoke<VideoImportReport>("import_video_files", { paths });
 export const importBookmarks = (path: string, fetchOnline: boolean) =>
   invoke<BookmarkReport>("import_bookmarks", { path, fetchOnline });
 
@@ -262,10 +281,18 @@ export const setSiteSetting = (
   });
 export const checkUpdates = () => invoke<UpdateReport>("check_updates");
 export const listUpdates = (limit = 100) => invoke<UpdateRow[]>("list_updates", { limit });
-export const pairingSuggestions = () =>
-  invoke<PairSuggestion[]>("pairing_suggestions");
+export const pairingSuggestions = (kind?: "game" | "media") =>
+  invoke<PairSuggestion[]>("pairing_suggestions", { kind: kind ?? null });
 export const mergeItems = (keepId: string, dropId: string) =>
   invoke<void>("merge_items", { keepId, dropId });
+
+// ---------- per-item source + re-enrichment (M2.6) ----------
+export const reEnrichItem = (itemId: string) =>
+  invoke<EnrichReport>("re_enrich_item", { itemId });
+export const addSource = (itemId: string, url: string) =>
+  invoke<string>("add_source", { itemId, url });
+export const removeSource = (itemId: string, sourceId: number) =>
+  invoke<void>("remove_source", { itemId, sourceId });
 
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");

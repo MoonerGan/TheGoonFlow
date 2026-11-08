@@ -1,12 +1,38 @@
 <script lang="ts">
   // Live activity strip: what is running right now, which item it is on, and a
-  // Stop button — no more frozen toolbar while something imports in the background.
+  // Stop button — no more frozen toolbar while something imports in the
+  // background. Finished rows linger only briefly (issue #5: they used to pile up).
+  import { onDestroy } from "svelte";
   import { activity, jobLabel, stopJob } from "../lib/activity.svelte";
+
+  const SHOW_FINISHED_MS = 12_000;
+
+  let now = $state(Date.now());
+  let timer: ReturnType<typeof setInterval> | null = null;
 
   const live = $derived(activity.jobs.filter((j) => !j.finished));
   const recent = $derived(
-    activity.jobs.filter((j) => j.finished).slice(-3).reverse(),
+    activity.jobs
+      .filter((j) => j.finished && now - j.finishedAt * 1000 < SHOW_FINISHED_MS)
+      .slice(-3)
+      .reverse(),
   );
+
+  // only tick while there is something to expire
+  $effect(() => {
+    if (recent.length === 0) {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+      return;
+    }
+    if (timer === null) timer = setInterval(() => (now = Date.now()), 2000);
+  });
+
+  onDestroy(() => {
+    if (timer !== null) clearInterval(timer);
+  });
 </script>
 
 {#if live.length > 0 || recent.length > 0}

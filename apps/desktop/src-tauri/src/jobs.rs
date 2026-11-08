@@ -26,6 +26,8 @@ pub struct JobInfo {
     pub finished: bool,
     pub cancelled: bool,
     pub started_at: u64,
+    /// set when the job finishes — the UI fades finished rows after a while
+    pub finished_at: u64,
 }
 
 struct Entry {
@@ -68,6 +70,7 @@ impl JobHandle {
     pub fn finish(&self, note: &str) {
         self.jobs.patch(self.id, |info| {
             info.finished = true;
+            info.finished_at = now_secs();
             info.current = String::new();
             info.note = note.to_string();
         });
@@ -107,6 +110,7 @@ impl Jobs {
                 finished: false,
                 cancelled: false,
                 started_at: now_secs(),
+                finished_at: 0,
             },
             cancel: cancel.clone(),
         });

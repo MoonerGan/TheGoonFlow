@@ -98,7 +98,11 @@ export function jobLabel(j: JobInfo): string {
         ? "games"
         : j.kind === "images"
           ? "images"
-          : "updates";
+          : j.kind === "videos"
+            ? "videos"
+            : j.kind === "enrich"
+              ? "re-fetching"
+              : "updates";
   if (j.finished) return `${kind}: ${j.note || "done"}`;
   if (j.cancelled) return `${kind}: stopping…`;
   if (j.total > 0) return `${kind} ${j.done}/${j.total}`;

@@ -494,10 +494,11 @@ fn list_updates(
 #[tauri::command]
 fn pairing_suggestions(
     state: tauri::State<'_, AppState>,
+    kind: Option<String>,
 ) -> Result<Vec<goon_core::db::PairSuggestion>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::pairing_suggestions(&opened.conn).map_err(err)
+    goon_core::db::pairing_suggestions(&opened.conn, kind.as_deref()).map_err(err)
 }
 
 #[tauri::command]
@@ -620,6 +621,112 @@ async fn import_bookmarks(
     report
 }
 
+#[tauri::command]
+async fn import_video_files(
+    state: tauri::State<'_, AppState>,
+    paths: Vec<String>,
+) -> Result<importer::VideoImportReport, String> {
+    let job = state
+        .jobs
+        .start("videos", &format!("{} videos", paths.len()))
+        .ok_or("a video import is already running — see the activity strip")?;
+    let report = importer::import_video_files(&state, paths, &job);
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} tracked, {} skipped{}",
+            r.imported,
+            r.skipped,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
+}
+
+// ---------- per-item re-enrichment (M2.6) ----------
+
+#[tauri::command]
+async fn re_enrich_item(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<ingest::EnrichReport, String> {
+    let job = state
+        .jobs
+        .start("enrich", &item_id)
+        .ok_or("an enrichment is already running — see the activity strip")?;
+    job.set_note("re-fetching every source");
+    let report = ingest::reenrich_item(&state, &item_id, &job).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} of {} sources gave something{}",
+            r.enriched,
+            r.sources,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
+}
+
+#[tauri::command]
+fn add_source(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    url: String,
+) -> Result<String, String> {
+    let cls = ingest::classify(&url).ok_or("not a recognised source link")?;
+    {
+        // honour the Sources toggles before linking (mirrors default off)
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        let default_on = !ingest::is_mirror_site(&cls.site);
+        if !goon_core::db::site_enabled(&opened.conn, &cls.site, default_on) {
+            return Err(format!("{} is switched off under Sources", cls.site));
+        }
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    if goon_core::db::source_exists(&opened.conn, &cls.site, &url) {
+        return Err("that exact link is already tracked somewhere".into());
+    }
+    let created =
+        goon_core::db::insert_source(&opened.conn, &item_id, &cls.site, &url, cls.remote_id.as_deref(), None)
+            .map_err(err)?;
+    if !created {
+        return Err("already tracked".into());
+    }
+    Ok(cls.site)
+}
+
+#[tauri::command]
+fn remove_source(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    source_id: i64,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    goon_core::db::delete_source(&opened.conn, &item_id, source_id)
+        .map(|_| ())
+        .map_err(err)
+}
+
+#[tauri::command]
+fn delete_items(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<usize, String> {
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    let mut n = 0;
+    for id in &ids {
+        if goon_core::db::delete_item(&opened.conn, id).is_ok() {
+            n += 1;
+        }
+    }
+    Ok(n)
+}
+
 // ---------- activity (jobs) ----------
 
 #[tauri::command]
@@ -704,6 +811,11 @@ pub fn run() {
             import_game_zip,
             import_image_files,
             import_bookmarks,
+            import_video_files,
+            re_enrich_item,
+            add_source,
+            remove_source,
+            delete_items,
             list_jobs,
             cancel_job
         ])

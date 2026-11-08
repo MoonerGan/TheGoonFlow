@@ -44,5 +44,5 @@
 {:else if !status.unlocked}
   <UnlockView {status} {refresh} />
 {:else}
-  <LibraryView {status} {refresh} onLock={doLock} />
+  <LibraryView {status} onLock={doLock} />
 {/if}
