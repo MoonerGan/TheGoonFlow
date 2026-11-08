@@ -372,14 +372,33 @@ app reaches the content sites (and through your proxy if you set one).
   rate box starts at that site's own default (e-hentai's ~10 s, boorus' 1–2 s),
   and enabling a site for the first time keeps that default instead of resetting
   it to one shared number.
-  - **Getting a cookie** (f95 threads, E-hentai/Exhentai): log in in your
-    browser, press **F12** → **Network** → reload → click the first request →
-    under *Request Headers* copy everything after `Cookie:` (one long line, no
-    quotes) and paste it into that site's box. The app keeps it inside the
-    encrypted vault, never in a plain config file, and it never reads your
-    browser's own cookie store — this is a copy you chose to hand over. When a
-    session goes stale the fetch says so out loud (e.g. *"f95 wants a login —
-    set its cookie under Sources"*) rather than importing nothing quietly.
+  - **Getting a cookie** (f95 threads, E-hentai/Exhentai). Only these need one —
+    DLsite and every booru work without it, so leave those boxes empty.
+    1. **Log in on the site first.** A cookie copied while you were logged out
+       contains nothing useful and behaves like no cookie at all.
+    2. On that site press **F12** → **Network** tab → reload the page.
+    3. Click the **first entry** in the list (the page itself, type *document*).
+    4. Under **Request Headers**, find the line starting `cookie:` and copy
+       **everything after the colon** — one long line, keep the `=` and `;`,
+       don't include the word `cookie:`.
+    5. Sources → that site → Cookie → Save. The app sends exactly what you pasted
+       as the `Cookie` header, so one line is what it wants.
+
+    How to tell the paste is real: an f95 cookie must contain **`xf_session`** and
+    **`xf_user`** (usually also `xf_csrf` and Cloudflare's `cf_clearance`); an
+    e-hentai/exhentai cookie must contain **`ipb_member_id`** and
+    **`ipb_pass_hash`** (Exhentai additionally needs an account that is allowed
+    there). No `xf_session` = you were not logged in at step 1.
+
+    What it buys you on f95: without it the thread page renders a *register to
+    view* wall with **no** screenshots, so a clipped f95 link gives you a title
+    only; with it the thread's preview art becomes reachable. The app keeps the
+    cookie inside the encrypted vault, never in a plain config file, and it never
+    reads your browser's own cookie store — this is a copy you chose to hand
+    over. Cookies expire (especially `cf_clearance`); when a session goes stale
+    the fetch says so out loud (e.g. *"f95 wants a login — set its cookie under
+    Sources"*) rather than importing nothing quietly. A one-click *"use this
+    browser's session"* flow instead of this copy/paste is planned (#38).
 - **Proxy** (top of the Sources tab): route *every* outbound request — clip
   fetches, enrich, update checks, match search, video downloads — through one
   proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.

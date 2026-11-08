@@ -441,6 +441,51 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   `panic_status`/`panic_info`, and shown as a red *panic key NOT armed* pill +
   explainer strip in the library top bar and in Sources. Chosen over a tray
   icon (permanent chrome fights PLAN §9). DEVELOPMENT invariant 22.
+- **Field reports round 3 (#42–#50) —  parked in Backlog at the user's request; diagnosis done, no code yet.**
+  Every issue carries live measurements rather than guesses:
+  - **#42** fullscreen viewer should auto-hide its toolbar and use the whole screen.
+  - **#43** split the item dialog into *View* (short, what was configured) and
+    *Edit* (everything, with Sources / Launch / Mods / Video collapsed).
+  - **#44** viewer: preload a window of neighbours + an in-memory byte cache
+    (cleared on Lock/nuke like everything else); today only the next item is
+    warmed and the result is thrown away, so going back is as slow as forward.
+  - **#45** the editor scrolls sideways (four nowrap buttons) and the
+    `position: sticky` action row floats over the body —  the #32 fix needs a real
+    header/body/footer grid.
+  - **#46** f95 and e-hentai artwork is **never fetched**: f95 keeps it lazy
+    (`data-src` on `attachments.f95zone.to`) and behind a login (guest page has
+    zero post images, cookie page has 26), `og:image` there is the site logo;
+    e-hentai `/s/<token>/<gid>-<n>` is a 4.7 KB JS shell with no art at all, so
+    the gid already in the URL must be folded into `/g/<gid>/`.
+  - **#47** duplicate suggestions are exact equality of `pairing_key(title)`, so
+    repack placeholder titles (`mmnz-game`, read from `www/data/System.json`
+    `gameTitle`) collapse dozens of unrelated games into one bucket →  N·(N-1)/2 rows.
+  - **#48** MTool **does** accept the game —  dropping the exe on `MTool.exe`
+    opens it, which is argv. #33's "no CLI target" conclusion was a shallow probe;
+    re-probe properly (sandboxed copy of the tool) and then pass the exe.
+  - **#49** batch re-enrich shows `0/1` for the whole run because
+    `ingest::reenrich_item` calls `set_progress` on the *parent* `JobHandle`
+    (`jobs.rs::set_progress` overwrites unconditionally) – one writer per job, or explicit
+    `job.scope(i, n)`.
+  - **#50** rule34's CDN answers **403 to our non-browser User-Agent** (browser UA
+    →  200, referer irrelevant), the CDN URL carries the post id in the query
+    (`…<md5>.png?8886918`), rule34's `dapi` is CAPTCHA-gated, and
+    `attachments.f95zone.to/….jpg` serves `image/avif` – sniff, don't trust extensions.
+- **#38 (extension hands site cookies to the vault) →  Ready.** Hand-pasting a cookie is
+  the app's biggest usability wall. Proven that a hand-pasted f95 cookie *works*
+  (thread page 290 KB →  449 KB, login wall gone, 20 attachment images) – the
+  failures were our parsers (#46), not the user's paste. Needs the
+  "use this browser's session" flow **plus** save-time validation (`no xf_session
+  in what you pasted – log in first`), and honest staleness.
+- **Hygiene pass (same session).** Deleted 125 stale `tools\*.log` files (40 MB)
+  and the session-bearing page dumps the cookie probes wrote to TEMP; no
+  GoonFlow/WebView2 processes left holding the exe; tree clean and pushed.
+  `cargo fmt --all -- --check` is now clean (a fmt-only commit). Scan of all 92
+  tracked text files: no mojibake, BOM, NUL or stray vault material (`flow.cfg`,
+  `chrome.cfg`, `*.db`, `tools/*.log` are gitignored), no `TODO`/`FIXME`/`dbg!`/
+  `console.log(` in shipped code. Checks re-run after fmt: 86 Rust tests green
+  (2 ignored), svelte-check 0/0, `npm run build` clean, clippy 0 errors / 25
+  cosmetic warnings (parked as the clippy chore issue).
 - **Release artifact for this batch: built and smoked.**
   `target\release\GoonFlow.exe` (20.9 MB, frontend embedded) was rebuilt twice:
   once at git `bfccbb4` (the #28–#40 batch, log `tools\cargo-rel-m8.log`) and

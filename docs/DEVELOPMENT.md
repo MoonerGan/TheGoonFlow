@@ -375,12 +375,45 @@ manually.
   Buttons consult `jobState(kind)`: only a second job **of the same kind** is
   disabled — a running bookmark import must never grey out Lock, clip, or the
   game importers.
+  **One writer per job.** `JobHandle::set_progress` overwrites `done`/`total`
+  unconditionally, so a nested worker that reuses the parent's handle destroys the
+  parent's counts (#49: batch re-enrich showed `0/1` forever because
+  `ingest::reenrich_item` set progress per *source*). Either the owner is the only
+  caller, or nesting becomes explicit (`job.scope(i, n)` → a sub-view the UI can
+  render as `item 12/85 · source 1/3`).
 - **Thumbnails**: always through `goon_core::media::put_thumbnail` (hash,
   dedup, size cap in one place).
+- **Probe the site, then write the parser.** Every ingest bug so far came from
+  assuming a page shape. Current measurements (2026-11, browser UA unless
+  stated; `tools/` scripts + the issue bodies carry the transcripts):
+  - `wimg.rule34.xxx` (and rule34's CDN generally) answers **403 to any
+    non-browser User-Agent** — `TheGoonFlow/0.1 (…)` included. A browser UA gets
+    the file; the `Referer` makes no difference there. See #50.
+  - rule34's `dapi` (`?page=dapi&s=post…&id=`) answers a Cloudflare **CAPTCHA**
+    page from a normal machine, so the md5/post lookups (#39) cannot depend on
+    it — use the HTML post page and keep verifying md5+filesize (invariant 21).
+  - rule34 CDN file URLs carry the **post id in the query**
+    (`…/7783/<md5>.png?8886918`) — free identity to verify against.
+  - **f95zone without a login cookie** returns the thread with a "register to …"
+    wall and **zero** post images. With a saved cookie the page grows
+    (~290 KB → ~449 KB) and the art appears, **lazily**: `<img
+    class="bbImage lazyload" src="data:image/svg…" data-src=
+    "https://attachments.f95zone.to/…">` — 20–26 of them. Never use `og:image`
+    there, it is the site logo. See #46.
+  - Those attachment URLs answer `content-type: image/avif` even when the path
+    ends `.jpg` → sniff the bytes, don't trust the extension.
+  - **e-hentai `/s/<token>/<gid>-<n>`** (slideshow page) is a ~4.7 KB JS shell:
+    it contains no `gdtm` grid, no `og:image`, no `<img id="image">` — the art is
+    injected by script. The gallery page `/g/<gid>/` is the one with the
+    thumbnails, and the gid is already in the URL. See #46.
+  - Cookies are stored and replayed verbatim as the `Cookie` header, and that
+    works: a hand-pasted f95 cookie (`xf_session`, `xf_user`, `xf_csrf`,
+    `cf_clearance`) unlocked the page above. When a source yields nothing, check
+    the *parser* before blaming the cookie (#38, #46).
 
 ## 7. Release-ish notes for contributors
 
-- MIT licensed (PLAN D5). 
+- MIT licensed (PLAN D5).
 - Keep `cargo test --workspace` green and `npm run build` warning-free
   (svelte a11y warnings count).
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).

@@ -441,13 +441,28 @@
 <details class="details">
   <summary>How to copy the <code>Cookie</code> header value</summary>
   <ol class="hint steps">
-    <li>Open the site in your browser and make sure you are logged in there.</li>
+    <li>Open the site in your browser and make sure you are logged in there. A
+      cookie copied while you were logged out is worthless.</li>
     <li>Press F12 → the <em>Network</em> tab → reload the page → click the first request (the page itself).</li>
     <li>Under <em>Request Headers</em> find the line starting <code>Cookie:</code> and copy <strong>everything after
-      the colon</strong> — one long single line, no quotes.</li>
+      the colon</strong> — one long single line, no quotes. Keep the <code>=</code> and <code>;</code>, and leave out
+      the word <code>Cookie:</code> itself.</li>
     <li>Paste it into that site's cookie box above and hit <em>Set</em>. It is stored inside the encrypted vault,
-      never in a config file next to the exe.</li>
+      never in a config file next to the exe. The app sends exactly what you pasted as the <code>Cookie</code>
+      header.</li>
   </ol>
+  <p class="hint">
+    <strong>Only f95, E-hentai and Exhentai need one.</strong> DLsite and every imageboard work without it, so
+    leave those boxes empty.
+  </p>
+  <p class="hint">
+    How to tell the paste is real: an <strong>f95</strong> cookie must contain <code>xf_session</code> and
+    <code>xf_user</code> (usually also <code>xf_csrf</code> and Cloudflare's <code>cf_clearance</code>); an
+    <strong>E-hentai / Exhentai</strong> cookie must contain <code>ipb_member_id</code> and
+    <code>ipb_pass_hash</code>. No <code>xf_session</code> means step 1 didn't happen. On f95 the cookie is what
+    makes the thread's screenshots visible at all — without it the page is a "register to view" wall, so a clipped
+    f95 link gives you a title and nothing else.
+  </p>
   <p class="hint">
     The cookie is just a saved copy of what your browser already sends — the app never reads your browser's own
     cookie store. If a fetch starts failing after you log out or the site rotates the session, re-copy it; f95 says
