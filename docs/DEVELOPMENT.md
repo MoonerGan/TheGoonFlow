@@ -251,6 +251,12 @@ tools/
     prove the tap, hold and stale-watcher paths live against the release exe.
     The drill (`run_nuke_drill`) goes through `goon_vault::nuke` — the real
     path, not a mock — so a green drill means the real nuke works.
+19. **Decoy chrome is exe-local plaintext that never holds a secret
+    (#27).** `chrome.cfg` beside the exe = one sanitized line (control chars
+    stripped, ≤64, re-checked on every read — `sanitize_chrome`). It may be
+    read while locked (dressing the *locked* window is the point), so it must
+    never gain anything but a display title. Renaming the exe/folder must
+    keep working: everything resolves relative to `exe_dir`.
 
 ## 5. Testing
 

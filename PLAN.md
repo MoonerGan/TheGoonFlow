@@ -372,6 +372,17 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   of #23;
   the issue waits on your manual hotkey pass (tap, hold-on-drill-notes,
   custom key, scrub-on-lock) before Done.
+- **#27 started (deniability inc1: decoy chrome)** — renaming the exe was
+  already fine (verified live: copy as `FlowNotes.exe` → full handshake);
+  now a plaintext `chrome.cfg` (one sanitized line, ≤64 chars) beside the
+  exe overrides the OS window title at startup and live via
+  `get_chrome`/`set_chrome` (work locked or unlocked — the file holds
+  nothing sensitive), and the in-app brand follows the decoy after the
+  next lock. Sources panel gained the *Decoy title* block; USER-GUIDE §2
+  spells out what is dressed (title, brand, renamed exe, brandless locked
+  screens) and what is not (file-properties metadata → needs custom
+  resources rebuild; vault folder naming). New sanitize/round-trip test
+  (81 green).
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built
   after #23, schema v7) runs everything below; existing `C:\GoonFlow`
   vaults migrate v3→v7 on unlock (idempotent, in place). Manual checklist

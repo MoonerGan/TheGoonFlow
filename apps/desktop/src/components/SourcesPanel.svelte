@@ -5,6 +5,7 @@
   import {
     getProxy,
     getPanicInfo,
+    getChrome,
     getStatus,
     getSiteSettings,
     knownSites,
@@ -12,12 +13,14 @@
     getScrubSettings,
     scrubNow,
     setPanicHotkey,
+    setChrome,
     setProxy,
     setScrubOnLock,
     setSiteSetting,
     siteStats,
     type CompanionStatus,
     type PanicInfo,
+    type ChromeInfo,
     type SiteCount,
     type SiteInfo,
     type SiteSetting,
@@ -49,6 +52,11 @@
   let scrubResult = $state<string | null>(null);
   let scrubbing = $state(false);
 
+  // decoy chrome / deniability (#27)
+  let chrome = $state<ChromeInfo | null>(null);
+  let chromeDraft = $state("");
+  let chromeMsg = $state<string | null>(null);
+
   onMount(async () => {
     try {
       siteInfos = await knownSites();
@@ -78,7 +86,36 @@
     } catch {
       // advisory
     }
+    try {
+      chrome = await getChrome();
+    } catch {
+      // advisory
+    }
   });
+
+  async function saveChrome() {
+    chromeMsg = null;
+    try {
+      const t = chromeDraft.trim();
+      chrome = await setChrome(t || null);
+      chromeMsg = chrome.decoy
+        ? `window title now "${chrome.decoy}" (in-app brand changes after the next lock)`
+        : "decoy cleared — back to the neutral Flow title";
+      chromeDraft = "";
+    } catch (e) {
+      chromeMsg = String(e);
+    }
+  }
+
+  async function clearChrome() {
+    chromeMsg = null;
+    try {
+      chrome = await setChrome(null);
+      chromeMsg = "decoy cleared — back to the neutral Flow title";
+    } catch (e) {
+      chromeMsg = String(e);
+    }
+  }
 
   async function toggleScrubOnLock() {
     try {
@@ -255,6 +292,33 @@
 </div>
 {#if scrubResult}
   <p class="report-inline">{scrubResult}</p>
+{/if}
+
+<div class="field-label" style="margin-top:1.2rem">
+  Decoy title <span class="hint">— deniability: rename the exe in Explorer freely; this dresses the window too</span>
+</div>
+<p class="hint">
+  Renaming the exe/folder already works (everything resolves next to the exe). The locked screens show no branding
+  and the window title is a neutral <em>Flow</em> — a decoy replaces even that. Stored as one plain line in
+  <code>chrome.cfg</code> beside the exe; it changes the taskbar title immediately and the in-app brand after the
+  next lock. (Explorer's file <em>properties</em> still show the original internal name — that one needs a rebuild
+  to change.)
+</p>
+<div class="row">
+  <input
+    type="text"
+    class="proxy-input"
+    placeholder={chrome?.decoy ?? "boring title, e.g. Flow Notes (empty = clear)"}
+    bind:value={chromeDraft}
+    onkeydown={(e) => e.key === "Enter" && saveChrome()}
+  />
+  <button onclick={saveChrome}>Set</button>
+  {#if chrome?.decoy}
+    <button class="ghost" onclick={() => { chromeDraft = ""; void clearChrome(); }}>Clear</button>
+  {/if}
+</div>
+{#if chromeMsg}
+  <p class="report-inline">{chromeMsg}</p>
 {/if}
 
 {#if counts.length > 0}

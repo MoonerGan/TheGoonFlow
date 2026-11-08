@@ -67,6 +67,22 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
   you Lock or hit the panic key — so "locked" really means cleared.
 - Forgotten passphrase ≠ lost content forever only via backups: without it the
   vault is a brick. That's the point.
+- **Making it boring (deniability):** the app is built to sit on a drive
+  without announcing itself —
+  - **Rename the exe and its folder freely** (`FlowNotes.exe`, anything).
+    Everything resolves relative to the exe; a renamed copy was verified to
+    work fully. The pointer file (`flow.cfg`) and vault never care.
+  - **Decoy title** (Sources → *Decoy title*): store one boring line
+    ("Flow Notes", "Sync Client"…) and the window/taskbar title changes from
+    the neutral *Flow* to it, on every future start as well. It lives in a
+    plaintext `chrome.cfg` beside the exe — safe to read, it contains nothing
+    but the decoy itself. Once set, the in-app brand follows the decoy too
+    (the forgot-to-lock case).
+  - Locked and setup screens already show no branding.
+  - Honest limits: Explorer's *file properties* still reveal the internal
+    build name until you rebuild with custom resources; what you name the
+    *vault folder* and how you mount it is yours. Deniability covers casual
+    looks, not a forensic examiner with your unlocked machine.
 
 ## 3. Getting things in
 

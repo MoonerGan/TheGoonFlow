@@ -312,6 +312,89 @@ fn set_scrub_on_lock(
     Ok(ScrubSettings { scrub_on_lock: on })
 }
 
+// ---------- deniability / decoy chrome (#27) ----------
+//
+// A plaintext `chrome.cfg` beside the exe may hold one line: a boring window
+// title ("Flow Notes", "Sync Client", ...). It contains nothing sensitive —
+// reading it when locked is fine — and covers the case where a renamed exe
+// still shows a telltale title in the taskbar or an accidentally-unlocked
+// window still shows the brand. Renaming the exe/folder itself already works
+// (everything resolves relative to the exe), which we verified live.
+
+fn chrome_path(exe_dir: &Path) -> PathBuf {
+    exe_dir.join("chrome.cfg")
+}
+
+/// The stored decoy title, if any. Sanitized on read too, so a hand-edited
+/// file can't smuggle control characters into a window title.
+fn read_chrome(exe_dir: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(chrome_path(exe_dir)).ok()?;
+    sanitize_chrome(raw.lines().next()?)
+}
+
+fn sanitize_chrome(s: &str) -> Option<String> {
+    let t: String = s.trim().chars().filter(|c| !c.is_control()).collect();
+    if t.is_empty() || t.chars().count() > 64 {
+        return None;
+    }
+    Some(t)
+}
+
+fn apply_chrome(app: &tauri::AppHandle, exe_dir: &Path) {
+    use tauri::Manager;
+    // The tauri.conf default is already neutral ("Flow"); the decoy only
+    // needs to be pushed when one is actually stored.
+    if let Some(title) = read_chrome(exe_dir) {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_title(&title);
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ChromeInfo {
+    /// active decoy title (None = stock neutral "Flow")
+    decoy: Option<String>,
+}
+
+#[tauri::command]
+fn get_chrome(state: tauri::State<'_, AppState>) -> ChromeInfo {
+    ChromeInfo { decoy: read_chrome(&state.exe_dir) }
+}
+
+/// Store (or clear) the decoy title and apply it to the live window
+/// immediately. Works whether or not a vault is open — it is the lock
+/// screen's chrome we are also dressing.
+#[tauri::command]
+fn set_chrome(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    title: Option<String>,
+) -> Result<ChromeInfo, String> {
+    use tauri::Manager;
+    let decoy = match title {
+        Some(t) => Some(sanitize_chrome(&t).ok_or("title is empty, all control characters, or over 64 chars")?),
+        None => None,
+    };
+    let path = chrome_path(&state.exe_dir);
+    match &decoy {
+        Some(t) => std::fs::write(&path, format!("{t}\n")).map_err(err)?,
+        None => {
+            let _ = std::fs::remove_file(&path);
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_title("Flow"); // the stock neutral title
+            }
+        }
+    }
+    if let Some(t) = &decoy {
+        if let Some(w) = app.get_webview_window("main") {
+            let _ = w.set_title(t);
+        }
+    }
+    Ok(ChromeInfo { decoy })
+}
+
 // ---------- panic hotkey (#23) ----------
 
 /// Registered at every launch; a vault may add its own key on unlock.
@@ -1691,6 +1774,8 @@ pub fn run() {
             panic_info,
             set_panic_hotkey,
             nuke_drill,
+            get_chrome,
+            set_chrome,
             scrub_now,
             get_scrub_settings,
             set_scrub_on_lock,
@@ -1704,12 +1789,40 @@ pub fn run() {
     // be pressable, even if the vault is locked or a source is down.
     register_panic_keys(&app.handle(), None);
 
+    // Decoy window title (#27), if chrome.cfg sits beside the exe.
+    {
+        use tauri::Manager;
+        let state = app.state::<AppState>();
+        apply_chrome(&app.handle(), &state.exe_dir);
+    }
+
     app.run(|_app, _event| {});
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    /// #27: the decoy chrome file round-trips and sanitizes on read, so a
+    /// hand-edited chrome.cfg can never smuggle junk into a window title.
+    #[test]
+    fn chrome_cfg_roundtrip_and_sanitizing() {
+        let d = std::env::temp_dir().join(format!("goonflow-chrome-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+
+        assert_eq!(read_chrome(&d), None, "no file = no decoy");
+        std::fs::write(chrome_path(&d), "Flow Notes\nonly first line counts\n").unwrap();
+        assert_eq!(read_chrome(&d).as_deref(), Some("Flow Notes"));
+
+        assert_eq!(sanitize_chrome("  a\u{7}b  ").as_deref(), Some("ab"), "control chars stripped");
+        assert_eq!(sanitize_chrome("   "), None, "blank = absent");
+        assert_eq!(sanitize_chrome(&"x".repeat(65)), None, "over-long refused");
+
+        std::fs::write(chrome_path(&d), "\n").unwrap();
+        assert_eq!(read_chrome(&d), None, "empty first line = no decoy");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 
     /// #23: the crypto-erase drill proves the real nuke path on a throwaway
     /// vault — build it, nuke it, nothing may survive.

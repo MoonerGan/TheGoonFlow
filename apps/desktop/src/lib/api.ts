@@ -395,6 +395,12 @@ export const getScrubSettings = () => invoke<ScrubSettings>("get_scrub_settings"
 export const setScrubOnLock = (on: boolean) =>
   invoke<ScrubSettings>("set_scrub_on_lock", { on });
 
+// ---------- deniability / decoy chrome (#27) ----------
+export type ChromeInfo = { decoy: string | null };
+export const getChrome = () => invoke<ChromeInfo>("get_chrome");
+export const setChrome = (title: string | null) =>
+  invoke<ChromeInfo>("set_chrome", { title });
+
 // ---------- archive extraction (#17) ----------
 export type ExtractPlan = {
   zip: string;

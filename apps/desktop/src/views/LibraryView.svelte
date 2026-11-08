@@ -4,7 +4,7 @@
   // where it actually helps (editor, tiles) — pipeline state never leaks into
   // media, site/tag filters never clutter games.
   import { onMount } from "svelte";
-  import { getKindStats, type AppStatus, type ClipReport } from "../lib/api";
+  import { getKindStats, getChrome, type AppStatus, type ClipReport, type ChromeInfo } from "../lib/api";
   import { activityTick, startWatching, stopWatching } from "../lib/activity.svelte";
   import ActivityBar from "../components/ActivityBar.svelte";
   import ClipDialog from "../components/ClipDialog.svelte";
@@ -25,6 +25,9 @@
   let clipOpen = $state(false);
   let clipReport = $state<string | null>(null);
   let counts = $state<Record<string, number>>({});
+  // #27: when a decoy window title is stored beside the exe, the in-app
+  // brand follows it — the forgot-to-lock case should say "Flow Notes" too.
+  let chrome = $state<ChromeInfo | null>(null);
 
   // report strips must be dismissable and expire on their own (#4)
   let reportTimer: ReturnType<typeof setTimeout> | undefined;
@@ -53,6 +56,11 @@
   onMount(() => {
     startWatching();
     void loadCounts();
+    getChrome()
+      .then((c) => (chrome = c))
+      .catch(() => {
+        // advisory: no chrome.cfg = stock brand display
+      });
     return stopWatching;
   });
 
@@ -69,7 +77,7 @@
 
 <div class="shell">
   <header class="topbar">
-    <span class="brand">The Goon Flow</span>
+    <span class="brand">{chrome?.decoy ?? "The Goon Flow"}</span>
     <nav class="tabs">
       <button class="tab" class:active={tab === "games"} onclick={() => (tab = "games")}>
         Games <span class="count">{gamesCount}</span>
