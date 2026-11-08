@@ -345,8 +345,12 @@ fn apply_chrome(app: &tauri::AppHandle, exe_dir: &Path) {
     // The tauri.conf default is already neutral ("Flow"); the decoy only
     // needs to be pushed when one is actually stored.
     if let Some(title) = read_chrome(exe_dir) {
-        if let Some(w) = app.get_webview_window("main") {
-            let _ = w.set_title(&title);
+        match app.get_webview_window("main") {
+            Some(w) => {
+                let r = w.set_title(&title);
+                eprintln!("decoy chrome: {:?} -> set_title {:?}", title, r.is_ok());
+            }
+            None => eprintln!("decoy chrome: window not created yet, will retry at Ready"),
         }
     }
 }
@@ -1789,14 +1793,18 @@ pub fn run() {
     // be pressable, even if the vault is locked or a source is down.
     register_panic_keys(&app.handle(), None);
 
-    // Decoy window title (#27), if chrome.cfg sits beside the exe.
-    {
+    // Decoy window title (#27). Config windows are only guaranteed to exist
+    // once the loop is running, so push it on Ready.
+    let chrome_exe_dir = {
         use tauri::Manager;
-        let state = app.state::<AppState>();
-        apply_chrome(&app.handle(), &state.exe_dir);
-    }
+        app.state::<AppState>().exe_dir.clone()
+    };
 
-    app.run(|_app, _event| {});
+    app.run(move |app, event| {
+        if let tauri::RunEvent::Ready = event {
+            apply_chrome(app, &chrome_exe_dir);
+        }
+    });
 }
 
 #[cfg(test)]
