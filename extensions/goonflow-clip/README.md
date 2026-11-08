@@ -5,6 +5,8 @@ into your GoonFlow vault — the *same* ingestion path as the app's `+ Clip URL`
 button, over the local companion API.
 
 ## What it does
+- Click the toolbar icon → status panel: pairing state, app reachable?, **Clip
+  this page** button.
 - Right-click a link, image, page, or selected URL → **Clip … to GoonFlow**.
 - The desktop app classifies it (booru / e-hentai / DLsite / f95 / direct media /
   `file:///`), fetches metadata politely, and stores it in the encrypted vault.
@@ -15,8 +17,30 @@ button, over the local companion API.
 2. Turn on **Developer mode** (top right).
 3. **Load unpacked** → select this `extensions/goonflow-clip` folder.
 
-Firefox (`about:debugging` → This Firefox → Load Temporary Add-on → pick
-`manifest.json`) also works; MV3 context menus + storage are supported.
+## Install (Firefox)
+Use the sibling folder **`extensions/goonflow-clip-firefox`** — same extension,
+but its manifest uses a classic background page (`background.scripts`) because
+Firefox's MV3 service-worker support is gated behind browser settings (and
+hardened/privacy-tuned Firefox profiles disable service workers entirely; this
+variant needs no service workers at all).
+
+**Temporary (any Firefox 109+):**
+1. Open `about:debugging#/runtime/this-firefox`.
+2. Click **Load Temporary Add-on…**
+3. Firefox asks for a *file*: pick the `manifest.json` *inside*
+   `extensions/goonflow-clip-firefox`.
+
+The extension loads instantly, but **temporary add-ons are removed when Firefox
+closes** — reload it this way after each restart, or make it permanent:
+
+**Permanent (Developer Edition / Nightly only):**
+1. In `about:config` set `xpinstall.signatures.required` to `false`.
+2. Zip the *contents* of `extensions/goonflow-clip-firefox` (manifest.json at the zip
+   root) into e.g. `goonflow-clip.zip` (rename `.xpi` if you like).
+3. `about:addons` → gear icon → **Install Add-on From File…** → pick the zip.
+Stable Firefox refuses unsigned add-ons; the other route is uploading it to
+addons.mozilla.org as an unlisted (public, but not listed) signing — it contains
+no code that touches the internet, review is usually fast.
 
 ## Pair (once per app launch)
 The app binds a **random local port** and mints a **fresh token every start**.

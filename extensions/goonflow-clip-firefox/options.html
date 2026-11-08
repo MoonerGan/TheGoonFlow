@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>GoonFlow Clip — options</title>
+  <style>
+    body { font: 14px/1.5 system-ui, sans-serif; background: #14100f; color: #e8e3df; margin: 0; padding: 2rem; }
+    main { max-width: 34rem; }
+    h1 { font-size: 1.2rem; margin: 0 0 .25rem; }
+    p.hint { color: #9b918a; margin: 0 0 1.25rem; }
+    label { display: block; margin: .6rem 0 .2rem; color: #cfc7c0; }
+    input { width: 100%; box-sizing: border-box; padding: .5rem .6rem; border-radius: 8px;
+            border: 1px solid #3a322e; background: #1e1817; color: inherit; }
+    .row { display: flex; gap: .5rem; margin-top: 1rem; }
+    button { padding: .5rem 1rem; border-radius: 8px; border: 1px solid #3a322e;
+             background: #241e1c; color: inherit; cursor: pointer; }
+    button.primary { background: #7c2d3a; border-color: #94414f; }
+    #status { margin-top: 1rem; min-height: 1.2em; }
+    #status.ok { color: #7fd08a; } #status.bad { color: #e57373; }
+    code { background: #1e1817; padding: 0 .3rem; border-radius: 4px; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>GoonFlow Clip</h1>
+    <p class="hint">
+      Paste the port and token shown in the app under <em>Sources → Browser pairing</em>.
+      The token changes every time the app starts; this extension only ever talks to
+      <code>127.0.0.1</code> and nothing else.
+    </p>
+
+    <label for="port">Companion port</label>
+    <input id="port" inputmode="numeric" placeholder="e.g. 62116" />
+
+    <label for="token">Session token</label>
+    <input id="token" type="password" placeholder="paste the token" />
+
+    <div class="row">
+      <button class="primary" id="save">Save</button>
+      <button id="test">Test connection</button>
+    </div>
+    <p id="status"></p>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

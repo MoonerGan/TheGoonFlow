@@ -1,0 +1,53 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        width: 300px;
+        margin: 0;
+        font-family: system-ui, "Segoe UI", Roboto, sans-serif;
+        font-size: 13px;
+        background: #171a21;
+        color: #e7e9ee;
+      }
+      .pad { padding: 0.75rem 0.85rem; }
+      h1 { font-size: 0.95rem; margin: 0 0 0.5rem; }
+      .row { display: flex; align-items: center; gap: 0.4rem; margin: 0.35rem 0; }
+      .url {
+        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        font-size: 0.72rem; color: #9aa3b2; overflow: hidden;
+        text-overflow: ellipsis; white-space: nowrap; max-width: 100%;
+      }
+      button {
+        font: inherit; border: 1px solid #262b36; border-radius: 8px;
+        padding: 0.5rem 0.8rem; background: #1d222c; color: #e7e9ee; cursor: pointer;
+      }
+      button.primary { background: #4ade80; border-color: #4ade80; color: #06240f; font-weight: 600; }
+      button:disabled { opacity: 0.5; cursor: not-allowed; }
+      .status { font-size: 0.78rem; margin-top: 0.5rem; line-height: 1.4; }
+      .ok { color: #4ade80; }
+      .bad { color: #f87171; }
+      .muted { color: #9aa3b2; }
+      a { color: #4ade80; }
+    </style>
+  </head>
+  <body>
+    <div class="pad">
+      <h1>GoonFlow Clip</h1>
+      <div class="url" id="url">—</div>
+      <div class="row">
+        <button class="primary" id="clip">Clip this page</button>
+      </div>
+      <div class="status" id="status">checking…</div>
+      <div class="row">
+        <button id="options">Pairing / options</button>
+      </div>
+      <p class="status muted">
+        Right-click any link, image or page → <em>Clip … to GoonFlow</em>. The app
+        must be running and unlocked.
+      </p>
+    </div>
+    <script src="popup.js"></script>
+  </body>
+</html>
