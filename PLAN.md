@@ -384,10 +384,13 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   resources rebuild; vault folder naming). New sanitize/round-trip test
   (81 green).
 - Field-test resume point: the current `target\release\GoonFlow.exe` (the
-  m9 Tauri build, all work through #27, schema v7) runs everything below;
-  existing `C:\GoonFlow` vaults migrate v3→v7 on unlock (idempotent, in
-  place). Manual checklist for the In-review issues, in the order that
-  surfaces problems fastest:
+  m10 Tauri build at git 2053155, all work through #27, schema v7) runs
+  everything below; existing `C:\GoonFlow` vaults migrate v3→v7 on unlock
+  (idempotent, in place). Every automated check was re-run against m10:
+  smoke handshake OK, `panic-tap`/`panic-hold`/`panic-stale` all PASS,
+  decoy title flips `Flow ⇄ Flow Notes`, 81 unit tests green. Manual
+  checklist for the In-review issues, in the order that surfaces
+  problems fastest:
   1. Unlock the real vault → schema lands at v7, old items intact.
   2. Viewer (#21): click media cards — ←/→ through the grid, +/−/0 zoom,
      space slideshow, big stored video → poster fallback, `i` → editor.
