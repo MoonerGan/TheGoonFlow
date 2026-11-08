@@ -224,9 +224,11 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
 - Shipped artifact for testing: `target\release\GoonFlow.exe` (single file, ~19 MB,
   frontend embedded; only WebView2 runtime required). Debug builds of the UI are a
   trap — they point at the Vite dev server and show "connection refused" without it.
-- Schema is at **v3** (`site_settings`, `updates` at v2; v3 renames mislabeled CDN
-  sites like `i`/`wimg` to their real names). `init_schema` is idempotent and runs
-  versioned migrations, so unlocking an older vault upgrades it in place.
+- Schema is at **v8** (`site_settings`/`updates` at v2; v3 renames mislabeled CDN
+  sites like `i`/`wimg`; v4 `items.launch_path`; v5 `match_suggestions`; v6/v7
+  the `mods` table + deploy columns; v8 `pair_dismissals`). `init_schema` is
+  idempotent and runs versioned migrations, so unlocking an older vault upgrades
+  it in place.
 - Deliberate gaps left for M3/M4: companion `/api/clip` (needs the shared state
   refactor), downloads, selector site-packs + raw HTML snapshots for rot recovery,
   and a fixture suite for the HTML parsers (currently string-literal fixtures).
@@ -383,6 +385,55 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   screens) and what is not (file-properties metadata → needs custom
   resources rebuild; vault folder naming). New sanitize/round-trip test
   (81 green).
+- **Field reports #28–#40 (second live-testing round)** — code-complete on
+  `main` (`c9b9114`..`e2b18f7` + the follow-ups), 86 workspace tests green
+  (2 ignored), svelte-check 0/0, `npm run build` clean. Each issue carries a
+  comment with its root cause; the shape of the batch:
+  - **#28** `set_site_setting`'s insert branch seeded a hardcoded 700 ms and
+    clobbered per-site defaults; the upsert now takes (and keeps) the site's own.
+  - **#29 / #30 / #32** CSS: `overflow-wrap` instead of `break-all`; exactly one
+    page scrollbar (the sidebar scrolls itself, `body { overflow: hidden }`);
+    the editor dialog is capped to the viewport with its action row sticky.
+  - **#31** `pair_dismissals` (schema **v8**) + `dismiss_pair` → *Keep both*
+    actually sticks; `PairSuggestion.a_src/b_src` let the UI say which entry is
+    which; dismissal rows are cleaned up when either item is deleted or merged
+    (no FK can do it — a row names two items).
+  - **#33** MTool honesty: the installed 0.67.1 is an NW.js `MToolClient` build
+    (`nw.dll` + NW `package.json`, no argv handling, drag-and-drop game list),
+    so passing the game as an argument could never work. Recipe order is now
+    game-side launcher → (NW.js) open tool + clipboard hand-off → native builds
+    get the argument; the app never writes into `gameLib\*.gljson`. DEVELOPMENT
+    invariant 20.
+  - **#34 / #35** viewer loads are keyed on the *item id* (a job tick handing the
+    grid a new array no longer re-fetches and flickers the current picture), the
+    old frame stays visible while the next loads, and `f` / ⛶ is real fullscreen
+    with Esc returning in two steps.
+  - **#36** `re_enrich_items` — batch re-fetch as one cancellable job, wired into
+    select mode.
+  - **#37** Sources page grouped (Network · Panic & privacy · Game sites · Repack
+    mirrors · Imageboards · Local files · Browser pairing) + a *Getting a cookie*
+    how-to.
+  - **#39** id-less booru CDN links fall through to `DirectMedia` so the bytes
+    always land; `/post/show/N` parses as a post; a file→post upgrade happens
+    only when the site's `md5` **and** `filesize` match the bytes downloaded
+    (invariant 21). Unresolved items carry a note and surface in the #40 queue.
+  - **#40** `list_items(…, source)` + `source_stats(kind)` → *Sources* sidebar
+    queues in both views (Local only / No local file / No tags) with badges.
+  - **#19** the extension got a toolbar popup in both builds, and
+    `extensions/goonflow-clip-firefox` exists because `dom.serviceWorkers.enabled
+    =false` (hardened Firefox profile) kills MV3 for *every* install type, signed
+    or temporary — the new build uses `background.scripts`.
+  New tools: `run-test.ps1`; `restore-nonascii.js` + `char-audit.js` +
+  `char-compare.js` (PowerShell 5 reads BOM-less UTF-8 as Shift_JIS and writes
+  mojibake back — DEVELOPMENT §1 tells the story).
+- **The release artifact for this batch is NOT built yet.**
+  `target\release\GoonFlow.exe` is still the m10 build (git 2053155, schema v7,
+  all work through #27). The rebuild is blocked by nothing but the fact that the
+  exe *is* the app under test: the running process holds the file, so cargo fails
+  with `failed to remove file ... GoonFlow.exe`. Close the app, then
+  `npm run tauri build` and re-run `smoke-release.ps1` + `panic-tap-test.ps1` /
+  `panic-hold-test.ps1` / `panic-stale-test.ps1`; only after that can #28–#40 be
+  called verified live.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (the
   m10 Tauri build at git 2053155, all work through #27, schema v7) runs
   everything below; existing `C:\GoonFlow` vaults migrate v3→v7 on unlock
@@ -415,5 +466,27 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
      set a Decoy title in Sources → taskbar title changes at once, brand
      after re-lock; clear → back to Flow. Check chrome.cfg contents read
      like nothing sensitive.
+  ——— items 9-14 need the *rebuilt* exe (they are all in #28–#40) ———
+   9. Sources rates (#28): enable a site that was never touched (e.g. e621) →
+      its ms box shows 1200, not 700; e-hentai stays 10500.
+   10. Layout (#29/#30/#32): shrink the window to the 1100×640 minimum → one
+      scrollbar for the grid, the sidebar scrolls on its own; long folder names
+      wrap at characters instead of chopping words; open an item with many tags
+      → Save/Cancel stay pinned at the bottom of the dialog.
+   11. Dupes (#31): Possible dupes → rows show 1/2 with each entry's own
+      link/path; **Keep both** on an obvious false pair → it disappears and does
+      not come back after a restart (this is the ~40 mmnz-game pairs).
+   12. MTool (#33): ▶ on a game with that NW.js install → MTool opens and the
+      message under the mod list says the game's path is on the clipboard (paste
+      it into Explorer's address bar to see it); if the repack ships
+      `StartWithTool.bat`, the game starts under the tool directly instead.
+   13. Viewer (#34/#35): open a picture, start an import → no flicker; `f` fills
+      the screen, first Esc leaves fullscreen, second Esc closes the viewer.
+   14. File links (#39) + queues (#40) + batch (#36): import
+      `C:\Users\Admin\Downloads\bookmarks.html` → the bare gelbooru/rule34 image
+      links now store the picture (with a *no post could be identified* note
+      where that is the case); sidebar **Sources → No tags** lists exactly those;
+      select all → **Re-fetch metadata** fixes what the sites can identify, and
+      Stop works mid-run.
   Earlier notes still hold: re-clipping old rule34/wimg bare links (or
   Re-fetch metadata on them) now pulls art (v3 migration fixed labels).

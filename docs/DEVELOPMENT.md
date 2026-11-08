@@ -96,7 +96,7 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v6, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v8, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
@@ -127,9 +127,19 @@ tools/
 - `updates` (v2) — the change feed: `record_update` + `list_updates`;
   `update_targets` picks the game rows worth re-visiting (dlsite/f95 sources,
   non-DNF statuses).
-- **Migrations (v3)**: `init_schema` seeds at v1 then runs ordered, idempotent
-  `if v < N` steps. v3 renames hosts-labeled sites from early field reports
-  (`i` → `4chan`, `wimg` → `rule34`, `booru` → `allthefallen`). Any new schema
+- `mods` (v6, +`status`/`manifest` in v7) — per-game launch/deploy recipes
+  (#25): `kind` mtool/cheat/dll/other, `path`, `args` (`{game}` placeholder),
+  `status` linked/applied, `manifest` = deployed files as JSON (path + sha256).
+  Cascades with the item.
+- `pair_dismissals` (v8) — "Keep both" (#31): `a_id`/`b_id` + `dismissed_at`,
+  stored canonically (smaller id first) so `dismiss_pair` is symmetric and
+  `pairing_suggestions` can skip a pair the user already judged. Deleting/
+  merging either item drops the row; the items themselves are never touched.
+- **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
+  `if v < N` steps up to `SCHEMA_VERSION` (v8). v3 renames hosts-labeled sites
+  from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
+  `allthefallen`); v4 adds `items.launch_path`; v5 `match_suggestions`; v6/v7
+  the `mods` table and its deploy columns; v8 `pair_dismissals`. Any new schema
   change is a new numbered step — never edit the `CREATE TABLE` batch for
   existing columns.
 
