@@ -502,8 +502,18 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   tool-window + no-activate, never in the taskbar, and a pixel diff of its
   screen region with the app closed vs running is identical — it paints
   nothing, so no new visible chrome.
+  **Re-smoked after the fmt + docs/UI commits.** `tools/verify-artifact.ps1`
+  (new) runs the trio against the current exe: companion handshake on the real
+  vault (`locked: true`), then `close-exit-test.ps1` on a scratch copy (close
+  exits, panic tap hides and keeps the process alive, second launch hands off and
+  reveals, one live process). Current artifact: sha256
+  `B71B13A42E33F26AE592F1B981CAFB8CAFF36BF9D1BA15105C6A5B3704C44303`, built from
+  `e27dfad`, log `tools\cargo-rel-m10.log`. The hold-to-erase and stale-watcher
+  live tests were last run against `9363a19`; `e27dfad` only changes comments,
+  wrapping and UI text, so they were not repeated.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built from
-  git `9363a19`, all work through #41, schema v8) runs everything below;
+  git `e27dfad`, all work through #41 plus the fmt pass and the cookie how-to,
+  schema v8) runs everything below;
   existing `C:\GoonFlow` vaults migrate v3→v8 on unlock (idempotent, in place).
   Every automated check was re-run against it: smoke handshake OK,
   `panic-tap`/`panic-hold`/`panic-stale`/`close-exit` all PASS, decoy title
