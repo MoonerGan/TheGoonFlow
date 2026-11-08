@@ -491,6 +491,13 @@ pub fn update_item(
 /// Delete item + cascading sources/tags/media (FK cascade is on).
 pub fn delete_item(conn: &Connection, id: &str) -> rusqlite::Result<()> {
     conn.execute("DELETE FROM items WHERE id = ?1", params![id])?;
+    // pair_dismissals has no FK (a row names *two* items, not one), so clean it
+    // by hand: an entry that no longer exists must not leave a pair permanently
+    // un-suggestable.
+    conn.execute(
+        "DELETE FROM pair_dismissals WHERE a_id = ?1 OR b_id = ?1",
+        params![id],
+    )?;
     Ok(())
 }
 
@@ -1363,6 +1370,11 @@ pub fn merge_items(conn: &Connection, keep_id: &str, drop_id: &str) -> rusqlite:
     )?;
     conn.execute("DELETE FROM updates WHERE item_id = ?1", params![drop_id])?;
     conn.execute("DELETE FROM items WHERE id = ?1", params![drop_id])?;
+    // the dropped half of any "keep both" pair goes with it
+    conn.execute(
+        "DELETE FROM pair_dismissals WHERE a_id = ?1 OR b_id = ?1",
+        params![drop_id],
+    )?;
     Ok(())
 }
 
@@ -1479,6 +1491,42 @@ mod tests {
         assert!(pairing_suggestions(&conn, None).unwrap().is_empty());
         assert!(get_item(&conn, "p1").unwrap().is_some());
         assert!(get_item(&conn, "p2").unwrap().is_some());
+    }
+
+    /// #31 follow-up: a dismissal row names *two* items, so there is no FK that
+    /// can clean it. Deleting or merging either half must drop the row, or the
+    /// vault keeps a permanently dead "never pair these" entry forever.
+    #[test]
+    fn dismissal_rows_follow_their_items() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, title) in [
+            ("q1", "Same Game Title"),
+            ("q2", "Same Game Title"),
+            ("q3", "Same Game Title"),
+        ] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'game',?2,'0','1')",
+                params![id, title],
+            )
+            .unwrap();
+        }
+        let rows = || -> i64 {
+            conn.query_row("SELECT count(*) FROM pair_dismissals", [], |r| r.get(0))
+                .unwrap()
+        };
+        dismiss_pair(&conn, "q1", "q2").unwrap();
+        dismiss_pair(&conn, "q2", "q3").unwrap();
+        assert_eq!(rows(), 2);
+
+        delete_item(&conn, "q2").unwrap();
+        assert_eq!(rows(), 0, "both rows named q2");
+
+        // merge: the dropped half's row goes with it
+        dismiss_pair(&conn, "q1", "q3").unwrap();
+        assert_eq!(rows(), 1);
+        merge_items(&conn, "q1", "q3").unwrap();
+        assert_eq!(rows(), 0);
     }
 
     #[test]
