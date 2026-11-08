@@ -93,6 +93,10 @@ tools/
   dev-env.ps1       MSVC/toolchain env import
   smoke-release.ps1 launches target\release\GoonFlow.exe, checks the companion
                     handshake, closes it (run after every tauri build)
+  close-exit-test.ps1 live check for #41: close exits, panic tap hides, a second
+                    launch hands off to the running instance (sandboxed exe copy)
+  window-probe.ps1  every top-level window of a running instance with size +
+                    WS_EX styles — for "is there a phantom/hidden window?" bugs
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
