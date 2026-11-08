@@ -32,6 +32,14 @@
   let counts = $state<SiteCount[]>([]);
   let note = $state<string | null>(null);
 
+  // #37: the list gets long — group it the way people actually think about it
+  const gameSites = $derived(siteInfos.filter((s) => s.kind === "games"));
+  const mirrorSites = $derived(siteInfos.filter((s) => s.kind.includes("repack mirror")));
+  const mediaSites = $derived(
+    siteInfos.filter((s) => s.kind === "posts" || s.kind === "galleries"),
+  );
+  const localSites = $derived(siteInfos.filter((s) => s.site === "local"));
+
   // proxy (#24)
   let proxyUrl = $state<string | null>(null);
   let proxyDraft = $state("");
@@ -217,8 +225,11 @@
   <p class="report-inline">{note}</p>
 {/if}
 
+<div class="group-title">
+  Network <span class="hint">— one address for every fetch the app makes</span>
+</div>
 <div class="field-label">
-  Proxy <span class="hint">— route every fetch through one address (stored in the vault, not this machine)</span>
+  Proxy <span class="hint">— stored in the vault, not this machine</span>
 </div>
 <div class="row">
   <input
@@ -243,7 +254,10 @@
   <p class="report-inline">{proxyMsg}</p>
 {/if}
 
-<div class="field-label" style="margin-top:1.2rem">
+<div class="group-title" style="margin-top:1.6rem">
+  Panic &amp; privacy <span class="hint">— what the app does when you need it gone</span>
+</div>
+<div class="field-label" style="margin-top:0.6rem">
   Panic key <span class="hint">— global hotkey: locks the vault and hides the window</span>
 </div>
 <p class="hint">
@@ -321,6 +335,7 @@
   <p class="report-inline">{chromeMsg}</p>
 {/if}
 
+<div class="group-title">Game sites</div>
 {#if counts.length > 0}
   <div class="chips" title="what is already stored is never deleted by switching a site off">
     {#each counts as c (c.site)}
@@ -329,52 +344,76 @@
   </div>
 {/if}
 
-{#each siteInfos as s (s.site)}
-  {@const cur = siteSettings[s.site]}
-  <div class="site-row">
-    <div class="site-name">
-      <strong>{s.site}</strong>
-      <span class="hint">{s.kind}{s.mirror ? " · off by default" : ""}</span>
+{#snippet siteRows(list: SiteInfo[])}
+  {#each list as s (s.site)}
+    {@const cur = siteSettings[s.site]}
+    <div class="site-row">
+      <div class="site-name">
+        <strong>{s.site}</strong>
+        <span class="hint">{s.kind}{s.mirror ? " · off by default" : ""}</span>
+      </div>
+      <label class="inline-check">
+        <input
+          type="checkbox"
+          checked={cur ? cur.enabled : !s.mirror}
+          onchange={(e) => saveSite(s.site, { enabled: e.currentTarget.checked })}
+        />
+        enabled
+      </label>
+      <div class="site-rate">
+        <input
+          type="text"
+          inputmode="numeric"
+          value={cur ? String(cur.rateMs) : String(s.defaultRateMs)}
+          onchange={(e) => {
+            const n = Number(e.currentTarget.value);
+            if (Number.isFinite(n)) saveSite(s.site, { rateMs: Math.round(n) });
+          }}
+        />
+        <span class="hint">ms between hits</span>
+      </div>
+      <div class="site-cookie">
+        <input
+          type="text"
+          placeholder={cur?.cookieSet ? "cookie saved — paste to replace" : "cookie (optional)"}
+          bind:value={cookieDraft[s.site]}
+          onkeydown={(e) => e.key === "Enter" && cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}
+        />
+        <button onclick={() => cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}>Set</button>
+      </div>
     </div>
-    <label class="inline-check">
-      <input
-        type="checkbox"
-        checked={cur ? cur.enabled : !s.mirror}
-        onchange={(e) => saveSite(s.site, { enabled: e.currentTarget.checked })}
-      />
-      enabled
-    </label>
-    <div class="site-rate">
-      <input
-        type="text"
-        inputmode="numeric"
-        value={cur ? String(cur.rateMs) : String(s.defaultRateMs)}
-        onchange={(e) => {
-          const n = Number(e.currentTarget.value);
-          if (Number.isFinite(n)) saveSite(s.site, { rateMs: Math.round(n) });
-        }}
-      />
-      <span class="hint">ms between hits</span>
-    </div>
-    <div class="site-cookie">
-      <input
-        type="text"
-        placeholder={cur?.cookieSet ? "cookie saved — paste to replace" : "cookie (optional)"}
-        bind:value={cookieDraft[s.site]}
-        onkeydown={(e) => e.key === "Enter" && cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}
-      />
-      <button onclick={() => cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}>Set</button>
-    </div>
-  </div>
-{/each}
+  {/each}
+{/snippet}
 
-<div class="field-label" style="margin-top:1.2rem">
+{@render siteRows(gameSites)}
+
+<div class="group-title">Repack mirrors</div>
+<p class="hint">DLsite re-uploads, not new works. Off by default (D8) — turn one on only if a work is missing
+  from DLsite itself.</p>
+{@render siteRows(mirrorSites)}
+
+<div class="group-title">Imageboards and galleries</div>
+<p class="hint">E-hentai and f95 want a login cookie before their pages give anything useful — see
+  <em>Getting a cookie</em> at the bottom of this page.</p>
+{@render siteRows(mediaSites)}
+
+<div class="group-title">Local files</div>
+<p class="hint">Nothing to enable: this is the folder/file side of the vault. Items with only a local source show
+  up under <em>Sources → Local only</em> in the Games and Media sidebars, which is the queue for adding links
+  and tags by hand.</p>
+{@render siteRows(localSites)}
+
+<div class="group-title" style="margin-top:1.6rem">
   Browser pairing <span class="hint">— for the GoonFlow Clip extension</span>
 </div>
 {#if companion}
-  <p class="hint">Load <code>extensions/goonflow-clip</code> as an unpacked extension (chrome://extensions →
-    developer mode → Load unpacked), then paste these into its options page. The token is fresh every app start —
-    traffic never leaves this machine.</p>
+  <p class="hint">Chrome/Edge: <code>extensions/goonflow-clip</code> through chrome://extensions → developer mode →
+    <em>Load unpacked</em>. Firefox: use <code>extensions/goonflow-clip-firefox</code> (the Chrome build needs service
+    workers, which hardened Firefox profiles disable) on about:add-ons → gear icon → <em>Load Temporary Add-on</em> →
+    pick that folder's <code>manifest.json</code>. Then click the toolbar icon → <em>Pairing / options</em> and paste
+    these in. The token is fresh every app start — traffic never leaves this machine.</p>
+  <p class="hint">The icon itself is the quick path: it shows whether the app is reachable and whether the vault is
+    locked, and clipping the page is one button. Right-click any link, image or selection to clip something else.</p>
   <div class="row">
     <span class="chip">port <strong>{companion.port}</strong></span>
     <button class="ghost" onclick={() => copy("port", String(companion?.port ?? ""))}>Copy port</button>
@@ -387,3 +426,23 @@
 {:else}
   <p class="hint">The companion API is disabled on this run (port bind failed) — browser clipping is unavailable.</p>
 {/if}
+
+<div class="group-title" style="margin-top:1.6rem">
+  Getting a cookie <span class="hint">— only for sites that need a login (f95, E-hentai, Exhentai)</span>
+</div>
+<details class="details">
+  <summary>How to copy the <code>Cookie</code> header value</summary>
+  <ol class="hint steps">
+    <li>Open the site in your browser and make sure you are logged in there.</li>
+    <li>Press F12 → the <em>Network</em> tab → reload the page → click the first request (the page itself).</li>
+    <li>Under <em>Request Headers</em> find the line starting <code>Cookie:</code> and copy <strong>everything after
+      the colon</strong> — one long single line, no quotes.</li>
+    <li>Paste it into that site's cookie box above and hit <em>Set</em>. It is stored inside the encrypted vault,
+      never in a config file next to the exe.</li>
+  </ol>
+  <p class="hint">
+    The cookie is just a saved copy of what your browser already sends — the app never reads your browser's own
+    cookie store. If a fetch starts failing after you log out or the site rotates the session, re-copy it; f95 says
+    so out loud (<em>"f95 wants a login…"</em>) instead of quietly importing nothing.
+  </p>
+</details>

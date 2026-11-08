@@ -20,14 +20,18 @@
     listMatchSuggestions,
     listUpdates,
     mergeItems,
+    dismissPair,
     pairingSuggestions,
     reEnrichItem,
+    reEnrichItems,
+    sourceStats,
     topTags,
     type AppStatus,
     type GameImportReport,
     type ItemSummary,
     type MatchSuggestion,
     type PairSuggestion,
+    type SourceStats,
     type StatusCount,
     type TagCount,
     type UpdateRow,
@@ -48,6 +52,10 @@
   let search = $state("");
   let filter = $state("all");
   let tagFilter = $state<string | null>(null);
+  // #40: source-state filters — local-only games are the "add links/tags" queue,
+  // no-local games lost (or never had) their folder on disk.
+  let sourceFilter = $state<"local_only" | "no_local" | "no_tags" | null>(null);
+  let srcStats = $state<SourceStats>({ localOnly: 0, noLocal: 0, noTags: 0 });
   let panel = $state<"library" | "updates" | "pairs" | "matches">("library");
   let report = $state<string | null>(null);
   let gameFailures = $state<string[]>([]);
@@ -114,6 +122,8 @@
         searchFor || undefined,
         "game",
         tagFilter ?? undefined,
+        undefined,
+        sourceFilter ?? undefined,
       );
       const t = await getThumbs(items.filter((i) => i.hasThumb).map((i) => i.id));
       thumbs = Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`]));
@@ -121,6 +131,7 @@
       gameCount = Object.fromEntries(kinds)["game"] ?? 0;
       tags = await topTags(24, "game");
       updates = await listUpdates(100);
+      srcStats = await sourceStats("game");
     } catch (e) {
       // Never swallow silently — a blank grid with no reason is how M0 lied
       // about successful imports.
@@ -134,6 +145,7 @@
   $effect(() => {
     filter;
     tagFilter;
+    sourceFilter;
     searchFor;
     void load();
   });
@@ -231,6 +243,35 @@
     }
   }
 
+  async function doKeepBoth(p: PairSuggestion) {
+    try {
+      await dismissPair(p.aId, p.bId);
+      pairs = await pairingSuggestions("game");
+      pairNote = "kept both — this pair will not be suggested again";
+    } catch (e) {
+      pairNote = `could not dismiss: ${e}`;
+    }
+  }
+
+  let refetching = $state(false);
+  async function doBatchRefetch() {
+    const ids = [...selectedIds];
+    if (ids.length === 0 || refetching) return;
+    refetching = true;
+    try {
+      const r = await reEnrichItems(ids);
+      report =
+        `re-fetched ${r.items} item(s): ${r.enriched} of ${r.sources} sources gave something` +
+        (r.failed ? `, ${r.failed} item(s) failed` : "") +
+        (r.stopped ? ", stopped early" : "");
+      await load();
+    } catch (e) {
+      report = `re-fetch failed: ${e}`;
+    } finally {
+      refetching = false;
+    }
+  }
+
   // ---- online match suggestions (#14) ----
 
   function openMatches() {
@@ -319,6 +360,9 @@
   {#if selectMode}
     <span class="hint">{selectedIds.size} selected</span>
     <button onclick={() => (selectedIds = new Set(filtered.map((i) => i.id)))}>Select all</button>
+    <button disabled={refetching || selectedIds.size === 0} onclick={doBatchRefetch} title="re-fetch online info for the selection — runs as a job you can stop">
+      {refetching ? "Re-fetching…" : "Re-fetch metadata"}
+    </button>
     <button
       class="danger"
       disabled={selectedIds.size === 0}
@@ -357,7 +401,7 @@
 <div class="main">
   <nav class="sidebar">
     <div class="section">Flow</div>
-    <button class="nav-item" class:active={panel === "library" && filter === "all"} onclick={() => { panel = "library"; filter = "all"; }}>
+    <button class="nav-item" class:active={panel === "library" && filter === "all" && !sourceFilter} onclick={() => { panel = "library"; filter = "all"; sourceFilter = null; }}>
       Everything <span class="count">{gameCount}</span>
     </button>
     {#each ["seen", "tracking", "wishlist", "downloaded", "played"] as key}
@@ -365,6 +409,22 @@
         {key} <span class="count">{countFor(key)}</span>
       </button>
     {/each}
+
+    <div class="section">
+      Sources
+      {#if sourceFilter}
+        <button class="link" onclick={() => (sourceFilter = null)}>clear</button>
+      {/if}
+    </div>
+    <button class="nav-item" class:active={sourceFilter === "local_only"} onclick={() => (sourceFilter = sourceFilter === "local_only" ? null : "local_only")} title="Games with only a local folder and no online source — the queue for adding links and tags by hand.">
+      Local only <span class="count">{srcStats.localOnly || ""}</span>
+    </button>
+    <button class="nav-item" class:active={sourceFilter === "no_local"} onclick={() => (sourceFilter = sourceFilter === "no_local" ? null : "no_local")} title="Games with no folder on disk — the link is all that's left.">
+      No local file <span class="count">{srcStats.noLocal || ""}</span>
+    </button>
+    <button class="nav-item" class:active={sourceFilter === "no_tags"} onclick={() => (sourceFilter = sourceFilter === "no_tags" ? null : "no_tags")} title="Games with no tags at all.">
+      No tags <span class="count">{srcStats.noTags || ""}</span>
+    </button>
 
     <div class="section">
       Tagged
@@ -448,14 +508,30 @@
       {:else}
         {#each pairs as p (`${p.aId}-${p.bId}`)}
           <div class="pair-row">
-            <div>
-              <strong>{p.aTitle}</strong> <span class="hint">({p.aSites || "no source"})</span>
-              <br />
-              <strong>{p.bTitle}</strong> <span class="hint">({p.bSites || "no source"})</span>
+            <div class="pair-sides">
+              <div class="pair-side">
+                <span class="pair-num">1</span>
+                <div>
+                  <strong>{p.aTitle}</strong>
+                  <span class="hint">({p.aSites || "no source"})</span>
+                  {#if p.aSrc}<div class="pair-src" title={p.aSrc}>{p.aSrc}</div>{/if}
+                </div>
+              </div>
+              <div class="pair-side">
+                <span class="pair-num">2</span>
+                <div>
+                  <strong>{p.bTitle}</strong>
+                  <span class="hint">({p.bSites || "no source"})</span>
+                  {#if p.bSrc}<div class="pair-src" title={p.bSrc}>{p.bSrc}</div>{/if}
+                </div>
+              </div>
             </div>
             <div class="row">
-              <button onclick={() => doMerge(p, "a")}>Keep first</button>
-              <button onclick={() => doMerge(p, "b")}>Keep second</button>
+              <button onclick={() => doMerge(p, "a")}>Keep 1</button>
+              <button onclick={() => doMerge(p, "b")}>Keep 2</button>
+              <button class="ghost" title="not a real duplicate — stop suggesting this pair" onclick={() => doKeepBoth(p)}>
+                Keep both
+              </button>
             </div>
           </div>
         {/each}

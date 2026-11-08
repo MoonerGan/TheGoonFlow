@@ -25,6 +25,9 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
+  /* #30: the shell is exactly viewport-high; letting the page scroll too
+     produced two scrollbars fighting each other. */
+  overflow: hidden;
 }
 
 #app {
@@ -134,7 +137,8 @@ button:disabled {
 }
 
 .path {
-  word-break: break-all;
+  /* #29: break-all cut folder names mid-word; wrap only where it can. */
+  overflow-wrap: anywhere;
 }
 
 /* main shell */
@@ -184,6 +188,10 @@ button:disabled {
   display: flex;
   flex-direction: column;
   gap: 0.15rem;
+  /* #30: long nav lists scroll inside the sidebar instead of inflating the
+     page and creating a second scrollbar next to the content's. */
+  overflow-y: auto;
+  min-height: 0;
 }
 
 .sidebar .section {
@@ -198,11 +206,15 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 0.4rem;
   padding: 0.45rem 0.6rem;
   border-radius: 8px;
   border: none;
   background: transparent;
   color: var(--text);
+  /* #29: labels were cut mid-word when the sidebar got tight */
+  text-align: left;
+  overflow-wrap: break-word;
 }
 
 .nav-item:hover {
@@ -217,6 +229,8 @@ button:disabled {
 .nav-item .count {
   color: var(--muted);
   font-size: 0.8rem;
+  flex: none;
+  white-space: nowrap;
 }
 
 .content {
@@ -274,7 +288,7 @@ button:disabled {
 }
 .details li {
   margin: 0.15rem 0;
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 
 button.link {
@@ -295,7 +309,9 @@ button.link {
 .vault-info {
   color: var(--muted);
   font-size: 0.75rem;
-  word-break: break-all;
+  /* long paths wrap at any character, but only because there is no
+     whitespace to work with — #29 */
+  overflow-wrap: anywhere;
   padding: 0.3rem 0.6rem;
 }
 
@@ -382,6 +398,26 @@ button.link {
 
 .modal {
   width: min(480px, calc(100vw - 2rem));
+  /* #32: the editor (tags, sources, mods) grew taller than the window and the
+     Save row slid out of reach. Scroll inside the card, keep actions pinned. */
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+  padding-bottom: 0.75rem;
+}
+
+.modal-actions {
+  margin-top: 1.25rem;
+  position: sticky;
+  bottom: 0;
+  background: var(--panel);
+  padding: 0.6rem 0 0.75rem;
+  /* uneven buttons (#32): labels of different length rendered at different
+     sizes because buttons inherited no padding rhythm */
+  gap: 0.5rem;
+}
+
+.modal-actions button {
+  white-space: nowrap;
 }
 
 select {
@@ -400,10 +436,6 @@ select {
 
 .two-col > div {
   flex: 1;
-}
-
-.modal-actions {
-  margin-top: 1.25rem;
 }
 
 /* M1/M2: clip box, tags, updates, sources, pairing */
@@ -432,6 +464,30 @@ textarea:focus {
 .panel-title {
   margin: 0 0 0.4rem;
   font-size: 1.15rem;
+}
+
+/* #37: Sources is long; visible group headers keep it scannable */
+.group-title {
+  margin: 1.5rem 0 0.4rem;
+  padding-top: 0.6rem;
+  border-top: 1px solid var(--border);
+  font-size: 0.95rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.group-title .hint {
+  font-weight: 400;
+}
+
+.steps {
+  margin: 0.4rem 0 0.6rem 1.2rem;
+  padding: 0;
+  line-height: 1.55;
+}
+
+.steps li {
+  margin: 0.25rem 0;
 }
 
 .field-label {
@@ -492,7 +548,9 @@ textarea:focus {
 .source-row code {
   font-size: 0.75rem;
   color: var(--muted);
-  word-break: break-all;
+  /* URLs have no spaces; #29 wanted them wrapped only where they must be,
+     not every word chopped mid-syllable */
+  overflow-wrap: anywhere;
 }
 
 .site-row,

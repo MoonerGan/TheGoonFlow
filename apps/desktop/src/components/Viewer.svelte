@@ -28,13 +28,18 @@
 
   const item = $derived(items[idx]);
 
-  function load() {
-    const it = item;
-    if (!it) return;
+  // #34: views re-load their item list whenever any job ticks, handing us a
+  // NEW array with the same items. Keying on the primitive id means "same
+  // picture" never re-triggers a fetch (that was the flicker), and the old
+  // frame stays visible while the next one loads.
+  const itemId = $derived(item?.id ?? null);
+  const nextId = $derived(items[(idx + 1) % items.length]?.id ?? null);
+
+  function load(id: string, prefetch: string | null) {
     loading = true;
     err = null;
     zoom = 1;
-    getMediaView(it.id)
+    getMediaView(id)
       .then((b) => (blob = b))
       .catch((e) => {
         blob = null;
@@ -42,11 +47,12 @@
       })
       .finally(() => (loading = false));
     // warm the next one so arrow-through-library feels instant
-    const nid = items[idx + 1]?.id;
-    if (nid) void getMediaView(nid).catch(() => {});
+    if (prefetch) void getMediaView(prefetch).catch(() => {});
   }
 
-  $effect(load);
+  $effect(() => {
+    if (itemId) load(itemId, nextId);
+  });
 
   function move(d: number) {
     if (d > 0) idx = idx + 1 < items.length ? idx + 1 : 0; // slideshow wraps
@@ -81,6 +87,9 @@
       case "i":
         if (item) onEdit(item);
         break;
+      case "f":
+        toggleFull();
+        break;
     }
   }
 
@@ -94,6 +103,20 @@
   let root = $state<HTMLDivElement | null>(null);
   onMount(() => root?.focus());
 
+  // #35: fullscreen mode (WebView2 supports the Fullscreen API). Esc leaves
+  // fullscreen first (native behavior, synced via the event below); a second
+  // Esc then closes the viewer.
+  let full = $state(false);
+  function toggleFull() {
+    if (document.fullscreenElement) void document.exitFullscreen();
+    else if (root) void root.requestFullscreen().catch(() => {});
+  }
+  $effect(() => {
+    const h = () => (full = !!document.fullscreenElement);
+    document.addEventListener("fullscreenchange", h);
+    return () => document.removeEventListener("fullscreenchange", h);
+  });
+
   const src = $derived(blob?.data ? `data:${blob.mime};base64,${blob.data}` : null);
   const isVideo = $derived(!!blob && blob.mime.startsWith("video/"));
   const isPoster = $derived(!!blob && blob.kind === "thumb" && !!blob.tooBig);
@@ -101,17 +124,17 @@
 
 <svelte:window onkeydown={onkey} />
 
-<div class="viewer" bind:this={root} tabindex="-1" role="dialog" aria-label="media viewer">
+<div class="viewer" class:fullscreen={full} bind:this={root} tabindex="-1" role="dialog" aria-label="media viewer">
   <div class="viewer-stage">
-    {#if loading}
-      <div class="viewer-note">loading…</div>
-    {:else if err}
-      <div class="viewer-note">{err}</div>
-    {:else if src && isVideo}
+    {#if src && isVideo}
       <!-- svelte-ignore a11y_media_has_caption -->
       <video src={src} controls loop autoplay></video>
     {:else if src}
       <img src={src} alt={item?.title ?? ""} style="transform: scale({zoom})" />
+    {:else if loading}
+      <div class="viewer-note">loading…</div>
+    {:else if err}
+      <div class="viewer-note">{err}</div>
     {:else}
       <div class="viewer-note">
         nothing viewable is stored for this item — it is tracked by link.
@@ -146,6 +169,7 @@
         <button onclick={() => (zoom = Math.min(8, zoom * 1.25))} title="zoom in (+)">+</button>
       </span>
       <button onclick={() => item && onEdit(item)} title="open the editor (i)">Edit</button>
+      <button class:active={full} onclick={toggleFull} title="fullscreen (f)">⛶</button>
       <button class="ghost" onclick={onClose} title="close (Esc)">Close</button>
     </div>
   </div>

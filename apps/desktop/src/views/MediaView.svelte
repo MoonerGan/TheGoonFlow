@@ -14,14 +14,18 @@
     importVideoFiles,
     listItems,
     mergeItems,
+    dismissPair,
     pairingSuggestions,
+    reEnrichItems,
     siteStats,
+    sourceStats,
     topTags,
     type AppStatus,
     type FailureDetail,
     type ItemSummary,
     type PairSuggestion,
     type SiteCount,
+    type SourceStats,
     type TagCount,
   } from "../lib/api";
   import { jobState, onActivityChange } from "../lib/activity.svelte";
@@ -47,6 +51,9 @@
   let search = $state("");
   let tagFilter = $state<string | null>(null);
   let siteFilter = $state<string | null>(null);
+  // #40: source-state filters (local-only items are the "fix my metadata" queue)
+  let sourceFilter = $state<"local_only" | "no_tags" | null>(null);
+  let stats = $state<SourceStats>({ localOnly: 0, noLocal: 0, noTags: 0 });
   let panel = $state<"library" | "pairs">("library");
   let report = $state<string | null>(null);
   let bmFailures = $state<FailureDetail[]>([]);
@@ -89,6 +96,7 @@
         "media",
         tagFilter ?? undefined,
         siteFilter ?? undefined,
+        sourceFilter ?? undefined,
       );
       const t = await getThumbs(items.filter((i) => i.hasThumb).map((i) => i.id));
       thumbs = Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`]));
@@ -97,6 +105,7 @@
       mediaCount = (k["gallery"] ?? 0) + (k["post"] ?? 0);
       tags = await topTags(24, "media");
       sites = await siteStats("media");
+      stats = await sourceStats("media");
     } catch (e) {
       items = [];
       tags = [];
@@ -108,6 +117,7 @@
   $effect(() => {
     tagFilter;
     siteFilter;
+    sourceFilter;
     searchFor;
     void load();
   });
@@ -231,6 +241,35 @@
       pairNote = `merge failed: ${e}`;
     }
   }
+
+  async function doKeepBoth(p: PairSuggestion) {
+    try {
+      await dismissPair(p.aId, p.bId);
+      pairs = await pairingSuggestions("media");
+      pairNote = "kept both — this pair will not be suggested again";
+    } catch (e) {
+      pairNote = `could not dismiss: ${e}`;
+    }
+  }
+
+  let refetching = $state(false);
+  async function doBatchRefetch() {
+    const ids = [...selectedIds];
+    if (ids.length === 0 || refetching) return;
+    refetching = true;
+    try {
+      const r = await reEnrichItems(ids);
+      report =
+        `re-fetched ${r.items} item(s): ${r.enriched} of ${r.sources} sources gave something` +
+        (r.failed ? `, ${r.failed} item(s) failed` : "") +
+        (r.stopped ? ", stopped early" : "");
+      await load();
+    } catch (e) {
+      report = `re-fetch failed: ${e}`;
+    } finally {
+      refetching = false;
+    }
+  }
 </script>
 
 <div class="view-toolbar">
@@ -260,6 +299,9 @@
   {#if selectMode}
     <span class="hint">{selectedIds.size} selected</span>
     <button onclick={() => (selectedIds = new Set(items.map((i) => i.id)))}>Select all</button>
+    <button disabled={refetching || selectedIds.size === 0} onclick={doBatchRefetch} title="re-fetch art/tags/online info for the selection — runs as a job you can stop">
+      {refetching ? "Re-fetching…" : "Re-fetch metadata"}
+    </button>
     <button
       class="danger"
       disabled={selectedIds.size === 0}
@@ -306,8 +348,21 @@
 <div class="main">
   <nav class="sidebar">
     <div class="section">Media</div>
-    <button class="nav-item" class:active={panel === "library" && !tagFilter && !siteFilter} onclick={() => { panel = "library"; tagFilter = null; siteFilter = null; }}>
+    <button class="nav-item" class:active={panel === "library" && !tagFilter && !siteFilter && !sourceFilter} onclick={() => { panel = "library"; tagFilter = null; siteFilter = null; sourceFilter = null; }}>
       Everything <span class="count">{mediaCount}</span>
+    </button>
+
+    <div class="section">
+      Sources
+      {#if sourceFilter}
+        <button class="link" onclick={() => (sourceFilter = null)}>clear</button>
+      {/if}
+    </div>
+    <button class="nav-item" class:active={sourceFilter === "local_only"} onclick={() => (sourceFilter = sourceFilter === "local_only" ? null : "local_only")} title="Items with only a local file/folder and no online source — the queue for adding links and tags by hand.">
+      Local only <span class="count">{stats.localOnly || ""}</span>
+    </button>
+    <button class="nav-item" class:active={sourceFilter === "no_tags"} onclick={() => (sourceFilter = sourceFilter === "no_tags" ? null : "no_tags")} title="Items with no tags at all — bare file links and imports that no post could be matched to.">
+      No tags <span class="count">{stats.noTags || ""}</span>
     </button>
 
     <div class="section">
@@ -365,14 +420,30 @@
       {:else}
         {#each pairs as p (`${p.aId}-${p.bId}`)}
           <div class="pair-row">
-            <div>
-              <strong>{p.aTitle}</strong> <span class="hint">({p.aSites || "no source"})</span>
-              <br />
-              <strong>{p.bTitle}</strong> <span class="hint">({p.bSites || "no source"})</span>
+            <div class="pair-sides">
+              <div class="pair-side">
+                <span class="pair-num">1</span>
+                <div>
+                  <strong>{p.aTitle}</strong>
+                  <span class="hint">({p.aSites || "no source"})</span>
+                  {#if p.aSrc}<div class="pair-src" title={p.aSrc}>{p.aSrc}</div>{/if}
+                </div>
+              </div>
+              <div class="pair-side">
+                <span class="pair-num">2</span>
+                <div>
+                  <strong>{p.bTitle}</strong>
+                  <span class="hint">({p.bSites || "no source"})</span>
+                  {#if p.bSrc}<div class="pair-src" title={p.bSrc}>{p.bSrc}</div>{/if}
+                </div>
+              </div>
             </div>
             <div class="row">
-              <button onclick={() => doMerge(p, "a")}>Keep first</button>
-              <button onclick={() => doMerge(p, "b")}>Keep second</button>
+              <button onclick={() => doMerge(p, "a")}>Keep 1</button>
+              <button onclick={() => doMerge(p, "b")}>Keep 2</button>
+              <button class="ghost" title="not a real duplicate — stop suggesting this pair" onclick={() => doKeepBoth(p)}>
+                Keep both
+              </button>
             </div>
           </div>
         {/each}

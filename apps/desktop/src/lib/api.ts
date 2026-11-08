@@ -208,9 +208,11 @@ export type PairSuggestion = {
   aId: string;
   aTitle: string;
   aSites: string;
+  aSrc: string;
   bId: string;
   bTitle: string;
   bSites: string;
+  bSrc: string;
 };
 
 export const listItems = (
@@ -220,6 +222,7 @@ export const listItems = (
   kind?: string,
   tag?: string,
   site?: string,
+  source?: "local_only" | "no_local" | "no_tags",
 ) =>
   invoke<ItemSummary[]>("list_items", {
     limit,
@@ -228,9 +231,15 @@ export const listItems = (
     kind: kind ?? null,
     tag: tag ?? null,
     site: site ?? null,
+    source: source ?? null,
   });
 export const siteStats = (kind?: string) =>
   invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
+
+// source-state filters (#40): sidebar badges
+export type SourceStats = { localOnly: number; noLocal: number; noTags: number };
+export const sourceStats = (kind?: "game" | "media") =>
+  invoke<SourceStats>("source_stats", { kind: kind ?? null });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
 
@@ -298,10 +307,22 @@ export const pairingSuggestions = (kind?: "game" | "media") =>
   invoke<PairSuggestion[]>("pairing_suggestions", { kind: kind ?? null });
 export const mergeItems = (keepId: string, dropId: string) =>
   invoke<void>("merge_items", { keepId, dropId });
+export const dismissPair = (aId: string, bId: string) =>
+  invoke<void>("dismiss_pair", { aId, bId });
 
 // ---------- per-item source + re-enrichment (M2.6) ----------
 export const reEnrichItem = (itemId: string) =>
   invoke<EnrichReport>("re_enrich_item", { itemId });
+// #36: batch re-fetch; the job strip carries progress, this is the tally
+export type RefetchSummary = {
+  items: number;
+  enriched: number;
+  sources: number;
+  failed: number;
+  stopped: boolean;
+};
+export const reEnrichItems = (itemIds: string[]) =>
+  invoke<RefetchSummary>("re_enrich_items", { itemIds });
 export const addSource = (itemId: string, url: string) =>
   invoke<string>("add_source", { itemId, url });
 export const removeSource = (itemId: string, sourceId: number) =>
@@ -436,6 +457,8 @@ export type ModLaunch = {
   args: string[];
   cwd: string | null;
   note: string | null;
+  /// text the app put on the clipboard for the user (NW.js MTool hand-off)
+  clipboard: string | null;
   pid: number | null;
 };
 export const listMods = (itemId: string) => invoke<ModRow[]>("list_mods", { itemId });

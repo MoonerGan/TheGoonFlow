@@ -663,7 +663,7 @@
 
     <div class="row modal-actions">
       <button class="primary" disabled={saving} onclick={save}>Save</button>
-      <button onclick={refetch} disabled={enriching}>{enriching ? "Re-fetching… (see strip)" : "Re-fetch metadata"}</button>
+      <button onclick={refetch} disabled={enriching}>{enriching ? "Re-fetching…" : "Re-fetch metadata"}</button>
       <button class="ghost" onclick={onClose}>Cancel</button>
       <span class="spacer"></span>
       <button class="danger" onclick={remove}>Remove from vault</button>
