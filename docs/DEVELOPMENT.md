@@ -241,9 +241,13 @@ tools/
     `PANIC_HOLD_MS` escalates via `nuke_core` — the same function the typed
     NUKE command uses, never a re-implementation — then scrubs and hides.
     Tap vs hold is a press/release state machine (`panic_hold` + `nuked`
-    flags, OS auto-repeat must not fork a second episode). The drill
-    (`run_nuke_drill`) goes through `goon_vault::nuke` — the real path, not
-    a mock — so a green drill means the real nuke works.
+    flags, OS auto-repeat must not fork a second episode). Escalation must
+    *re-verify the physical key state* at the deadline (`GetAsyncKeyState`
+    on the modifiers): global-hotkey synthesizes Windows Release events
+    from a poll thread, so a dropped Release must never nuke by itself.
+    `tools\panic-tap-test.ps1` proves the tap live against the release exe.
+    The drill (`run_nuke_drill`) goes through `goon_vault::nuke` — the real
+    path, not a mock — so a green drill means the real nuke works.
 
 ## 5. Testing
 

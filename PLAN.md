@@ -355,13 +355,20 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   the window mid-erase. OS auto-repeat can't fork a second episode
   (`panic_hold` flag), and the matching release after an erase is inert
   (`nuked` flag). UI + USER-GUIDE say the quiet part loudly: rehearse
-  taps, never hold on the real vault. This closes the code side of #23;
+  taps, never hold on the real vault. **Verified live** against the
+  release exe via `tools\panic-tap-test.ps1` (injects Ctrl+Alt+L from
+  another process, watches titled-window visibility: Flow VIS→HID→VIS).
+  That test also drove a hardening pass: escalation re-checks the
+  *physical* Ctrl+Alt state (`GetAsyncKeyState`) at the 3 s mark — a
+  dropped release event can never nuke by itself — and the repeat guard
+  is physical-aware too, so a lost release can't wedge the tap path.
+  This closes the code side of #23;
   the issue waits on your manual hotkey pass (tap, hold-on-drill-notes,
   custom key, scrub-on-lock) before Done.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built
-  after #25) runs everything below; existing `C:\GoonFlow` vaults migrate
-  v3→v7 on unlock (idempotent, in place). Manual checklist for the In-review
-  issues, in the order that surfaces problems fastest:
+  after #23, schema v7) runs everything below; existing `C:\GoonFlow`
+  vaults migrate v3→v7 on unlock (idempotent, in place). Manual checklist
+  for the In-review issues, in the order that surfaces problems fastest:
   1. Unlock the real vault → schema lands at v7, old items intact.
   2. Viewer (#21): click media cards — ←/→ through the grid, +/−/0 zoom,
      space slideshow, big stored video → poster fallback, `i` → editor.

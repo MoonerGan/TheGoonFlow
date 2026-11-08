@@ -316,27 +316,56 @@ pub const DEFAULT_PANIC_HOTKEY: &str = "CommandOrControl+Alt+L";
 /// Hold this long and the vault is crypto-erased (PLAN §4 escalation).
 pub const PANIC_HOLD_MS: u64 = 3000;
 
-/// Global hotkey state machine.
-/// - press (and the OS auto-repeat while held) starts/keeps one hold episode
-/// - release before 3 s = tap: Lock + hide (press again to reveal the
-///   locked window)
-/// - release after 3 s: the erase already ran; release does nothing
+/// Physical key state via the OS (same mechanism global-hotkey itself uses
+/// to synthesize release events). Escalation must NEVER fire on a lost
+/// release event alone: the watcher verifies the keys are still physically
+/// down at the deadline. Ctrl+Alt are what a held hotkey keeps depressed
+/// (WM_HOTKEY auto-repeat proves L is still down).
+#[cfg(windows)]
+fn panic_mods_down() -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(virt_key: i32) -> i16;
+    }
+    const VK_CONTROL: i32 = 0x11;
+    const VK_MENU: i32 = 0x12;
+    (unsafe { (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0 })
+        && (unsafe { (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0 })
+}
+
+#[cfg(not(windows))]
+fn panic_mods_down() -> bool {
+    false // no reliable physical probe: never escalate, tap-only panic
+}
+
+/// Global hotkey state machine. Windows WM_HOTKEY auto-repeats while held
+/// (many Pressed events) and global-hotkey synthesizes one Release per
+/// Pressed (a storm on key-up), so the machine collapses both:
+/// - first Pressed starts an episode + arms the 3 s escalation watcher
+/// - Pressed repeats (episode live AND keys physically down) are ignored
+/// - the first Release closes the episode = tap: Lock + hide (tap again
+///   reveals the locked window); duplicate Releases fall through inert
+/// - if the watcher escalated, the erase already ran; releases do nothing
 fn panic_event(app: &tauri::AppHandle, pressed: bool) {
     use tauri::Manager;
     let state = app.state::<AppState>();
     if pressed {
-        if state.panic_hold.load(Ordering::SeqCst) {
-            return; // auto-repeat while held: keep the original episode
+        // auto-repeat while the episode is live AND keys physically down.
+        // (episode live but keys up = lost release: start a fresh tap.)
+        if state.panic_hold.load(Ordering::SeqCst) && panic_mods_down() {
+            return;
         }
         state.panic_hold.store(true, Ordering::SeqCst);
         let app2 = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(PANIC_HOLD_MS));
             let st = app2.state::<AppState>();
-            if st.panic_hold.load(Ordering::SeqCst) {
+            // Escalate only while the episode is live AND the keys are
+            // verifiably still held: a dropped release can never nuke alone.
+            if st.panic_hold.load(Ordering::SeqCst) && panic_mods_down() {
+                eprintln!("panic hold: crypto-erasing vault");
                 st.nuked.store(true, Ordering::SeqCst);
-                // hold 3 s = crypto-erase, exactly the typed-NUKE path,
-                // then scrub and hide like every panic does
+                st.panic_hold.store(false, Ordering::SeqCst);
                 let _ = nuke_core(&st, None);
                 do_scrub(&app2);
                 if let Some(w) = app2.get_webview_window("main") {
@@ -348,22 +377,27 @@ fn panic_event(app: &tauri::AppHandle, pressed: bool) {
         return;
     }
 
-    // release
+    // release: the first one of an episode (or of an erase) counts, the
+    // duplicate storm from the OS poll threads is inert.
     if state.nuked.swap(false, Ordering::SeqCst) {
         state.panic_hold.store(false, Ordering::SeqCst);
         return; // already erased mid-hold; nothing left to do
     }
-    state.panic_hold.store(false, Ordering::SeqCst);
+    if !state.panic_hold.swap(false, Ordering::SeqCst) {
+        return; // no live episode = duplicate release
+    }
 
     // tap behavior
     let win = app.get_webview_window("main");
     if state.hidden.load(Ordering::SeqCst) {
+        eprintln!("panic tap: revealing window");
         if let Some(w) = win {
             let _ = w.show();
             let _ = w.set_focus();
         }
         state.hidden.store(false, Ordering::SeqCst);
     } else {
+        eprintln!("panic tap: locking + hiding");
         let scrub = scrub_on_lock_flag(&state.core);
         lock_core(&state.core, &state.locked);
         if let Some(w) = win {
@@ -1572,6 +1606,7 @@ pub fn run() {
                 .with_handler(move |app, _shortcut, event| {
                     let pressed =
                         event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed;
+                    eprintln!("panic hotkey event: {:?}", event.state());
                     panic_event(app, pressed);
                 })
                 .build(),
