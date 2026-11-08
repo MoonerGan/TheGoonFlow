@@ -33,23 +33,28 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 
 ## 2. Lock, unlock, and the nuke
 
-- **Lock** (top-right) closes the database and wipes the key from memory.
+- **Lock** (top-bar) closes the database and wipes the key from memory.
   Reopen with the passphrase.
-- **Nuke** (on the locked screens): crypto-erase. The key is shredded first,
-  then every vault file is overwritten with random bytes and deleted. Type
-  `NUKE` to confirm — it is instant and **irreversible**. Use it if you forgot
-  the passphrase or want a clean start.
+- **Nuke** (bottom of the lock screen, and on the setup/reconnect screens):
+  crypto-erase. The key is shredded first, then every vault file is
+  overwritten with random bytes and deleted. Type `NUKE` to confirm — it is
+  **irreversible**. Use it if you forgot the passphrase or want a clean start.
+- **Forget pointer** (reconnect screen): deletes only the app's `flow.cfg`
+  pointer — touches no vault files. The escape hatch when the pointer points
+  at a moved/deleted folder and you just want the app working again.
 - Forgotten passphrase ≠ lost content forever only via backups: without it the
   vault is a brick. That's the point.
 
 ## 3. Import what you already have
 
-Three import buttons in the top bar. Everything imported is just a normal
-library entry — click any card to correct it.
+Five import buttons in the top bar. Everything imported is just a normal
+library entry — click any card to correct it. The sidebar splits the library
+into **Games** and **Media** (galleries/posts) views, filterable by status.
 
-### + Games folder
+### + Game folder
 Point it at the folder that contains your game folders (or at a single game
-folder). The Goon Flow sniffs each one:
+folder). Nested library layouts (`root/by-engine/Game A/`, `root/JP/deep/…`)
+are searched up to 4 levels deep. The Goon Flow sniffs each one:
 
 | Engine | How it's recognized | Bonus metadata |
 |---|---|---|
@@ -65,7 +70,19 @@ Versions are parsed from folder names like `My Game [v0.12] [renpy]` →
 title `My Game`, version `0.12`, engine tag. The games themselves are **not
 copied into the vault** — the vault stores the path (as a `local` source) so
 you can launch/move them as usual. Re-running an import skips known folders,
-so it's safe to point at the same folder after adding games.
+so it's safe to point at the same folder after adding games. If anything
+can't be stored, the report strip gains a **details** list naming the folder
+and the reason.
+
+### + Game zip
+A repacked game that still lives in a `.zip` (common with repack sites) can be
+added without extracting: the zip's own contents are fingerprinted for engine
+files and the real title/cover pulled out of the archive. The vault stores a
+pointer to the zip where it is — it is never moved or copied.
+
+### + Game .exe
+Already know the exact game? Pick its `.exe` and its containing folder is
+imported as one game entry. Handy for one-offs without browsing a whole tree.
 
 ### + Images
 Pick image files (PNG/JPG/WebP/GIF/BMP). They are **stored inside the encrypted
@@ -82,14 +99,20 @@ known boorus — and becomes a tracked item with its source URL.
 (one request at a time, ~0.7 s apart) fetches thumbnails, full images, and
 tags for booru posts (gelbooru/rule34/e621 APIs) and cover art for DLsite
 products. e-hentai and f95zone import title+URL only until session cookies
-land in M2. Unchecked = pure offline metadata import.
+land in M2. Unchecked = pure offline metadata import. This only decorates
+bookmarks you import — it is **not** the browser integration (that's the
+companion extension in M4).
 
 > Note: "enrich online" contacts those sites directly from this machine — same
 > as browsing them. If that matters to you, uncheck it or run behind your
 > usual proxy.
 
 The grey report strip under the toolbar shows what happened (counts per site,
-thumbnails fetched, duplicates, failures).
+thumbnails fetched, duplicates). **Anything that fails now says so under a
+`details` disclosure** — which URL failed, why (deleted post, age gate, HTTP
+status, network error, unrecognized site), so a failure never means silently
+scanning by hand. Imported items stick even if their online art failed to
+fetch.
 
 ## 4. The library
 
@@ -122,5 +145,5 @@ thumbnails fetched, duplicates, failures).
 | "Reconnect your vault" screen | Plug in the drive; if the folder moved, browse to it once — the pointer updates. |
 | "that folder is not a goonflow vault" | You picked the wrong folder (e.g. the parent). Pick the one containing `vault.marker`. |
 | Wrong passphrase loop | No recovery — that's crypto, not a bug. Restore from a backup or nuke & restart. |
-| Import found 0 games | The scan is one level deep; the game folder itself must contain the engine files. Drag the real folder up or select it directly. |
+| Import found 0 games | The scan goes 4 levels deep; the game folder itself must contain the engine files. If the game is inside a .zip, use *+ Game zip*. Selecting the game's folder directly always works. |
 | White/blank window at launch | WebView2 runtime missing — install "Microsoft Edge WebView2 Runtime". |

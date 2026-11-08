@@ -34,8 +34,12 @@ export const attachVault = (dir: string) => invoke<void>("attach_vault", { dir }
 export const unlockVault = (passphrase: string) =>
   invoke<void>("unlock", { passphrase });
 export const lockVault = () => invoke<void>("lock");
-export const nukeVault = (confirm: string) => invoke<void>("nuke_vault", { confirm });
-export const getStats = () => invoke<StatusCount[]>("vault_stats");
+export const nukeVault = (confirm: string, dir?: string) =>
+  invoke<void>("nuke_vault", { confirm, dir: dir ?? null });
+export const resetPointer = () => invoke<void>("reset_pointer");
+export const getStats = (kind?: string) =>
+  invoke<StatusCount[]>("vault_stats", { kind: kind ?? null });
+export const getKindStats = () => invoke<Array<[string, number]>>("kind_stats");
 
 export type ItemSummary = {
   id: string;
@@ -54,6 +58,7 @@ export type GameImportReport = {
   skipped: number;
   withThumb: number;
   titles: string[];
+  failures: string[];
 };
 
 export type ImageImportReport = {
@@ -62,6 +67,8 @@ export type ImageImportReport = {
   imagesStored: number;
   failed: number;
 };
+
+export type FailureDetail = { url: string; reason: string };
 
 export type BookmarkReport = {
   parsed: number;
@@ -72,10 +79,17 @@ export type BookmarkReport = {
   tagsAdded: number;
   fetchFailures: number;
   bySite: Record<string, number>;
+  failures: FailureDetail[];
+  unrecognizedSample: string[];
 };
 
-export const listItems = (limit = 300, offset = 0, search?: string) =>
-  invoke<ItemSummary[]>("list_items", { limit, offset, search: search ?? null });
+export const listItems = (limit = 300, offset = 0, search?: string, kind?: string) =>
+  invoke<ItemSummary[]>("list_items", {
+    limit,
+    offset,
+    search: search ?? null,
+    kind: kind ?? null,
+  });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
 export const updateItem = (
@@ -90,6 +104,10 @@ export const setComplete = (id: string, complete: boolean) =>
   invoke<void>("set_complete", { id, complete });
 export const importGameFolder = (dir: string) =>
   invoke<GameImportReport>("import_game_folder", { dir });
+export const importGameExe = (exe: string) =>
+  invoke<GameImportReport>("import_game_exe", { exe });
+export const importGameZip = (zipPath: string) =>
+  invoke<GameImportReport>("import_game_zip", { zipPath });
 export const importImageFiles = (paths: string[]) =>
   invoke<ImageImportReport>("import_image_files", { paths });
 export const importBookmarks = (path: string, fetchOnline: boolean) =>

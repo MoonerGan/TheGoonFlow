@@ -3,14 +3,18 @@
   import {
     deleteItem,
     getStats,
+    getKindStats,
     getThumbs,
     importBookmarks,
     importGameFolder,
+    importGameZip,
+    importGameExe,
     importImageFiles,
     listItems,
     setComplete,
     updateItem,
     type AppStatus,
+    type FailureDetail,
     type ItemSummary,
     type StatusCount,
   } from "../lib/api";
@@ -27,11 +31,17 @@
 
   let items = $state<ItemSummary[]>([]);
   let stats = $state<StatusCount[]>([]);
+  let kindCounts = $state<Record<string, number>>({});
   let thumbs = $state<Record<string, string>>({});
   let report = $state<string | null>(null);
+  let bmFailures = $state<FailureDetail[]>([]);
+  let bmUnrecognized = $state<string[]>([]);
+  let gameFailures = $state<string[]>([]);
+  let loadError = $state<string | null>(null);
   let busy = $state<string | null>(null);
   let enrichOnline = $state(true);
-  let filter = $state<string>("all"); // all | status value
+  let view = $state<"all" | "game" | "media">("all");
+  let filter = $state<string>("all"); // status filter within view
   let selected = $state<ItemSummary | null>(null);
 
   let editTitle = $state("");
@@ -41,24 +51,31 @@
   let editComplete = $state(false);
   let editorError = $state<string | null>(null);
 
+  const viewKind = $derived(view === "all" ? undefined : view);
   const filtered = $derived(
     filter === "all" ? items : items.filter((i) => i.status === filter),
   );
 
   async function load() {
+    loadError = null;
     try {
-      stats = await getStats();
-      items = await listItems(300, 0);
+      stats = await getStats(viewKind);
+      items = await listItems(300, 0, undefined, viewKind);
       const t = await getThumbs(items.filter((i) => i.hasThumb).map((i) => i.id));
       thumbs = Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`]));
-    } catch {
+      kindCounts = Object.fromEntries(await getKindStats());
+    } catch (e) {
+      // Never swallow silently — a blank grid with no reason is how M0 lied
+      // about successful imports.
       items = [];
       stats = [];
       thumbs = {};
+      loadError = `library load failed: ${e}`;
     }
   }
 
   $effect(() => {
+    view; // reload when the Games/Media view changes
     load();
   });
 
@@ -66,16 +83,69 @@
     return stats.find((s) => s.status === key)?.count ?? 0;
   }
 
+  const VIEW_LABEL: Record<string, string> = {
+    game: "games",
+    gallery: "galleries",
+    post: "posts",
+  };
+
+  function gamesReport(r: {
+    imported: number;
+    skipped: number;
+    withThumb: number;
+    failures: string[];
+  }): string {
+    gameFailures = r.failures;
+    return (
+      `games: ${r.imported} imported (${r.withThumb} with cover)` +
+      (r.skipped ? `, ${r.skipped} already in vault` : "") +
+      (r.failures.length ? `, ${r.failures.length} failed (see details)` : "")
+    );
+  }
+
   async function doImportGames() {
     const dir = await open({ directory: true, title: "Folder containing your games" });
     if (typeof dir !== "string") return;
     busy = "games";
-    report = "scanning folder…";
+    report = "scanning folder (nested layouts included)…";
     try {
-      const r = await importGameFolder(dir);
-      report =
-        `games: ${r.imported} imported (${r.withThumb} with cover)` +
-        (r.skipped ? `, ${r.skipped} already in vault` : "");
+      report = gamesReport(await importGameFolder(dir));
+      await load();
+    } catch (e) {
+      report = `game import failed: ${e}`;
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function doImportZip() {
+    const file = await open({
+      title: "Zipped game (repack .zip)",
+      filters: [{ name: "Zip archive", extensions: ["zip"] }],
+    });
+    if (typeof file !== "string") return;
+    busy = "games";
+    report = "inspecting zip…";
+    try {
+      report = gamesReport(await importGameZip(file));
+      await load();
+    } catch (e) {
+      report = `zip import failed: ${e}`;
+    } finally {
+      busy = null;
+    }
+  }
+
+  async function doImportExe() {
+    const file = await open({
+      title: "The game's .exe",
+      filters: [{ name: "Windows program", extensions: ["exe"] }],
+    });
+    if (typeof file !== "string") return;
+    busy = "games";
+    report = "importing game folder…";
+    try {
+      report = gamesReport(await importGameExe(file));
       await load();
     } catch (e) {
       report = `game import failed: ${e}`;
@@ -119,6 +189,8 @@
       : "importing bookmarks…";
     try {
       const r = await importBookmarks(file, enrichOnline);
+      bmFailures = r.failures;
+      bmUnrecognized = r.unrecognizedSample;
       const sites = Object.entries(r.bySite)
         .map(([site, n]) => `${site} ${n}`)
         .join(", ");
@@ -128,7 +200,7 @@
         (r.thumbnailed ? `, ${r.thumbnailed} thumbnails fetched` : "") +
         (r.duplicates ? `, ${r.duplicates} dupes` : "") +
         (r.unrecognized ? `, ${r.unrecognized} unrecognized` : "") +
-        (r.fetchFailures ? `, ${r.fetchFailures} fetch failures` : "");
+        (r.fetchFailures ? `, ${r.fetchFailures} fetch failures (see details)` : "");
       await load();
     } catch (e) {
       report = `bookmark import failed: ${e}`;
@@ -181,12 +253,14 @@
 <div class="shell">
   <header class="topbar">
     <span class="brand">The Goon Flow</span>
-    <button class="primary" disabled={busy !== null} onclick={doImportGames}>+ Games folder</button>
+    <button class="primary" disabled={busy !== null} onclick={doImportGames}>+ Game folder</button>
+    <button disabled={busy !== null} onclick={doImportZip}>+ Game zip</button>
+    <button disabled={busy !== null} onclick={doImportExe}>+ Game .exe</button>
     <button disabled={busy !== null} onclick={doImportImages}>+ Images</button>
     <button disabled={busy !== null} onclick={doImportBookmarks}>+ Bookmarks</button>
-    <label class="inline-check">
+    <label class="inline-check" title="During bookmark import only: fetch thumbnails + tags for known booru/DLsite links. One request at a time. Not the browser integration — that arrives with the companion extension.">
       <input type="checkbox" bind:checked={enrichOnline} />
-      enrich online
+      enrich online <span class="hint">(fetch art for bookmarked posts)</span>
     </label>
 
     <span class="spacer"></span>
@@ -197,14 +271,60 @@
   </header>
 
   {#if report}
-    <div class="report">{report}</div>
+    <div class="report">
+      {report}
+      {#if bmFailures.length > 0 || bmUnrecognized.length > 0 || gameFailures.length > 0}
+        <details class="details">
+          <summary>details ({bmFailures.length + gameFailures.length} failures{bmUnrecognized.length ? `, ${bmUnrecognized.length}+ unrecognized` : ""})</summary>
+          {#if gameFailures.length > 0}
+            <p class="hint">Game import problems:</p>
+            <ul>
+              {#each gameFailures as f}
+                <li>{f}</li>
+              {/each}
+            </ul>
+          {/if}
+          {#if bmFailures.length > 0}
+            <p class="hint">Bookmark fetch failures (the item is still imported — only the online art/tags failed):</p>
+            <ul>
+              {#each bmFailures as f}
+                <li><code>{f.url}</code> — {f.reason}</li>
+              {/each}
+            </ul>
+          {/if}
+          {#if bmUnrecognized.length > 0}
+            <p class="hint">Not a known site yet (skipped; site support is added over time):</p>
+            <ul>
+              {#each bmUnrecognized as u}
+                <li><code>{u}</code></li>
+              {/each}
+            </ul>
+          {/if}
+        </details>
+      {/if}
+    </div>
+  {/if}
+
+  {#if loadError}
+    <div class="report error-strip">{loadError}</div>
   {/if}
 
   <div class="main">
     <nav class="sidebar">
+      <div class="section">Views</div>
+      <button class="nav-item" class:active={view === "all"} onclick={() => (view = "all")}>
+        All <span class="count">{(kindCounts.game ?? 0) + (kindCounts.gallery ?? 0) + (kindCounts.post ?? 0)}</span>
+      </button>
+      <button class="nav-item" class:active={view === "game"} onclick={() => (view = "game")}>
+        Games <span class="count">{kindCounts.game ?? 0}</span>
+      </button>
+      <button class="nav-item" class:active={view === "media"} onclick={() => (view = "media")}>
+        Media <span class="count">{(kindCounts.gallery ?? 0) + (kindCounts.post ?? 0)}</span>
+      </button>
+
       <div class="section">Flow</div>
       <button class="nav-item" class:active={filter === "all"} onclick={() => (filter = "all")}>
-        All <span class="count">{items.length}</span>
+        Anything <span class="count">{items.length}</span>
       </button>
       {#each ["seen", "tracking", "wishlist", "downloaded", "played"] as key}
         <button class="nav-item" class:active={filter === key} onclick={() => (filter = key)}>
@@ -222,11 +342,18 @@
     <main class="content">
       {#if filtered.length === 0}
         <div class="empty">
-          <strong>The flow is empty.</strong><br />
-          Import what you already have: <em>+ Games folder</em> sniffs engine/version/cover
-          from your library, <em>+ Images</em> stores files in the encrypted vault,
-          <em>+ Bookmarks</em> pulls a browser export and (optionally) fetches thumbnails + tags
-          from booru APIs and DLsite.<br /><br />
+          <strong>{loadError ? "Couldn't load the flow." : "Nothing in this view."}</strong><br />
+          {#if view === "game"}
+            Import games with <em>+ Game folder</em> (nested layouts OK), <em>+ Game zip</em>
+            (zipped repacks), or <em>+ Game .exe</em> (point straight at the launcher).
+          {:else if view === "media"}
+            <em>+ Images</em> stores image files inside the encrypted vault;
+            <em>+ Bookmarks</em> tracks posts and galleries from boorus, e-hentai and DLsite.
+          {:else}
+            Import what you already have: games (folder / zip / exe), images (stored encrypted),
+            and a browser bookmarks export (optionally fetching thumbnails + tags online).
+          {/if}
+          <br /><br />
           <span class="hint">Everything imported is editable — click any card to correct it.</span>
         </div>
       {:else}
@@ -236,7 +363,7 @@
               {#if thumbs[item.id]}
                 <img src={thumbs[item.id]} alt="" loading="lazy" />
               {:else}
-                <div class="noimg">{item.kind}</div>
+                <div class="noimg">{VIEW_LABEL[item.kind] ?? item.kind}</div>
               {/if}
               <div class="tile-body">
                 <span class="tile-title">{item.title}</span>

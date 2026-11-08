@@ -13,6 +13,7 @@ use goon_core::media;
 use goon_core::model::{Item, ItemKind, Status};
 use serde::Serialize;
 use std::fs;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 #[derive(Serialize)]
@@ -22,6 +23,7 @@ pub struct GameImportReport {
     pub skipped: usize,
     pub with_thumb: usize,
     pub titles: Vec<String>,
+    pub failures: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -33,6 +35,65 @@ pub struct ImageImportReport {
     pub failed: usize,
 }
 
+/// How deep under the picked folder we look for games (library organizers
+/// nest by genre/language/circle: `root/renpy/Summer Game [v1]/`).
+const MAX_SCAN_DEPTH: usize = 4;
+
+/// Folder names that are engine internals, never library branches — don't
+/// descend into these when hunting for game folders.
+fn is_internal_dir(name: &str) -> bool {
+    const INTERNAL: &[&str] = &[
+        "$recycle.bin",
+        "system volume information",
+        "node_modules",
+        "savedata",
+        "save",
+        "saves",
+        "logs",
+        "data",
+        "locales",
+        "python",
+        "redist",
+        "tools",
+        "x64",
+        "x86",
+        "dll",
+    ];
+    name.starts_with('.') || INTERNAL.iter().any(|i| name == *i) || name.starts_with("python")
+}
+
+/// Recursively find game folders under `dir`. A folder that fingerprints as
+/// a game is a candidate and we never descend into it (its engine internals
+/// would produce false positives).
+fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+    if detect_engine(dir).engine.is_some() {
+        out.push(dir.to_path_buf());
+        return;
+    }
+    if depth == 0 {
+        return;
+    }
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    let mut sub: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| {
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            !is_internal_dir(&name) && !name.ends_with("_data")
+        })
+        .collect();
+    sub.sort();
+    for p in sub {
+        find_game_dirs(&p, depth - 1, out);
+    }
+}
+
 pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportReport, String> {
     let root = PathBuf::from(root);
     if !root.is_dir() {
@@ -41,32 +102,122 @@ pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportRe
     let mut inner = state.inner.lock().unwrap();
     let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
 
-    // Either the picked folder *is* a game, or import its immediate game subfolders.
-    let candidates: Vec<PathBuf> = if detect_engine(&root).engine.is_some() {
-        vec![root]
-    } else {
-        let mut v = Vec::new();
-        if let Ok(rd) = fs::read_dir(&root) {
-            for e in rd.flatten() {
-                let p = e.path();
-                if p.is_dir() && detect_engine(&p).engine.is_some() {
-                    v.push(p);
-                }
-            }
-        }
-        v.sort();
-        v
-    };
+    let mut candidates = Vec::new();
+    find_game_dirs(&root, MAX_SCAN_DEPTH, &mut candidates);
+    candidates.sort();
+    candidates.dedup();
 
     let mut report = GameImportReport {
         imported: 0,
         skipped: 0,
         with_thumb: 0,
         titles: Vec::new(),
+        failures: Vec::new(),
     };
-    let now = now_epoch();
+    import_game_dirs(conn, &candidates, &mut report);
+    Ok(report)
+}
 
-    for dir in candidates {
+/// User pointed straight at a game's .exe — import its containing folder as
+/// one game (an exe at top level always fingerprints as pc-game).
+pub fn import_game_exe(state: &AppState, exe: String) -> Result<GameImportReport, String> {
+    let path = PathBuf::from(&exe);
+    if !path.is_file() {
+        return Err("file does not exist".into());
+    }
+    let dir = path
+        .parent()
+        .ok_or("cannot determine game folder from that exe")?
+        .to_path_buf();
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    let mut report = GameImportReport {
+        imported: 0,
+        skipped: 0,
+        with_thumb: 0,
+        titles: Vec::new(),
+        failures: Vec::new(),
+    };
+    import_game_dirs(conn, &[dir], &mut report);
+    Ok(report)
+}
+
+/// Import a zipped game: fingerprint engine files inside the archive,
+/// extract title + cover art from the zip itself. The zip stays where it is;
+/// the vault stores a pointer to it.
+pub fn import_game_zip(state: &AppState, zip_path: String) -> Result<GameImportReport, String> {
+    let path = PathBuf::from(&zip_path);
+    if !path.is_file() {
+        return Err("zip file does not exist".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+
+    let mut report = GameImportReport {
+        imported: 0,
+        skipped: 0,
+        with_thumb: 0,
+        titles: Vec::new(),
+        failures: Vec::new(),
+    };
+
+    let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+    if db::source_exists(conn, "local", &url) {
+        report.skipped += 1;
+        return Ok(report);
+    }
+
+    match zip_engine_info(&path) {
+        Ok(info) => {
+            let raw_name = path
+                .file_stem()
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_else(|| "Untitled".into());
+            let (clean_title, version) = clean_name(&raw_name);
+            let title = info
+                .title
+                .filter(|t| !t.trim().is_empty())
+                .unwrap_or(clean_title);
+            let now = now_epoch();
+            let id = new_id("g");
+            let item = Item {
+                id: id.clone(),
+                kind: ItemKind::Game,
+                title: title.clone(),
+                original_title: None,
+                circle: None,
+                status: Status::Downloaded,
+                dnf: false,
+                rating: None,
+                notes: String::new(),
+                version,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            db::insert_item(conn, &item).map_err(|e| e.to_string())?;
+            db::insert_source(conn, &id, "local", &url, None, Some(&now))
+                .map_err(|e| e.to_string())?;
+            if let Some(tag) = info.tag {
+                if let Ok(tag_id) = db::tag_get_or_create(conn, tag, db::TYPE_SITE_FLAG) {
+                    let _ = db::link_item_tag(conn, &id, tag_id);
+                }
+            }
+            if let Some(bytes) = info.cover_bytes {
+                if media::put_thumbnail(conn, &id, &bytes) {
+                    report.with_thumb += 1;
+                }
+            }
+            report.imported += 1;
+            report.titles.push(title);
+        }
+        Err(e) => report.failures.push(format!("{zip_path}: {e}")),
+    }
+    Ok(report)
+}
+
+fn import_game_dirs(conn: &rusqlite::Connection, dirs: &[PathBuf], report: &mut GameImportReport) {
+    let now = now_epoch();
+    for dir in dirs {
         let url = format!("file:///{}", dir.to_string_lossy().replace('\\', "/"));
         if db::source_exists(conn, "local", &url) {
             report.skipped += 1;
@@ -77,7 +228,7 @@ pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportRe
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".into());
         let (clean_title, version) = clean_name(&raw_name);
-        let engine = detect_engine(&dir);
+        let engine = detect_engine(dir);
         let title = engine
             .title
             .filter(|t| !t.trim().is_empty())
@@ -98,8 +249,15 @@ pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportRe
             created_at: now.clone(),
             updated_at: now.clone(),
         };
-        db::insert_item(conn, &item).map_err(|e| e.to_string())?;
-        db::insert_source(conn, &id, "local", &url, None, Some(&now)).map_err(|e| e.to_string())?;
+        if let Err(e) = db::insert_item(conn, &item) {
+            report.failures.push(format!("{}: insert failed: {e}", raw_name));
+            continue;
+        }
+        if let Err(e) = db::insert_source(conn, &id, "local", &url, None, Some(&now)) {
+            report.failures.push(format!("{}: source failed: {e}", raw_name));
+            let _ = db::delete_item(conn, &id);
+            continue;
+        }
 
         if let Some(tag) = engine.tag {
             if let Ok(tag_id) = db::tag_get_or_create(conn, tag, db::TYPE_SITE_FLAG) {
@@ -114,7 +272,6 @@ pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportRe
         report.imported += 1;
         report.titles.push(title);
     }
-    Ok(report)
 }
 
 pub fn import_image_files(state: &AppState, paths: Vec<String>) -> Result<ImageImportReport, String> {
@@ -171,6 +328,145 @@ pub fn import_image_files(state: &AppState, paths: Vec<String>) -> Result<ImageI
         images_stored: stored,
         failed,
     })
+}
+
+// ---------- zip archives ----------
+
+/// Same fingerprinting as on-disk folders, but reading the archive's central
+/// directory (we only touch the handful of tiny files that carry metadata).
+pub struct ZipEngineInfo {
+    pub tag: Option<&'static str>,
+    pub title: Option<String>,
+    pub cover_bytes: Option<Vec<u8>>,
+}
+
+pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
+    let file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut za = zip::ZipArchive::new(file).map_err(|e| format!("unreadable zip: {e}"))?;
+
+    let names: Vec<String> = za
+        .file_names()
+        .map(|n| n.replace('\\', "/"))
+        .filter(|n| !n.ends_with('/'))
+        .collect();
+    if names.is_empty() {
+        return Err("zip contains no files".into());
+    }
+
+    // Repacks often wrap everything in one top folder: `GameName/www/...`.
+    let prefix = common_zip_prefix(&names);
+    let rel: Vec<String> = names
+        .iter()
+        .map(|n| n[prefix.len()..].to_string())
+        .collect();
+    let lower: Vec<String> = rel.iter().map(|s| s.to_lowercase()).collect();
+
+    let find = |pred: &dyn Fn(&str) -> bool| lower.iter().position(|n| pred(n));
+
+    // Cover image candidates.
+    let cover_bytes = find(&|n| {
+        n.starts_with("www/img/titles/")
+            || n.starts_with("graphics/titles1/")
+            || n.starts_with("graphics/title1/")
+            || n == "game/gui/window_icon.png"
+            || n == "game/images/ui/window_icon.png"
+    })
+    .and_then(|i| zip_read(&mut za, &names, i, 20 * 1024 * 1024));
+
+    // RPG Maker MV/MZ
+    if find(&|n| n == "game.rmmzproject" || n == "game.rmvproject").is_some() {
+        let title = find(&|n| n == "www/data/system.json")
+            .and_then(|i| zip_read_text(&mut za, &names, i))
+            .and_then(|raw| {
+                serde_json::from_str::<serde_json::Value>(&raw)
+                    .ok()?
+                    .get("gameTitle")?
+                    .as_str()
+                    .map(str::to_string)
+            });
+        return Ok(ZipEngineInfo { tag: Some("rpg-maker"), title, cover_bytes });
+    }
+    // RPG Maker XP/VX/Ace
+    if find(&|n| n == "game.exe").is_some() && find(&|n| n == "game.ini").is_some() {
+        let title = find(&|n| n == "game.ini")
+            .and_then(|i| zip_read_text(&mut za, &names, i))
+            .and_then(|raw| {
+                raw.lines()
+                    .find_map(|l| l.trim().strip_prefix("Title="))
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+            });
+        return Ok(ZipEngineInfo { tag: Some("rpg-maker"), title, cover_bytes });
+    }
+    // Ren'Py
+    if find(&|n| (n.starts_with("game/") && n.ends_with(".rpy")) || n.starts_with("renpy/")).is_some() {
+        return Ok(ZipEngineInfo { tag: Some("renpy"), title: None, cover_bytes });
+    }
+    // Unity: a top-level `X_Data/` folder.
+    if let Some(i) = lower.iter().position(|n| {
+        n.split('/').next().is_some_and(|s| s.ends_with("_data")) && n.contains('/')
+    }) {
+        let name = rel[i]
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches("_Data")
+            .trim()
+            .to_string();
+        return Ok(ZipEngineInfo { tag: Some("unity"), title: Some(name), cover_bytes });
+    }
+    // GameMaker
+    if find(&|n| n == "data.win").is_some() {
+        return Ok(ZipEngineInfo { tag: Some("gamemaker"), title: None, cover_bytes });
+    }
+    // NW.js / HTML5
+    if find(&|n| n == "package.json").is_some() && find(&|n| n == "index.html").is_some() {
+        let title = find(&|n| n == "package.json")
+            .and_then(|i| zip_read_text(&mut za, &names, i))
+            .and_then(|raw| {
+                let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+                ["title", "name"]
+                    .iter()
+                    .filter_map(|k| v.get(*k)?.as_str())
+                    .find(|s| {
+                        !s.trim().is_empty()
+                            && !matches!(
+                                s.trim().to_lowercase().as_str(),
+                                "game" | "app" | "nw" | "index" | "project"
+                            )
+                    })
+                    .map(str::to_string)
+            });
+        return Ok(ZipEngineInfo { tag: Some("html5"), title, cover_bytes });
+    }
+    // Generic: any exe at zip root.
+    if find(&|n| !n.contains('/') && n.ends_with(".exe")).is_some() {
+        return Ok(ZipEngineInfo { tag: Some("pc-game"), title: None, cover_bytes });
+    }
+    Err("no recognizable game files inside the zip (exe, engine project files, ...)"
+        .to_string())
+}
+
+fn zip_read(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize, limit: u64) -> Option<Vec<u8>> {
+    let mut entry = za.by_name(&names[idx]).ok()?;
+    let mut buf = Vec::new();
+    std::io::Read::take(&mut entry, limit)
+        .read_to_end(&mut buf)
+        .ok()?;
+    Some(buf)
+}
+
+fn zip_read_text(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize) -> Option<String> {
+    zip_read(za, names, idx, 2 * 1024 * 1024).map(|b| String::from_utf8_lossy(&b).into_owned())
+}
+
+fn common_zip_prefix(names: &[String]) -> String {
+    let Some(first) = names.iter().find(|n| n.contains('/')) else {
+        return String::new();
+    };
+    let seg = &first[..first.find('/').unwrap() + 1];
+    names.iter().all(|n| n.starts_with(seg)).then(|| seg.to_string()).unwrap_or_default()
 }
 
 // ---------- engine fingerprinting ----------
@@ -462,5 +758,63 @@ mod tests {
         assert!(detect_engine(&random).engine.is_none());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn find_game_dirs_handles_nested_library_layouts() {
+        let base = std::env::temp_dir().join("goon-nest-test");
+        let _ = fs::remove_dir_all(&base);
+
+        // root/by-engine/renpy/Game A/ and root/JP/Deep/Game B/
+        let a = base.join("by-engine").join("renpy").join("Game A [v1.0]");
+        fs::create_dir_all(a.join("game")).unwrap();
+        fs::create_dir_all(a.join("renpy")).unwrap();
+        fs::write(a.join("game").join("s.rpy"), "//").unwrap();
+
+        let b = base.join("JP").join("Deep").join("Game B");
+        fs::create_dir_all(b.join("www").join("data")).unwrap();
+        fs::write(b.join("game.rmmzproject"), "").unwrap();
+        fs::write(
+            b.join("www").join("data").join("System.json"),
+            r#"{"gameTitle":"B Title"}"#,
+        )
+        .unwrap();
+
+        // A non-game branch: contributes nothing.
+        fs::create_dir_all(base.join("misc").join("txtfiles")).unwrap();
+        fs::write(base.join("misc").join("txtfiles").join("readme.txt"), "x").unwrap();
+
+        let mut out = Vec::new();
+        find_game_dirs(&base, MAX_SCAN_DEPTH, &mut out);
+        assert_eq!(out.len(), 2, "found: {out:?}");
+        let names: Vec<String> = out
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(names.iter().any(|n| n == "Game A [v1.0]"), "names = {names:?}");
+        assert!(names.iter().any(|n| n == "Game B"), "names = {names:?}");
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zip_engine_fingerprint_reads_inside_archive() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("goon-zip-test.zip");
+        {
+            let f = fs::File::create(&path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("Pumpkin Days/game.rmmzproject", opts).unwrap();
+            w.write_all(b"").unwrap();
+            w.start_file("Pumpkin Days/www/data/System.json", opts).unwrap();
+            w.write_all(br#"{"gameTitle":"Pumpkin Days"}"#).unwrap();
+            w.finish().unwrap();
+        }
+        let info = zip_engine_info(&path).unwrap();
+        assert_eq!(info.tag, Some("rpg-maker"));
+        assert_eq!(info.title.as_deref(), Some("Pumpkin Days"));
+        let _ = fs::remove_file(&path);
     }
 }

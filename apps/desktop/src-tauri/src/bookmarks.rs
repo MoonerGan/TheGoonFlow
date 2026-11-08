@@ -27,6 +27,13 @@ pub struct Bookmark {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FailureDetail {
+    pub url: String,
+    pub reason: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BookmarkReport {
     pub parsed: usize,
     pub imported: usize,
@@ -36,7 +43,14 @@ pub struct BookmarkReport {
     pub tags_added: usize,
     pub fetch_failures: usize,
     pub by_site: BTreeMap<String, usize>,
+    /// Per-item failure detail (capped) so the user knows what failed and why.
+    pub failures: Vec<FailureDetail>,
+    /// Sample URLs of bookmarks we couldn't classify (capped).
+    pub unrecognized_sample: Vec<String>,
 }
+
+const MAX_FAILURE_DETAILS: usize = 60;
+const MAX_UNRECOGNIZED_SAMPLE: usize = 15;
 
 // ---------- parsing ----------
 
@@ -233,6 +247,8 @@ pub async fn import_bookmarks(
         tags_added: 0,
         fetch_failures: 0,
         by_site: BTreeMap::new(),
+        failures: Vec::new(),
+        unrecognized_sample: Vec::new(),
     };
 
     // Phase 1 — create items + sources (no network).
@@ -244,6 +260,9 @@ pub async fn import_bookmarks(
         for bm in &bookmarks {
             let Some(cls) = classify(&bm.url) else {
                 report.unrecognized += 1;
+                if report.unrecognized_sample.len() < MAX_UNRECOGNIZED_SAMPLE {
+                    report.unrecognized_sample.push(bm.url.clone());
+                }
                 continue;
             };
             if db::source_exists(conn, cls.site, &bm.url) {
@@ -270,7 +289,13 @@ pub async fn import_bookmarks(
                 created_at: now.clone(),
                 updated_at: now.clone(),
             };
-            if db::insert_item(conn, &item).is_err() {
+            if let Err(e) = db::insert_item(conn, &item) {
+                if report.failures.len() < MAX_FAILURE_DETAILS {
+                    report.failures.push(FailureDetail {
+                        url: bm.url.clone(),
+                        reason: format!("could not store item: {e}"),
+                    });
+                }
                 continue;
             }
             let created = db::insert_source(conn, &id, cls.site, &bm.url, cls.remote_id.as_deref(), None)
@@ -310,10 +335,10 @@ pub async fn import_bookmarks(
                 "dlsite" => dlsite_cover(&client, &p.url)
                     .await
                     .map(|bytes| (bytes, Vec::<String>::new())),
-                _ => None,
+                _ => Err("no enrichment API for this site yet".to_string()),
             };
             match outcome {
-                Some((bytes, tags)) => {
+                Ok((bytes, tags)) => {
                     let mut inner = state.inner.lock().unwrap();
                     let Ok(conn) = inner.opened.as_mut().map(|o| &mut o.conn).ok_or(()) else {
                         break; // vault locked mid-import; stop fetching
@@ -329,7 +354,12 @@ pub async fn import_bookmarks(
                         }
                     }
                 }
-                None => report.fetch_failures += 1,
+                Err(reason) => {
+                    report.fetch_failures += 1;
+                    if report.failures.len() < MAX_FAILURE_DETAILS {
+                        report.failures.push(FailureDetail { url: p.url, reason });
+                    }
+                }
             }
         }
     }
@@ -341,30 +371,40 @@ async fn gelbooru_family(
     client: &reqwest::Client,
     site: &str,
     id: &str,
-) -> Option<(Vec<u8>, Vec<String>)> {
-    let api = match site {
-        "gelbooru" => format!(
-            "https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&pid={id}"
+) -> Result<(Vec<u8>, Vec<String>), String> {
+    let (api, referer) = match site {
+        "gelbooru" => (
+            format!("https://gelbooru.com/index.php?page=dapi&s=post&q=index&json=1&pid={id}"),
+            "https://gelbooru.com",
         ),
-        "rule34" => format!(
-            "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id={id}"
+        "rule34" => (
+            format!("https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id={id}"),
+            "https://rule34.xxx",
         ),
-        _ => return None,
-    };
-    let referer = match site {
-        "gelbooru" => "https://gelbooru.com",
-        "rule34" => "https://rule34.xxx",
-        _ => return None,
+        _ => return Err("unsupported site".into()),
     };
     let resp = client
         .get(&api)
         .header(reqwest::header::REFERER, referer)
         .send()
         .await
-        .ok()?;
-    let v: Value = resp.json().await.ok()?;
-    let node = v.get("post").or_else(|| v.get("posts"))?;
-    let post = if node.is_array() { node.as_array()?.first()? } else { node };
+        .map_err(|e| format!("api request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("api returned http {}", resp.status()));
+    }
+    let v: Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("api reply was not json: {e}"))?;
+    let node = v.get("post").or_else(|| v.get("posts"));
+    let post = match node {
+        Some(n) if n.is_array() => n.as_array().and_then(|a| a.first()),
+        other => other,
+    }
+    .ok_or_else(|| "post not found (deleted, or id not parsed from url)".to_string())?;
+    if post.is_null() {
+        return Err("post not found (deleted?)".into());
+    }
     post_from_json(post, referer, client).await
 }
 
@@ -372,8 +412,12 @@ async fn post_from_json(
     post: &Value,
     referer: &str,
     client: &reqwest::Client,
-) -> Option<(Vec<u8>, Vec<String>)> {
-    let file_url = post.get("file_url").and_then(|u| u.as_str())?;
+) -> Result<(Vec<u8>, Vec<String>), String> {
+    let file_url = post
+        .get("file_url")
+        .and_then(|u| u.as_str())
+        .filter(|u| u.starts_with("http"))
+        .ok_or_else(|| "post json had no file url (video? deleted?)".to_string())?;
     let tags = post
         .get("tags")
         .and_then(|t| t.as_str())
@@ -384,62 +428,81 @@ async fn post_from_json(
         .header(reqwest::header::REFERER, referer)
         .send()
         .await
-        .ok()?
+        .map_err(|e| format!("file download failed: {e}"))?
         .bytes()
         .await
-        .ok()?;
-    Some((bytes.to_vec(), tags))
+        .map_err(|e| format!("file download interrupted: {e}"))?;
+    Ok((bytes.to_vec(), tags))
 }
 
-async fn e621_meta(client: &reqwest::Client, id: &str) -> Option<(Vec<u8>, Vec<String>)> {
-    let v: Value = client
+async fn e621_meta(client: &reqwest::Client, id: &str) -> Result<(Vec<u8>, Vec<String>), String> {
+    let resp = client
         .get(format!("https://e621.net/posts/{id}.json"))
         .send()
         .await
-        .ok()?
+        .map_err(|e| format!("api request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("api returned http {}", resp.status()));
+    }
+    let v: Value = resp
         .json()
         .await
-        .ok()?;
-    let post = v.get("post")?;
-    let file_url = post.get("file")?.get("url")?.as_str()?;
+        .map_err(|e| format!("api reply was not json: {e}"))?;
+    let post = v.get("post").ok_or_else(|| "post not found (deleted?)".to_string())?;
+    let file_url = post
+        .get("file")
+        .and_then(|f| f.get("url"))
+        .and_then(|u| u.as_str())
+        .ok_or_else(|| "post json had no file url".to_string())?;
     let tags = post
-        .get("tags")?
-        .get("general")?
-        .as_array()?
-        .iter()
-        .filter_map(|t| t.as_str().map(String::from))
-        .collect();
+        .get("tags")
+        .and_then(|t| t.get("general"))
+        .and_then(|g| g.as_array())
+        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+        .unwrap_or_default();
     let bytes = client
         .get(file_url)
         .header(reqwest::header::REFERER, "https://e621.net")
         .send()
         .await
-        .ok()?
+        .map_err(|e| format!("file download failed: {e}"))?
         .bytes()
         .await
-        .ok()?;
-    Some((bytes.to_vec(), tags))
+        .map_err(|e| format!("file download interrupted: {e}"))?;
+    Ok((bytes.to_vec(), tags))
 }
 
-async fn dlsite_cover(client: &reqwest::Client, url: &str) -> Option<Vec<u8>> {
-    let page = client.get(url).send().await.ok()?.text().await.ok()?;
-    let idx = page.find("og:image")?;
+async fn dlsite_cover(client: &reqwest::Client, url: &str) -> Result<Vec<u8>, String> {
+    let page = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("page fetch failed: {e}"))?
+        .text()
+        .await
+        .map_err(|e| format!("page read failed: {e}"))?;
+    let idx = page
+        .find("og:image")
+        .ok_or_else(|| "no cover image on page (age gate or region block?)".to_string())?;
     let after = &page[idx..];
-    let cstart = after.find("content=\"")? + "content=\"".len();
-    let img = after[cstart..].split('"').next()?.trim();
+    let cstart = after
+        .find("content=\"")
+        .ok_or_else(|| "no og:image content attribute".to_string())?
+        + "content=\"".len();
+    let img = after[cstart..].split('"').next().unwrap_or("").trim();
     if !img.starts_with("http") {
-        return None;
+        return Err("og:image url was not http(s)".into());
     }
     client
         .get(img)
         .header(reqwest::header::REFERER, "https://www.dlsite.com")
         .send()
         .await
-        .ok()?
+        .map_err(|e| format!("cover download failed: {e}"))?
         .bytes()
         .await
-        .ok()
         .map(|b| b.to_vec())
+        .map_err(|e| format!("cover download interrupted: {e}"))
 }
 
 #[cfg(test)]

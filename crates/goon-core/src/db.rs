@@ -108,10 +108,15 @@ pub struct StatusCount {
     pub count: i64,
 }
 
-pub fn counts_by_status(conn: &Connection) -> rusqlite::Result<Vec<StatusCount>> {
-    let mut stmt =
-        conn.prepare("SELECT status, count(*) FROM items GROUP BY status")?;
-    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+pub fn counts_by_status(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<Vec<StatusCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT status, count(*) FROM items
+         WHERE (?1 IS NULL
+                OR (?1 = 'game' AND kind = 'game')
+                OR (?1 = 'media' AND kind IN ('gallery','post')))
+         GROUP BY status",
+    )?;
+    let rows = stmt.query_map(params![kind], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
     let mut map = std::collections::HashMap::new();
     for row in rows {
         let (status, count) = row?;
@@ -189,29 +194,26 @@ pub fn list_items(
     limit: i64,
     offset: i64,
     search: Option<&str>,
+    kind: Option<&str>,
 ) -> rusqlite::Result<Vec<ItemSummary>> {
     let like = search.map(|s| format!("%{}%", s.trim()));
-    let mut out = Vec::new();
-    let sql = if like.is_some() {
-        "SELECT id, kind, title, status, version,
-                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
-                updated_at
-         FROM items
-         WHERE title LIKE ?1 OR IFNULL(circle,'') LIKE ?1
-         ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3"
-    } else {
-        "SELECT id, kind, title, status, version,
-                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
-                updated_at
-         FROM items
-         ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3"
-    };
+    // Placeholders are always ?1..?4 — binding with params! fills positions
+    // in order, so skipping ?1 while using ?2 would bind offset to ?2.
+    let sql = "SELECT id, kind, title, status, version,
+                    EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
+                    updated_at
+             FROM items
+             WHERE (?1 IS NULL OR title LIKE ?1 OR IFNULL(circle,'') LIKE ?1)
+               AND (?4 IS NULL
+                    OR (?4 = 'game' AND kind = 'game')
+                    OR (?4 = 'media' AND kind IN ('gallery','post')))
+             ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3";
     let mut stmt = conn.prepare(sql)?;
-    let mapped = if let Some(ref pat) = like {
-        stmt.query_map(params![pat, limit, offset], map_item_summary)?
-    } else {
-        stmt.query_map(params![limit, offset], map_item_summary)?
-    };
+    let mut out = Vec::new();
+    let mapped = stmt.query_map(
+        params![like, limit, offset, kind],
+        map_item_summary,
+    )?;
     for row in mapped {
         out.push(row?);
     }
@@ -336,11 +338,38 @@ mod tests {
         init_schema(&conn).unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
-        let counts = counts_by_status(&conn).unwrap();
+        let counts = counts_by_status(&conn, None).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 0);
         let tags: i64 = conn
             .query_row("SELECT count(*) FROM tags WHERE type_id = 1", [], |r| r.get(0))
             .unwrap();
         assert!(tags >= 3);
+    }
+
+    #[test]
+    fn list_items_binds_limit_offset_without_search() {
+        // Regression: the no-search SQL used ?2/?3 while params! binds 1/2,
+        // so every grid load failed and the UI silently showed "empty".
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, kind, title) in [
+            ("g1", "game", "Alpha Game"),
+            ("g2", "game", "Beta Game"),
+            ("b1", "post", "Gamma Post"),
+        ] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,?2,?3,'0','1')",
+                params![id, kind, title],
+            )
+            .unwrap();
+        }
+        let all = list_items(&conn, 300, 0, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+        let games = list_items(&conn, 300, 0, None, Some("game")).unwrap();
+        assert_eq!(games.len(), 2);
+        let search = list_items(&conn, 300, 0, Some("gamma"), None).unwrap();
+        assert_eq!(search.len(), 1);
+        let counts = counts_by_status(&conn, Some("game")).unwrap();
+        assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 2);
     }
 }

@@ -162,32 +162,65 @@ fn lock(state: tauri::State<'_, AppState>) {
 
 /// Crypto-erase: keyfile shredded first, then every vault file overwritten
 /// and deleted, then the pointer cleared. Irreversible by design.
+/// `dir` lets the Reconnect screen nuke a vault that isn't currently attached
+/// (e.g. the pointer points at a folder that was moved or partially deleted).
 #[tauri::command]
-fn nuke_vault(state: tauri::State<'_, AppState>, confirm: String) -> Result<(), String> {
+fn nuke_vault(
+    state: tauri::State<'_, AppState>,
+    confirm: String,
+    dir: Option<String>,
+) -> Result<(), String> {
     if confirm != "NUKE" {
         return Err("type NUKE exactly to confirm".into());
     }
     let root = {
         let mut inner = state.inner.lock().unwrap();
-        let root = inner.vault_root.clone().ok_or("no vault folder attached")?;
+        let root = inner
+            .vault_root
+            .clone()
+            .or_else(|| dir.map(PathBuf::from))
+            .ok_or("no vault folder attached — pick its folder or use \"Forget pointer\"")?;
         inner.opened = None; // close DB before shredding (Windows file locks)
         inner.vault_root = None;
         goon_locator::clear(&state.exe_dir);
         state.locked.store(true, Ordering::SeqCst);
         root
     };
-    goon_vault::nuke(&root).map_err(err)?;
-    let _ = std::fs::remove_dir_all(&root);
+    if root.is_dir() {
+        goon_vault::nuke(&root).map_err(err)?;
+        let _ = std::fs::remove_dir_all(&root);
+    }
     Ok(())
+}
+
+/// Clear the pointer file (flow.cfg) without touching any vault folder.
+/// Escape hatch when the pointer is stale/wrong and you want a clean start.
+#[tauri::command]
+fn reset_pointer(state: tauri::State<'_, AppState>) {
+    goon_locator::clear(&state.exe_dir);
+    let mut inner = state.inner.lock().unwrap();
+    inner.vault_root = None;
+    inner.opened = None;
+    state.locked.store(true, Ordering::SeqCst);
 }
 
 // ---------- data (post-unlock) ----------
 
 #[tauri::command]
-fn vault_stats(state: tauri::State<'_, AppState>) -> Result<Vec<goon_core::db::StatusCount>, String> {
+fn vault_stats(
+    state: tauri::State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<Vec<goon_core::db::StatusCount>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::counts_by_status(&opened.conn).map_err(err)
+    goon_core::db::counts_by_status(&opened.conn, kind.as_deref()).map_err(err)
+}
+
+#[tauri::command]
+fn kind_stats(state: tauri::State<'_, AppState>) -> Result<Vec<(&'static str, i64)>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::counts_by_kind(&opened.conn).map_err(err)
 }
 
 #[tauri::command]
@@ -196,6 +229,7 @@ fn list_items(
     limit: Option<i64>,
     offset: Option<i64>,
     search: Option<String>,
+    kind: Option<String>,
 ) -> Result<Vec<goon_core::db::ItemSummary>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
@@ -204,6 +238,7 @@ fn list_items(
         limit.unwrap_or(200),
         offset.unwrap_or(0),
         search.as_deref(),
+        kind.as_deref(),
     )
     .map_err(err)
 }
@@ -284,6 +319,22 @@ fn import_game_folder(
 }
 
 #[tauri::command]
+fn import_game_exe(
+    state: tauri::State<'_, AppState>,
+    exe: String,
+) -> Result<importer::GameImportReport, String> {
+    importer::import_game_exe(&state, exe)
+}
+
+#[tauri::command]
+fn import_game_zip(
+    state: tauri::State<'_, AppState>,
+    zip_path: String,
+) -> Result<importer::GameImportReport, String> {
+    importer::import_game_zip(&state, zip_path)
+}
+
+#[tauri::command]
 fn import_image_files(
     state: tauri::State<'_, AppState>,
     paths: Vec<String>,
@@ -345,16 +396,69 @@ pub fn run() {
             unlock,
             lock,
             nuke_vault,
+            reset_pointer,
             vault_stats,
+            kind_stats,
             list_items,
             get_thumbs,
             update_item,
             delete_item,
             set_complete,
             import_game_folder,
+            import_game_exe,
+            import_game_zip,
             import_image_files,
             import_bookmarks
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Goon Flow");
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+
+    /// Regression for the M0 field report: nested game folders + the
+    /// list_items binding bug made imports look like they stored nothing.
+    #[test]
+    fn import_then_list_roundtrip_on_real_vault() {
+        let tmp = std::env::temp_dir().join(format!("goonflow-it-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let vault = tmp.join("vault");
+        let games = tmp.join("games");
+
+        let g = games.join("by-engine").join("Game X [v2.0]");
+        std::fs::create_dir_all(g.join("game")).unwrap();
+        std::fs::create_dir_all(g.join("renpy")).unwrap();
+        std::fs::write(g.join("game").join("s.rpy"), "//").unwrap();
+
+        let key = goon_vault::create_keyfile(&vault, "hunter2").unwrap();
+        let conn = goon_vault::open_db(&vault, &key).unwrap();
+        goon_core::db::init_schema(&conn).unwrap();
+
+        let state = AppState {
+            inner: Mutex::new(Inner {
+                vault_root: Some(vault.clone()),
+                opened: Some(OpenedVault { conn, _key: key }),
+            }),
+            exe_dir: tmp.clone(),
+            companion: None,
+            locked: Arc::new(AtomicBool::new(false)),
+        };
+
+        let report = importer::import_game_folder(&state, games.display().to_string()).unwrap();
+        assert_eq!(report.imported, 1, "titles = {:?}", report.titles);
+
+        let inner = state.inner.lock().unwrap();
+        let conn = &inner.opened.as_ref().unwrap().conn;
+        let items = goon_core::db::list_items(conn, 300, 0, None, None).unwrap();
+        assert_eq!(items.len(), 1, "imported but list showed nothing");
+        assert_eq!(items[0].title, "Game X");
+        assert_eq!(items[0].version.as_deref(), Some("2.0"));
+        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game")).unwrap();
+        assert_eq!(games_only.len(), 1);
+        drop(inner);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

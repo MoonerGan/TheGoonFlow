@@ -250,6 +250,43 @@ button:disabled {
   font-size: 0.85rem;
 }
 
+.report.error-strip {
+  background: #2a1414;
+  color: #fca5a5;
+}
+
+.report code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.78rem;
+  color: var(--fg);
+}
+
+.details {
+  margin-top: 0.4rem;
+}
+.details summary {
+  cursor: pointer;
+  color: var(--fg);
+}
+.details ul {
+  margin: 0.35rem 0 0.6rem 1.1rem;
+  padding: 0;
+}
+.details li {
+  margin: 0.15rem 0;
+  word-break: break-all;
+}
+
+button.link {
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--accent);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+}
+
 .nav-item.active {
   background: var(--panel-2);
   border-left: 2px solid var(--accent);

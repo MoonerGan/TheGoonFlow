@@ -5,6 +5,7 @@
     createVault,
     getDefaultVaultDir,
     nukeVault,
+    resetPointer,
   } from "../lib/api";
 
   let { mode, refresh }: { mode: "create" | "attach"; refresh: () => Promise<void> } = $props();
@@ -17,6 +18,7 @@
 
   // Nuke is available from this screen too (recovery path when a passphrase
   // is forgotten — the vault becomes a brick by design, not bypassable).
+  // In attach mode, `dir` lets you nuke a vault the pointer lost track of.
   let nukeConfirm = $state("");
   let nukeError = $state<string | null>(null);
 
@@ -59,7 +61,20 @@
   async function doNuke() {
     nukeError = null;
     try {
-      await nukeVault(nukeConfirm);
+      await nukeVault(nukeConfirm, dir || undefined);
+      dir = "";
+      nukeConfirm = "";
+      await refresh();
+    } catch (e) {
+      nukeError = String(e);
+    }
+  }
+
+  async function doForget() {
+    nukeError = null;
+    try {
+      await resetPointer();
+      dir = "";
       await refresh();
     } catch (e) {
       nukeError = String(e);
@@ -111,6 +126,11 @@
 
       <div style="margin-top: 1.25rem">
         <button class="primary" disabled={busy || !dir} onclick={submit}>Attach vault</button>
+        <button class="ghost" style="margin-left: .5rem"
+          title="Delete only this app's pointer file (flow.cfg). Touches no vault folder. Use it when the pointer points at a deleted or wrong folder and you want a clean start."
+          onclick={doForget}>
+          Forget pointer
+        </button>
       </div>
     {/if}
 
@@ -123,6 +143,10 @@
     <p class="hint">
       Forgotten passphrase? Crypto-erase the vault to start over. Every file is
       overwritten and deleted — irreversible. Type <strong>NUKE</strong> below to arm it.
+      {#if mode === "attach"}
+        If the folder you point at above is the vault, Nuke shreds that folder;
+        with no folder entered it only clears this app's pointer.
+      {/if}
     </p>
     <div class="row">
       <input type="text" bind:value={nukeConfirm} placeholder="NUKE" style="max-width: 120px" />
