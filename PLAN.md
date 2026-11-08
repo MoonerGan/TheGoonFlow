@@ -426,23 +426,45 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   New tools: `run-test.ps1`; `restore-nonascii.js` + `char-audit.js` +
   `char-compare.js` (PowerShell 5 reads BOM-less UTF-8 as Shift_JIS and writes
   mojibake back — DEVELOPMENT §1 tells the story).
-- **The release artifact for this batch is NOT built yet.**
-  `target\release\GoonFlow.exe` is still the m10 build (git 2053155, schema v7,
-  all work through #27). The rebuild is blocked by nothing but the fact that the
-  exe *is* the app under test: the running process holds the file, so cargo fails
-  with `failed to remove file ... GoonFlow.exe`. Close the app, then
-  `npm run tauri build` and re-run `smoke-release.ps1` + `panic-tap-test.ps1` /
-  `panic-hold-test.ps1` / `panic-stale-test.ps1`; only after that can #28–#40 be
-  called verified live.
-- Field-test resume point: the current `target\release\GoonFlow.exe` (the
-  m10 Tauri build at git 2053155, all work through #27, schema v7) runs
-  everything below; existing `C:\GoonFlow` vaults migrate v3→v7 on unlock
-  (idempotent, in place). Every automated check was re-run against m10:
-  smoke handshake OK, `panic-tap`/`panic-hold`/`panic-stale` all PASS,
-  decoy title flips `Flow ⇄ Flow Notes`, 81 unit tests green. Manual
-  checklist for the In-review issues, in the order that surfaces
-  problems fastest:
-  1. Unlock the real vault → schema lands at v7, old items intact.
+- **#41 (found while rebuilding, not by the user)** — an instance from 10:43 was
+  still running with no visible window: that is the panic-tap state (lock +
+  `hide`), and it silently blocked the release rebuild
+  (`failed to remove file GoonFlow.exe`). Measured live with the new
+  `tools\close-exit-test.ps1` (sandboxed copy of the exe, no vault attached):
+  closing the window **does** exit the process; a panic tap hides it and the
+  process lives on (by design); and launching again produced **two instances**,
+  the second of which could not register the panic key
+  (`HotKey already registered`) — the app the user could see had **no panic
+  path** and said nothing. Fix: `tauri-plugin-single-instance` (first in the
+  plugin chain) reveals + focuses the running window and clears `hidden`, and
+  the registration failure is recorded in `AppState::panic_fault`, surfaced by
+  `panic_status`/`panic_info`, and shown as a red *panic key NOT armed* pill +
+  explainer strip in the library top bar and in Sources. Chosen over a tray
+  icon (permanent chrome fights PLAN §9). DEVELOPMENT invariant 22.
+- **Release artifact for this batch: built and smoked.**
+  `target\release\GoonFlow.exe` (20.9 MB, frontend embedded) was rebuilt twice:
+  once at git `bfccbb4` (the #28–#40 batch, log `tools\cargo-rel-m8.log`) and
+  again with the #41 fix (`tools\cargo-rel-m9.log`). Both passed
+  `tools\smoke-release.ps1` (companion handshake, ports 63269 / 63638) and the
+  three live panic checks against that exe — tap (hide *and* reveal), hold-3 s
+  escalation, and stale-watcher suppression, the last two run against a sandbox
+  copy so no vault is attached. `tools\close-exit-test.ps1` (new, the #41
+  regression check) now reports: close → process gone; panic tap → hidden but
+  alive; second launch → hands off to the running instance and reveals its
+  window, one live process. 86 workspace tests green (2 ignored), svelte-check
+  0/0. The single-instance plugin does add a 16×16 hand-off window
+  (`dev.goonflow.desktop-siw`); measured, it is layered + transparent +
+  tool-window + no-activate, never in the taskbar, and a pixel diff of its
+  screen region with the app closed vs running is identical — it paints
+  nothing, so no new visible chrome.
+- Field-test resume point: the current `target\release\GoonFlow.exe` (built from
+  git `9363a19`, all work through #41, schema v8) runs everything below;
+  existing `C:\GoonFlow` vaults migrate v3→v8 on unlock (idempotent, in place).
+  Every automated check was re-run against it: smoke handshake OK,
+  `panic-tap`/`panic-hold`/`panic-stale`/`close-exit` all PASS, decoy title
+  flips `Flow ⇄ Flow Notes`, 86 unit tests green. Manual checklist for the
+  In-review issues, in the order that surfaces problems fastest:
+  1. Unlock the real vault → schema lands at v8, old items intact.
   2. Viewer (#21): click media cards — ←/→ through the grid, +/−/0 zoom,
      space slideshow, big stored video → poster fallback, `i` → editor.
   3. Extension (#19): chrome://extensions → Load unpacked →
@@ -450,8 +472,9 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
      pairing; right-click-clip a rule34/gelbooru post → lands + notifies.
   4. Extract (#17): game tracked by a loose zip → Extract zip… → folder
      linked → ▶ Launch works.
-  5. Mods (#25): register MTool (mtool kind) → ▶ starts it with the game
-     exe as arg; add a real f95 zip mod as dll kind → Apply → .flowbak
+  5. Mods (#25): register MTool (mtool kind) → ▶ opens it (with this
+     machine's NW.js build the game path goes to the clipboard instead of the
+     command line, see #33); add a real f95 zip mod as dll kind → Apply → .flowbak
      originals + deployed chip → Revert → game pristine again; check the
      ⚠ chip on an update row for a modded game.
   6. Proxy (#24): set `socks5://127.0.0.1:9150` with Tor Browser running →
@@ -466,27 +489,32 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
      set a Decoy title in Sources → taskbar title changes at once, brand
      after re-lock; clear → back to Flow. Check chrome.cfg contents read
      like nothing sensitive.
-  ——— items 9-14 need the *rebuilt* exe (they are all in #28–#40) ———
-   9. Sources rates (#28): enable a site that was never touched (e.g. e621) →
-      its ms box shows 1200, not 700; e-hentai stays 10500.
-   10. Layout (#29/#30/#32): shrink the window to the 1100×640 minimum → one
-      scrollbar for the grid, the sidebar scrolls on its own; long folder names
-      wrap at characters instead of chopping words; open an item with many tags
-      → Save/Cancel stay pinned at the bottom of the dialog.
-   11. Dupes (#31): Possible dupes → rows show 1/2 with each entry's own
-      link/path; **Keep both** on an obvious false pair → it disappears and does
-      not come back after a restart (this is the ~40 mmnz-game pairs).
-   12. MTool (#33): ▶ on a game with that NW.js install → MTool opens and the
-      message under the mod list says the game's path is on the clipboard (paste
-      it into Explorer's address bar to see it); if the repack ships
-      `StartWithTool.bat`, the game starts under the tool directly instead.
-   13. Viewer (#34/#35): open a picture, start an import → no flicker; `f` fills
-      the screen, first Esc leaves fullscreen, second Esc closes the viewer.
-   14. File links (#39) + queues (#40) + batch (#36): import
-      `C:\Users\Admin\Downloads\bookmarks.html` → the bare gelbooru/rule34 image
-      links now store the picture (with a *no post could be identified* note
-      where that is the case); sidebar **Sources → No tags** lists exactly those;
-      select all → **Re-fetch metadata** fixes what the sites can identify, and
-      Stop works mid-run.
+  ——— items 9-15 need the *rebuilt* exe (they are all in #28–#41) ———
+  9. Sources rates (#28): enable a site that was never touched (e.g. e621) →
+     its ms box shows 1200, not 700; e-hentai stays 10500.
+  10. Layout (#29/#30/#32): shrink the window to the 1100×640 minimum → one
+     scrollbar for the grid, the sidebar scrolls on its own; long folder names
+     wrap at characters instead of chopping words; open an item with many tags
+     → Save/Cancel stay pinned at the bottom of the dialog.
+  11. Dupes (#31): Possible dupes → rows show 1/2 with each entry's own
+     link/path; **Keep both** on an obvious false pair → it disappears and does
+     not come back after a restart (this is the ~40 mmnz-game pairs).
+  12. MTool (#33): ▶ on a game with that NW.js install → MTool opens and the
+     message under the mod list says the game's path is on the clipboard (paste
+     it into Explorer's address bar to see it); if the repack ships
+     `StartWithTool.bat`, the game starts under the tool directly instead.
+  13. Viewer (#34/#35): open a picture, start an import → no flicker; `f` fills
+     the screen, first Esc leaves fullscreen, second Esc closes the viewer.
+  14. File links (#39) + queues (#40) + batch (#36): import
+     `C:\Users\Admin\Downloads\bookmarks.html` → the bare gelbooru/rule34 image
+     links now store the picture (with a *no post could be identified* note
+     where that is the case); sidebar **Sources → No tags** lists exactly those;
+     select all → **Re-fetch metadata** fixes what the sites can identify, and
+     Stop works mid-run.
+  15. Hidden instance + unarmed key (#41): panic-tap to hide the window, then
+     run the exe again → the same window comes back and Task Manager still shows
+     exactly one GoonFlow; close it with the X and confirm the process is really
+     gone. If another program owns Ctrl+Alt+L, the top bar shows a red *panic key
+     NOT armed* pill and a strip saying why.
   Earlier notes still hold: re-clipping old rule34/wimg bare links (or
   Re-fetch metadata on them) now pulls art (v3 migration fixed labels).

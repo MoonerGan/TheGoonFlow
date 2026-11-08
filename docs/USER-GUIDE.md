@@ -46,6 +46,17 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
   starts. Learn the difference with the **crypto-erase drill** below, and
   rehearse the tap — deliberately do this on the real vault only when you
   mean it.
+  - **Lost the window?** A hidden app is still running (it holds its own exe
+    file, so a rebuild or delete will fail until it is closed). Tap the panic
+    key again, or simply **start the app again**: a second launch now reveals
+    the existing window instead of starting a second copy.
+  - **Closing the window quits the app.** It does not sit in the system tray or
+    keep running in the background — the only way to be left with a running
+    but invisible app is the panic hide above.
+  - If the hotkey could not be registered (another program or another GoonFlow
+    instance already owns that combination), the top bar shows a red
+    **panic key NOT armed** pill and a strip saying why. That case is real —
+    it happened during testing — and the app refuses to pretend otherwise.
 - Under *Sources* you can store a custom panic key with the vault (it follows
   the drive, not the machine). The same Sources block has the
   **crypto-erase drill**: builds a throwaway vault and nukes it through the
@@ -416,5 +427,7 @@ app reaches the content sites (and through your proxy if you set one).
 | ▶ next to MTool started the tool but the game did not open | Recent MTool builds (NW.js `MToolClient`) accept **no** game on the command line — their list is drag-and-drop, so nothing was ever going to start. The app now uses the game's own `StartWithTool.bat` / `MTool_Game.exe` when the repack ships one, otherwise it opens MTool and puts the game's exe path **on your clipboard** for you to drop in (the message under the mod list says which happened and shows the path). |
 | Extension icon does nothing / only *Pin · Manage* | Out of date load: remove the add-on and load it again (temporary Firefox add-ons never pick up manifest changes on their own). The Chrome folder also cannot work in Firefox — use `extensions/goonflow-clip-firefox`. The popup says what it sees: *Nothing on port N* = the app isn't running or its port changed (re-copy port + token), *vault is LOCKED* = unlock it first. |
 | A *Possible dupes* pair is not actually a dupe | **Keep both**. It records a dismissal in the vault (both entries stay untouched) and that pair never comes back. |
+| The window disappeared but the app is still using the exe (a rebuild or delete fails with *"failed to remove file GoonFlow.exe"*) | A hidden instance is still running — that is the panic-key state: a short press locks **and hides** the window. Run the app again: it reveals the existing window instead of starting a second copy (or press the panic key again), then close it with the window's X or **Lock**. |
+| The panic key does nothing when pressed | Look at the top bar: a red **panic key NOT armed** pill means the combination could not be registered (another program, or an older GoonFlow instance, already owns it). The strip under the bar says exactly what conflicted; close it or set a different key under Sources → Panic & privacy. |
 | An old item shows site "i" or "wimg" | Fixed automatically: on the next unlock, a schema (v3) migration renames those mislabeled sources to their real site (`4chan`, `rule34`, …). |
 | White/blank window at launch | WebView2 runtime missing — install "Microsoft Edge WebView2 Runtime". |

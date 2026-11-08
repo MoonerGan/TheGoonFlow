@@ -292,6 +292,20 @@ tools/
     less stays "stored as-is, no post could be identified", which the user can
     see and fix — a confidently wrong source link is worse than an admitted
     empty one.
+22. **A capability that failed to register must be visible, not assumed
+    (#41).** The panic hotkey is the app's safety path; measured in the field,
+    a second instance silently failed to register it (`HotKey already
+    registered`) while the user believed they were protected. So
+    `register_panic_keys` records the failure in `AppState::panic_fault`,
+    `panic_status`/`panic_info` report `armed` + `fault`, and the library top
+    bar shows a red *panic key NOT armed* pill plus an explainer strip. Pair
+    this with single-instance (`tauri-plugin-single-instance`, first plugin in
+    the chain): a second launch **reveals** the running instance — including a
+    window hidden by a panic tap, which is the only way back if you forgot the
+    hotkey — instead of forking a second app that could never own the key.
+    Closing the window does quit the process (verified live,
+    `tools/close-exit-test.ps1`); there is no tray icon on purpose, because
+    permanent chrome contradicts PLAN §9 deniability.
 
 ## 5. Testing
 
