@@ -20,9 +20,12 @@ pub fn client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, St
     let mut b = reqwest::Client::builder()
         .user_agent(crate::ingest::UA)
         .timeout(Duration::from_secs(timeout_secs));
-    if let Some(p) = proxy.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()) {
-        let pr = reqwest::Proxy::all(&p)
-            .map_err(|e| format!("{p} is not a usable proxy URL: {e}"))?;
+    if let Some(p) = proxy
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+    {
+        let pr =
+            reqwest::Proxy::all(&p).map_err(|e| format!("{p} is not a usable proxy URL: {e}"))?;
         b = b.proxy(pr);
     }
     b.build().map_err(crate::err)
@@ -113,7 +116,10 @@ mod wiring_tests {
         // No DNS needed: an HTTP proxy receives the whole URL in its request
         // line, so reqwest must dial the stub no matter what the target is.
         let r = client.get("http://goonflow.invalid/").send().await;
-        assert!(r.is_err(), "the stub proxy must not produce a successful response");
+        assert!(
+            r.is_err(),
+            "the stub proxy must not produce a successful response"
+        );
 
         for _ in 0..20 {
             if hit.load(Ordering::SeqCst) {

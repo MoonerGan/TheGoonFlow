@@ -296,9 +296,14 @@ pub async fn import_bookmarks(
 
             let cookie = {
                 let inner = state.inner.lock().unwrap();
-                inner.opened.as_ref().and_then(|o| db::site_cookie(&o.conn, &p.site))
+                inner
+                    .opened
+                    .as_ref()
+                    .and_then(|o| db::site_cookie(&o.conn, &p.site))
             };
-            let ctx = ingest::FetchCtx { cookie: cookie.as_deref() };
+            let ctx = ingest::FetchCtx {
+                cookie: cookie.as_deref(),
+            };
             let meta = match ingest::fetch_meta(&client, &p.reference, &p.url, &ctx).await {
                 Ok(m) => m,
                 Err(e) => {
@@ -323,7 +328,8 @@ pub async fn import_bookmarks(
             };
             let conn = &mut opened.conn;
 
-            let (thumb, tags, _title_updated) = ingest::apply_meta(conn, &p.item_id, &p.site, &meta);
+            let (thumb, tags, _title_updated) =
+                ingest::apply_meta(conn, &p.item_id, &p.site, &meta);
             if thumb {
                 report.thumbnailed += 1;
             }
@@ -383,13 +389,23 @@ fn store_one(
     if let Err(e) = db::insert_item(conn, &item) {
         return Stored::Failed(format!("could not store item: {e}"));
     }
-    let created = db::insert_source(conn, &id, &cls.site, &bm.url, cls.remote_id.as_deref(), None)
-        .unwrap_or(false);
+    let created = db::insert_source(
+        conn,
+        &id,
+        &cls.site,
+        &bm.url,
+        cls.remote_id.as_deref(),
+        None,
+    )
+    .unwrap_or(false);
     if !created {
         let _ = db::delete_item(conn, &id);
         return Stored::Duplicate;
     }
-    Stored::Inserted { id, site: cls.site.clone() }
+    Stored::Inserted {
+        id,
+        site: cls.site.clone(),
+    }
 }
 
 #[cfg(test)]
@@ -443,7 +459,8 @@ mod tests {
         let vid = tmp.join("clip.mp4");
         std::fs::write(&vid, b"not really a video").unwrap();
 
-        let file_url = |p: &std::path::Path| format!("file:///{}", p.to_string_lossy().replace('\\', "/"));
+        let file_url =
+            |p: &std::path::Path| format!("file:///{}", p.to_string_lossy().replace('\\', "/"));
         let body = format!(
             "{}\n{}\n{}\n{}\n{}\n{}\n",
             file_url(&vid),
@@ -466,7 +483,10 @@ mod tests {
         job.finish("done");
 
         assert_eq!(report.parsed, 6);
-        assert_eq!(report.unrecognized, 2, "mozilla links are genuinely unknown");
+        assert_eq!(
+            report.unrecognized, 2,
+            "mozilla links are genuinely unknown"
+        );
         assert_eq!(report.imported, 4, "imported = {:?}", report.by_site);
         assert_eq!(*report.by_site.get("local").unwrap_or(&0), 2);
         assert_eq!(*report.by_site.get("hypnohub").unwrap_or(&0), 2);
@@ -484,9 +504,13 @@ mod tests {
             goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, None, None).unwrap();
         assert_eq!(media_items.len(), 4, "all four are media items");
         let titles: Vec<&str> = media_items.iter().map(|i| i.title.as_str()).collect();
-        assert!(titles.iter().any(|t| t.contains("clip")), "video stem used as title: {titles:?}");
+        assert!(
+            titles.iter().any(|t| t.contains("clip")),
+            "video stem used as title: {titles:?}"
+        );
         let local_only =
-            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, Some("local"), None).unwrap();
+            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, Some("local"), None)
+                .unwrap();
         assert_eq!(local_only.len(), 2);
         drop(inner);
 
@@ -505,13 +529,24 @@ mod tests {
         fs::write(&bm_file, netscape(&body)).unwrap();
 
         let job = state.jobs.start("bookmarks", "bm.html").unwrap();
-        let id = state.jobs.snapshot().iter().rev().find(|j| j.kind == "bookmarks").unwrap().id;
+        let id = state
+            .jobs
+            .snapshot()
+            .iter()
+            .rev()
+            .find(|j| j.kind == "bookmarks")
+            .unwrap()
+            .id;
         state.jobs.cancel(id);
         let report = import_bookmarks(&state, bm_file.display().to_string(), false, &job)
             .await
             .unwrap();
         assert!(report.stopped, "import noticed the cancel");
-        assert!(report.imported < 200, "did not run to the end: {}", report.imported);
+        assert!(
+            report.imported < 200,
+            "did not run to the end: {}",
+            report.imported
+        );
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -526,10 +561,18 @@ mod tests {
 </DL><p>"##;
         let bms = parse_bookmarks(html);
         assert_eq!(bms.len(), 2);
-        assert!(bms[0].url.contains("Cissia's"), "url unescaped: {}", bms[0].url);
+        assert!(
+            bms[0].url.contains("Cissia's"),
+            "url unescaped: {}",
+            bms[0].url
+        );
         let cls = ingest::classify(&bms[0].url).unwrap();
         assert_eq!(cls.mode, Mode::LocalFile);
-        assert!(bms[1].url.contains("&s=view"), "url unescaped: {}", bms[1].url);
+        assert!(
+            bms[1].url.contains("&s=view"),
+            "url unescaped: {}",
+            bms[1].url
+        );
         let cls = ingest::classify(&bms[1].url).unwrap();
         assert_eq!(cls.site, "hypnohub");
         assert_eq!(cls.remote_id.as_deref(), Some("267940"));

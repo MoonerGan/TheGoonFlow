@@ -64,7 +64,8 @@ impl JobHandle {
     }
 
     pub fn set_note(&self, note: &str) {
-        self.jobs.patch(self.id, |info| info.note = note.to_string());
+        self.jobs
+            .patch(self.id, |info| info.note = note.to_string());
     }
 
     pub fn finish(&self, note: &str) {
@@ -95,7 +96,10 @@ impl Jobs {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let cancel = Arc::new(AtomicBool::new(false));
         let mut entries = self.entries.lock().unwrap();
-        if entries.iter().any(|e| !e.info.finished && e.info.kind == kind) {
+        if entries
+            .iter()
+            .any(|e| !e.info.finished && e.info.kind == kind)
+        {
             return None;
         }
         entries.push(Entry {
@@ -126,7 +130,11 @@ impl Jobs {
             let drop: Vec<u64> = finished.iter().copied().take(drop_upto).collect();
             entries.retain(|e| !drop.contains(&e.info.id));
         }
-        Some(JobHandle { id, jobs: self.clone(), cancel })
+        Some(JobHandle {
+            id,
+            jobs: self.clone(),
+            cancel,
+        })
     }
 
     fn patch(&self, id: u64, f: impl FnOnce(&mut JobInfo)) {
@@ -176,9 +184,17 @@ mod tests {
     #[test]
     fn one_job_per_kind_and_progress_visible() {
         let jobs = Arc::new(Jobs::default());
-        let bm = jobs.start("bookmarks", "bookmarks.html").expect("first starts");
-        assert!(jobs.start("bookmarks", "again.html").is_none(), "same kind is refused");
-        assert!(jobs.start("games", "D:\\games").is_some(), "different kind runs alongside");
+        let bm = jobs
+            .start("bookmarks", "bookmarks.html")
+            .expect("first starts");
+        assert!(
+            jobs.start("bookmarks", "again.html").is_none(),
+            "same kind is refused"
+        );
+        assert!(
+            jobs.start("games", "D:\\games").is_some(),
+            "different kind runs alongside"
+        );
 
         bm.set_progress(3, 10, "https://x/post/3");
         let snap = jobs.snapshot();

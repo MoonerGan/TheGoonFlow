@@ -118,7 +118,9 @@ pub async fn store_video(
         let rate = {
             let inner = state.inner.lock().unwrap();
             match inner.opened.as_ref() {
-                Some(o) => goon_core::db::site_rate_ms(&o.conn, &site, ingest::default_rate_ms(&site)),
+                Some(o) => {
+                    goon_core::db::site_rate_ms(&o.conn, &site, ingest::default_rate_ms(&site))
+                }
                 None => return Err("vault vanished mid-store".into()),
             }
         };
@@ -146,7 +148,11 @@ pub async fn store_video(
         }
         let mut bytes: Vec<u8> = Vec::new();
         let mut resp = resp;
-        while let Some(chunk) = resp.chunk().await.map_err(|e| format!("download interrupted: {e}"))? {
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| format!("download interrupted: {e}"))?
+        {
             if job.cancelled() {
                 return Err("stopped".into());
             }
@@ -175,7 +181,13 @@ fn finish_store(
         return Err("stopped".into());
     }
     let mime = media::video_mime(
-        origin.rsplit('.').next().unwrap_or("").split(['?', '/']).next().unwrap_or(""),
+        origin
+            .rsplit('.')
+            .next()
+            .unwrap_or("")
+            .split(['?', '/'])
+            .next()
+            .unwrap_or(""),
     )
     .unwrap_or("application/octet-stream");
     {
@@ -209,7 +221,8 @@ fn finish_store(
             }
         } else {
             report.note = Some(
-                "stored, but no first-frame thumbnail — Windows has no codec for that format".into(),
+                "stored, but no first-frame thumbnail — Windows has no codec for that format"
+                    .into(),
             );
         }
     }
@@ -238,7 +251,13 @@ fn first_frame_for(
     let path = match local {
         Some(p) => p,
         None => {
-            let ext = origin.rsplit('.').next().unwrap_or("mp4").split(['?', '/']).next().unwrap_or("mp4");
+            let ext = origin
+                .rsplit('.')
+                .next()
+                .unwrap_or("mp4")
+                .split(['?', '/'])
+                .next()
+                .unwrap_or("mp4");
             let tmp = std::env::temp_dir().join(format!("goon-ff-{item_id}.{ext}"));
             std::fs::write(&tmp, bytes).ok()?;
             tmp
@@ -275,7 +294,10 @@ mod tests {
         };
         let list = [
             src("local", "file:///D:/media/clip.mp4"),
-            src("rule34", "https://rule34.xxx/index.php?page=post&s=view&id=1"),
+            src(
+                "rule34",
+                "https://rule34.xxx/index.php?page=post&s=view&id=1",
+            ),
         ];
         let (site, url) = video_source(&list).unwrap();
         assert_eq!(site, "local");

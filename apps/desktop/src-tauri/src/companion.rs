@@ -41,16 +41,20 @@ struct Shared {
 /// convert + serve it on Tauri's tokio runtime. (`TcpListener::from_std`
 /// needs a running reactor, so it must happen inside the spawned task.)
 pub fn start(locked: Arc<AtomicBool>, core: Core) -> Result<CompanionInfo, String> {
-    let std_listener =
-        std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
+    let std_listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| e.to_string())?;
     let port = std_listener.local_addr().map_err(|e| e.to_string())?.port();
-    std_listener.set_nonblocking(true).map_err(|e| e.to_string())?;
+    std_listener
+        .set_nonblocking(true)
+        .map_err(|e| e.to_string())?;
 
     let mut raw = [0u8; 16];
     OsRng.fill_bytes(&mut raw);
     let token: String = raw.iter().map(|b| format!("{b:02x}")).collect();
 
-    let info = Arc::new(CompanionInfo { port, token: token.clone() });
+    let info = Arc::new(CompanionInfo {
+        port,
+        token: token.clone(),
+    });
     let app = router(locked, core, info.clone());
 
     tauri::async_runtime::spawn(async move {
@@ -70,7 +74,10 @@ pub fn router(locked: Arc<AtomicBool>, core: Core, info: Arc<CompanionInfo>) -> 
     let protected = Router::new()
         .route("/api/ping", get(ping))
         .route("/api/clip", post(clip))
-        .route_layer(middleware::from_fn_with_state(shared.clone(), require_token));
+        .route_layer(middleware::from_fn_with_state(
+            shared.clone(),
+            require_token,
+        ));
     public.merge(protected).with_state(shared)
 }
 
@@ -95,7 +102,10 @@ struct ClipBody {
     url: String,
 }
 
-async fn clip(State(shared): State<Shared>, body: Result<Json<ClipBody>, JsonRejection>) -> Response {
+async fn clip(
+    State(shared): State<Shared>,
+    body: Result<Json<ClipBody>, JsonRejection>,
+) -> Response {
     let Json(ClipBody { url }) = match body {
         Ok(b) => b,
         Err(e) => {
@@ -133,7 +143,11 @@ async fn clip(State(shared): State<Shared>, body: Result<Json<ClipBody>, JsonRej
         }
         Err(e) => {
             job.finish(&format!("clip failed: {e}"));
-            (StatusCode::UNPROCESSABLE_ENTITY, Json(json!({ "error": e }))).into_response()
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(json!({ "error": e })),
+            )
+                .into_response()
         }
     }
 }
@@ -176,7 +190,10 @@ mod tests {
         let core = Core {
             inner: Arc::new(std::sync::Mutex::new(Inner {
                 vault_root: Some(vault),
-                opened: conn.map(|c| crate::OpenedVault { conn: c, _key: key.unwrap() }),
+                opened: conn.map(|c| crate::OpenedVault {
+                    conn: c,
+                    _key: key.unwrap(),
+                }),
             })),
             jobs: Arc::new(Jobs::default()),
             queue: Arc::new(crate::queue::SiteQueue::default()),
@@ -211,7 +228,14 @@ mod tests {
         let base = format!("http://127.0.0.1:{}", info.port);
 
         // handshake: public, no secrets
-        let h: serde_json::Value = client.get(format!("{base}/api/handshake")).send().await.unwrap().json().await.unwrap();
+        let h: serde_json::Value = client
+            .get(format!("{base}/api/handshake"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         assert_eq!(h["app"], "TheGoonFlow");
         assert_eq!(h["locked"], true);
 
@@ -245,7 +269,10 @@ mod tests {
             .unwrap();
         assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let v: serde_json::Value = r.json().await.unwrap();
-        assert!(v["error"].as_str().unwrap().contains("vault is locked"), "got: {v}");
+        assert!(
+            v["error"].as_str().unwrap().contains("vault is locked"),
+            "got: {v}"
+        );
 
         // malformed body → 400
         let r = client

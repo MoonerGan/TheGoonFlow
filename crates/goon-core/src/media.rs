@@ -88,7 +88,14 @@ pub fn set_thumbnail(conn: &Connection, item_id: &str, t: &Thumbnail) -> bool {
     conn.execute(
         "INSERT INTO media (item_id, kind, hash, mime, width, height, data)
          VALUES (?1, 'thumb', ?2, ?3, ?4, ?5, ?6)",
-        params![item_id, sha256_hex(&t.bytes), t.mime, t.width as i64, t.height as i64, t.bytes],
+        params![
+            item_id,
+            sha256_hex(&t.bytes),
+            t.mime,
+            t.width as i64,
+            t.height as i64,
+            t.bytes
+        ],
     )
     .is_ok()
 }
@@ -228,11 +235,7 @@ pub fn thumbs_for(conn: &Connection, item_ids: &[String]) -> Vec<(String, String
     if item_ids.is_empty() {
         return Vec::new();
     }
-    let placeholders = item_ids
-        .iter()
-        .map(|_| "?")
-        .collect::<Vec<_>>()
-        .join(",");
+    let placeholders = item_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     let sql = format!(
         "SELECT item_id, mime, data FROM media WHERE kind = 'thumb' AND item_id IN ({placeholders})"
     );
@@ -242,7 +245,11 @@ pub fn thumbs_for(conn: &Connection, item_ids: &[String]) -> Vec<(String, String
     };
     let mut out = Vec::new();
     if let Ok(rows) = stmt.query_map(rusqlite::params_from_iter(item_ids), |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Vec<u8>>(2)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Vec<u8>>(2)?,
+        ))
     }) {
         for row in rows.flatten() {
             out.push(row);
@@ -307,7 +314,11 @@ mod tests {
         let _ = put_thumbnail(&conn, "m2", &png);
         let _ = put_thumbnail(&conn, "m2", &png);
         let count: i64 = conn
-            .query_row("SELECT count(*) FROM media WHERE item_id='m2' AND kind='thumb'", [], |r| r.get(0))
+            .query_row(
+                "SELECT count(*) FROM media WHERE item_id='m2' AND kind='thumb'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(count, 1);
     }

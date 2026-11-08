@@ -124,8 +124,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (a_id, b_id)
         );
 
-        COMMIT;"
-        ,
+        COMMIT;",
     )?;
 
     // Versioned migrations, run in order. Every step is idempotent so opening
@@ -246,9 +245,11 @@ pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
 // ---------- generic vault meta KV (#24: proxy_url lives here) ----------
 
 pub fn get_meta(conn: &Connection, key: &str) -> Option<String> {
-    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
-        .ok()
-        .filter(|v: &String| !v.is_empty())
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+        r.get(0)
+    })
+    .ok()
+    .filter(|v: &String| !v.is_empty())
 }
 
 pub fn set_meta(conn: &Connection, key: &str, value: Option<&str>) -> rusqlite::Result<()> {
@@ -269,7 +270,10 @@ pub struct StatusCount {
     pub count: i64,
 }
 
-pub fn counts_by_status(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<Vec<StatusCount>> {
+pub fn counts_by_status(
+    conn: &Connection,
+    kind: Option<&str>,
+) -> rusqlite::Result<Vec<StatusCount>> {
     let mut stmt = conn.prepare(
         "SELECT status, count(*) FROM items
          WHERE (?1 IS NULL
@@ -277,7 +281,9 @@ pub fn counts_by_status(conn: &Connection, kind: Option<&str>) -> rusqlite::Resu
                 OR (?1 = 'media' AND kind IN ('gallery','post')))
          GROUP BY status",
     )?;
-    let rows = stmt.query_map(params![kind], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+    let rows = stmt.query_map(params![kind], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
     let mut map = std::collections::HashMap::new();
     for row in rows {
         let (status, count) = row?;
@@ -330,14 +336,16 @@ pub fn counts_by_site(conn: &Connection, kind: Option<&str>) -> rusqlite::Result
          GROUP BY s.site
          ORDER BY count(DISTINCT s.item_id) DESC, s.site",
     )?;
-    let rows = stmt.query_map(params![kind], |r| Ok(SiteCount { site: r.get(0)?, count: r.get(1)? }))?;
+    let rows = stmt.query_map(params![kind], |r| {
+        Ok(SiteCount {
+            site: r.get(0)?,
+            count: r.get(1)?,
+        })
+    })?;
     rows.collect()
 }
 
-pub fn insert_item(
-    conn: &Connection,
-    item: &Item,
-) -> rusqlite::Result<()> {
+pub fn insert_item(conn: &Connection, item: &Item) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO items (id, kind, title, original_title, circle, status, dnf, rating, notes, version, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
@@ -423,7 +431,9 @@ fn map_item_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     let kind: String = r.get(1)?;
     Ok(ItemSummary {
         id: r.get(0)?,
-        kind: ItemKind::from_str(&kind).map(|k| k.as_str()).unwrap_or("game"),
+        kind: ItemKind::from_str(&kind)
+            .map(|k| k.as_str())
+            .unwrap_or("game"),
         title: r.get(2)?,
         status: r.get(3)?,
         version: r.get(4)?,
@@ -483,7 +493,15 @@ pub fn update_item(
          SET title = ?2, circle = ?3, status = ?4, version = ?5,
              notes = IFNULL(?6, notes), updated_at = ?7
          WHERE id = ?1",
-        params![id, title, circle, status.as_str(), version, notes, updated_at],
+        params![
+            id,
+            title,
+            circle,
+            status.as_str(),
+            version,
+            notes,
+            updated_at
+        ],
     )?;
     Ok(())
 }
@@ -677,7 +695,9 @@ pub fn tag_get_or_create(conn: &Connection, name: &str, type_id: i64) -> rusqlit
         "INSERT OR IGNORE INTO tags (name, type_id) VALUES (?1, ?2)",
         params![name, type_id],
     )?;
-    conn.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| r.get(0))
+    conn.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| {
+        r.get(0)
+    })
 }
 
 pub fn link_item_tag(conn: &Connection, item_id: &str, tag_id: i64) -> rusqlite::Result<()> {
@@ -725,7 +745,11 @@ pub fn tags_for_item(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<T
          ORDER BY tt.priority DESC, t.name",
     )?;
     let rows = stmt.query_map(params![item_id], |r| {
-        Ok(TagOnItem { id: r.get(0)?, name: r.get(1)?, type_key: r.get(2)? })
+        Ok(TagOnItem {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            type_key: r.get(2)?,
+        })
     })?;
     rows.collect()
 }
@@ -760,7 +784,11 @@ pub struct TagCount {
 
 /// Tag cloud for a view. `kind` is 'game' | 'media' | None so the Media view
 /// shows media tags and the Games view shows game tags.
-pub fn top_tags(conn: &Connection, limit: i64, kind: Option<&str>) -> rusqlite::Result<Vec<TagCount>> {
+pub fn top_tags(
+    conn: &Connection,
+    limit: i64,
+    kind: Option<&str>,
+) -> rusqlite::Result<Vec<TagCount>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, tt.key, count(*) AS c FROM item_tags it
          JOIN tags t ON t.id = it.tag_id
@@ -772,7 +800,12 @@ pub fn top_tags(conn: &Connection, limit: i64, kind: Option<&str>) -> rusqlite::
          GROUP BY t.id ORDER BY c DESC, t.name LIMIT ?1",
     )?;
     let rows = stmt.query_map(params![limit, kind], |r| {
-        Ok(TagCount { id: r.get(0)?, name: r.get(1)?, type_key: r.get(2)?, count: r.get(3)? })
+        Ok(TagCount {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            type_key: r.get(2)?,
+            count: r.get(3)?,
+        })
     })?;
     rows.collect()
 }
@@ -921,11 +954,19 @@ pub fn put_suggestion(
 
 /// Drop all suggestions for an item (re-scan or after attaching).
 pub fn clear_suggestions(conn: &Connection, item_id: &str) -> rusqlite::Result<()> {
-    conn.execute("DELETE FROM match_suggestions WHERE item_id = ?1", params![item_id])?;
+    conn.execute(
+        "DELETE FROM match_suggestions WHERE item_id = ?1",
+        params![item_id],
+    )?;
     Ok(())
 }
 
-pub fn delete_suggestion(conn: &Connection, item_id: &str, site: &str, url: &str) -> rusqlite::Result<()> {
+pub fn delete_suggestion(
+    conn: &Connection,
+    item_id: &str,
+    site: &str,
+    url: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "DELETE FROM match_suggestions WHERE item_id = ?1 AND site = ?2 AND url = ?3",
         params![item_id, site, url],
@@ -945,17 +986,25 @@ fn suggestion_from_row(r: &rusqlite::Row) -> rusqlite::Result<SuggestionRow> {
     })
 }
 
-const SUGGEST_SELECT: &str = "SELECT s.item_id, i.title, s.site, s.url, s.title, s.confidence, s.found_at \
+const SUGGEST_SELECT: &str =
+    "SELECT s.item_id, i.title, s.site, s.url, s.title, s.confidence, s.found_at \
      FROM match_suggestions s JOIN items i ON i.id = s.item_id ";
 
 pub fn list_suggestions(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<SuggestionRow>> {
-    let mut stmt = conn.prepare(&format!("{SUGGEST_SELECT} ORDER BY s.confidence DESC LIMIT ?1"))?;
+    let mut stmt = conn.prepare(&format!(
+        "{SUGGEST_SELECT} ORDER BY s.confidence DESC LIMIT ?1"
+    ))?;
     let rows = stmt.query_map(params![limit], suggestion_from_row)?;
     rows.collect()
 }
 
-pub fn suggestions_for_item(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<SuggestionRow>> {
-    let mut stmt = conn.prepare(&format!("{SUGGEST_SELECT} WHERE s.item_id = ?1 ORDER BY s.confidence DESC"))?;
+pub fn suggestions_for_item(
+    conn: &Connection,
+    item_id: &str,
+) -> rusqlite::Result<Vec<SuggestionRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "{SUGGEST_SELECT} WHERE s.item_id = ?1 ORDER BY s.confidence DESC"
+    ))?;
     let rows = stmt.query_map(params![item_id], suggestion_from_row)?;
     rows.collect()
 }
@@ -999,9 +1048,8 @@ pub struct SiteSetting {
 }
 
 pub fn get_site_settings(conn: &Connection) -> rusqlite::Result<Vec<SiteSetting>> {
-    let mut stmt = conn.prepare(
-        "SELECT site, enabled, cookie <> '', rate_ms FROM site_settings ORDER BY site",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT site, enabled, cookie <> '', rate_ms FROM site_settings ORDER BY site")?;
     let rows = stmt.query_map([], |r| {
         Ok(SiteSetting {
             site: r.get(0)?,
@@ -1032,7 +1080,13 @@ pub fn set_site_setting(
            enabled  = IFNULL(?2, enabled),
            cookie   = IFNULL(?3, cookie),
            rate_ms  = IFNULL(?4, rate_ms)",
-        params![site, enabled.map(|e| e as i64), cookie, rate_ms, default_rate_ms],
+        params![
+            site,
+            enabled.map(|e| e as i64),
+            cookie,
+            rate_ms,
+            default_rate_ms
+        ],
     )?;
     Ok(())
 }
@@ -1195,7 +1249,10 @@ fn pairing_key(title: &str) -> String {
 ///   one image across boorus, or the same file imported twice. Title matching
 ///   is useless for `1743761874698456.jpg`, so we match content instead.
 /// These are only ever *suggestions*; a human confirms the merge.
-pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<Vec<PairSuggestion>> {
+pub fn pairing_suggestions(
+    conn: &Connection,
+    kind: Option<&str>,
+) -> rusqlite::Result<Vec<PairSuggestion>> {
     let want_games = matches!(kind, None | Some("game"));
     let want_media = matches!(kind, None | Some("media"));
     let mut out = Vec::new();
@@ -1276,7 +1333,10 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
 
         let mut groups: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
         for (_hash, id, title, sites, src) in rows {
-            groups.entry(_hash).or_default().push((id, title, sites, src));
+            groups
+                .entry(_hash)
+                .or_default()
+                .push((id, title, sites, src));
         }
         for mut g in groups.into_values() {
             // distinct items only (same item can store thumb + full with the
@@ -1346,10 +1406,7 @@ pub fn merge_items(conn: &Connection, keep_id: &str, drop_id: &str) -> rusqlite:
         "UPDATE OR IGNORE sources SET item_id = ?1 WHERE item_id = ?2",
         params![keep_id, drop_id],
     )?;
-    conn.execute(
-        "DELETE FROM sources WHERE item_id = ?1",
-        params![drop_id],
-    )?;
+    conn.execute("DELETE FROM sources WHERE item_id = ?1", params![drop_id])?;
     conn.execute(
         "INSERT OR IGNORE INTO item_tags (item_id, tag_id)
          SELECT ?1, tag_id FROM item_tags WHERE item_id = ?2",
@@ -1391,7 +1448,9 @@ mod tests {
         let counts = counts_by_status(&conn, None).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 0);
         let tags: i64 = conn
-            .query_row("SELECT count(*) FROM tags WHERE type_id = 1", [], |r| r.get(0))
+            .query_row("SELECT count(*) FROM tags WHERE type_id = 1", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert!(tags >= 3);
     }
@@ -1440,19 +1499,52 @@ mod tests {
             )
             .unwrap();
         }
-        insert_source(&conn, "g_local", "local", "C:/games/local only/game.exe", None, None).unwrap();
-        insert_source(&conn, "g_both", "local", "C:/games/linked/game.exe", None, None).unwrap();
-        insert_source(&conn, "g_both", "f95", "https://f95zone.to/threads/x.1/", Some("1"), None).unwrap();
-        insert_source(&conn, "g_web", "f95", "https://f95zone.to/threads/y.2/", Some("2"), None).unwrap();
+        insert_source(
+            &conn,
+            "g_local",
+            "local",
+            "C:/games/local only/game.exe",
+            None,
+            None,
+        )
+        .unwrap();
+        insert_source(
+            &conn,
+            "g_both",
+            "local",
+            "C:/games/linked/game.exe",
+            None,
+            None,
+        )
+        .unwrap();
+        insert_source(
+            &conn,
+            "g_both",
+            "f95",
+            "https://f95zone.to/threads/x.1/",
+            Some("1"),
+            None,
+        )
+        .unwrap();
+        insert_source(
+            &conn,
+            "g_web",
+            "f95",
+            "https://f95zone.to/threads/y.2/",
+            Some("2"),
+            None,
+        )
+        .unwrap();
         insert_source(&conn, "m_local", "local", "file:///D:/img.png", None, None).unwrap();
         add_item_tag(&conn, "g_both", "renpy", TYPE_CONTENT).unwrap();
 
         let ids = |source: &str, kind: &str| -> Vec<String> {
-            let mut v: Vec<String> = list_items(&conn, 300, 0, None, Some(kind), None, None, Some(source))
-                .unwrap()
-                .into_iter()
-                .map(|i| i.id)
-                .collect();
+            let mut v: Vec<String> =
+                list_items(&conn, 300, 0, None, Some(kind), None, None, Some(source))
+                    .unwrap()
+                    .into_iter()
+                    .map(|i| i.id)
+                    .collect();
             v.sort();
             v
         };
@@ -1545,8 +1637,24 @@ mod tests {
             )
             .unwrap();
         }
-        insert_source(&conn, "g1", "dlsite", "https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html", Some("RJ123456"), None).unwrap();
-        insert_source(&conn, "g2", "f95", "https://f95zone.to/threads/summer-witch.9999/", Some("9999"), None).unwrap();
+        insert_source(
+            &conn,
+            "g1",
+            "dlsite",
+            "https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html",
+            Some("RJ123456"),
+            None,
+        )
+        .unwrap();
+        insert_source(
+            &conn,
+            "g2",
+            "f95",
+            "https://f95zone.to/threads/summer-witch.9999/",
+            Some("9999"),
+            None,
+        )
+        .unwrap();
 
         // Tag write path + tag filter + top tags.
         add_item_tag(&conn, "g1", "renpy", TYPE_CONTENT).unwrap();
@@ -1557,10 +1665,16 @@ mod tests {
         assert_eq!(tops[0].name, "renpy");
         assert_eq!(tops[0].count, 2);
         remove_item_tag(&conn, "g2", tops[0].id).unwrap();
-        assert_eq!(list_items(&conn, 300, 0, None, None, Some("renpy"), None, None).unwrap().len(), 1);
+        assert_eq!(
+            list_items(&conn, 300, 0, None, None, Some("renpy"), None, None)
+                .unwrap()
+                .len(),
+            1
+        );
 
         // Site filter + per-site counts (Media view filters).
-        let from_dlsite = list_items(&conn, 300, 0, None, None, None, Some("dlsite"), None).unwrap();
+        let from_dlsite =
+            list_items(&conn, 300, 0, None, None, None, Some("dlsite"), None).unwrap();
         assert_eq!(from_dlsite.len(), 1);
         let sites = counts_by_site(&conn, Some("game")).unwrap();
         assert_eq!(sites.len(), 2);
@@ -1573,15 +1687,37 @@ mod tests {
         set_site_setting(&conn, "ehentai", None, None, None, 10_500).unwrap();
         assert!(site_enabled(&conn, "ehentai", true));
         assert_eq!(site_rate_ms(&conn, "ehentai", 1), 10_500);
-        set_site_setting(&conn, "ehentai", Some(false), Some("ipb_member_id=1"), None, 700).unwrap();
+        set_site_setting(
+            &conn,
+            "ehentai",
+            Some(false),
+            Some("ipb_member_id=1"),
+            None,
+            700,
+        )
+        .unwrap();
         assert!(!site_enabled(&conn, "ehentai", true));
-        assert_eq!(site_cookie(&conn, "ehentai").as_deref(), Some("ipb_member_id=1"));
+        assert_eq!(
+            site_cookie(&conn, "ehentai").as_deref(),
+            Some("ipb_member_id=1")
+        );
         set_site_setting(&conn, "ehentai", Some(true), None, None, 700).unwrap();
-        assert_eq!(site_cookie(&conn, "ehentai").as_deref(), Some("ipb_member_id=1"));
+        assert_eq!(
+            site_cookie(&conn, "ehentai").as_deref(),
+            Some("ipb_member_id=1")
+        );
         // later calls must not clobber the rate that was seeded on insert
         assert_eq!(site_rate_ms(&conn, "ehentai", 10_500), 10_500);
         assert_eq!(site_rate_ms(&conn, "exhentai", 10_500), 10_500);
-        assert_eq!(source_item_id(&conn, "dlsite", "https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html").as_deref(), Some("g1"));
+        assert_eq!(
+            source_item_id(
+                &conn,
+                "dlsite",
+                "https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html"
+            )
+            .as_deref(),
+            Some("g1")
+        );
         assert!(source_item_id(&conn, "dlsite", "https://www.dlsite.com/nope.html").is_none());
         assert_eq!(update_targets(&conn).unwrap().len(), 2);
 
@@ -1600,7 +1736,9 @@ mod tests {
         // Pairing finds the near-identical titles; merge folds g2 into g1.
         let sugg = pairing_suggestions(&conn, Some("game")).unwrap();
         assert_eq!(sugg.len(), 1);
-        assert!(pairing_suggestions(&conn, Some("media")).unwrap().is_empty());
+        assert!(pairing_suggestions(&conn, Some("media"))
+            .unwrap()
+            .is_empty());
         merge_items(&conn, "g1", "g2").unwrap();
         assert!(get_item(&conn, "g2").unwrap().is_none());
         let d = get_item(&conn, "g1").unwrap().unwrap();
@@ -1629,8 +1767,11 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("UPDATE meta SET value = '2' WHERE key = 'schema_version'", [])
-            .unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
 
         init_schema(&conn).unwrap(); // simulate re-opening an old vault
         assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
@@ -1674,7 +1815,10 @@ mod tests {
         init_schema(&conn).unwrap();
         assert_eq!(get_meta(&conn, "proxy_url"), None);
         set_meta(&conn, "proxy_url", Some("socks5://127.0.0.1:9150")).unwrap();
-        assert_eq!(get_meta(&conn, "proxy_url").as_deref(), Some("socks5://127.0.0.1:9150"));
+        assert_eq!(
+            get_meta(&conn, "proxy_url").as_deref(),
+            Some("socks5://127.0.0.1:9150")
+        );
         set_meta(&conn, "proxy_url", None).unwrap();
         assert_eq!(get_meta(&conn, "proxy_url"), None);
     }
@@ -1690,8 +1834,26 @@ mod tests {
         )
         .unwrap();
 
-        let m1 = add_mod(&conn, "g1", "MTool", "mtool", r"D:\games\Karryn\MTool.exe", "", "t1").unwrap();
-        let m2 = add_mod(&conn, "g1", "Cheat Engine", "cheat", r"C:\CE\cheatengine.exe", "", "t2").unwrap();
+        let m1 = add_mod(
+            &conn,
+            "g1",
+            "MTool",
+            "mtool",
+            r"D:\games\Karryn\MTool.exe",
+            "",
+            "t1",
+        )
+        .unwrap();
+        let m2 = add_mod(
+            &conn,
+            "g1",
+            "Cheat Engine",
+            "cheat",
+            r"C:\CE\cheatengine.exe",
+            "",
+            "t2",
+        )
+        .unwrap();
         assert_eq!(list_mods(&conn, "g1").unwrap().len(), 2);
         assert!(has_mods(&conn, "g1").unwrap());
         assert_eq!(get_mod(&conn, "g1", m1).unwrap().unwrap().kind, "mtool");
@@ -1727,9 +1889,36 @@ mod tests {
             [],
         )
         .unwrap();
-        put_suggestion(&conn, "g1", "dlsite", "https://dlsite/RJ1.html", "Summer Witch Art", 0.92, "7").unwrap();
-        put_suggestion(&conn, "g1", "dlsite", "https://dlsite/RJ1.html", "Summer Witch Art", 0.93, "8").unwrap(); // replace
-        put_suggestion(&conn, "g1", "f95", "https://f95zone.to/threads/sw.1/", "Summer Witch [renpy]", 0.71, "7").unwrap();
+        put_suggestion(
+            &conn,
+            "g1",
+            "dlsite",
+            "https://dlsite/RJ1.html",
+            "Summer Witch Art",
+            0.92,
+            "7",
+        )
+        .unwrap();
+        put_suggestion(
+            &conn,
+            "g1",
+            "dlsite",
+            "https://dlsite/RJ1.html",
+            "Summer Witch Art",
+            0.93,
+            "8",
+        )
+        .unwrap(); // replace
+        put_suggestion(
+            &conn,
+            "g1",
+            "f95",
+            "https://f95zone.to/threads/sw.1/",
+            "Summer Witch [renpy]",
+            0.71,
+            "7",
+        )
+        .unwrap();
         let all = list_suggestions(&conn, 10).unwrap();
         assert_eq!(all.len(), 2); // same url replaced, not doubled
         assert_eq!(all[0].confidence, 0.93);
@@ -1739,7 +1928,8 @@ mod tests {
         clear_suggestions(&conn, "g1").unwrap();
         assert!(suggestions_for_item(&conn, "g1").unwrap().is_empty());
 
-        conn.execute("DELETE FROM items WHERE id = 'g1'", []).unwrap();
+        conn.execute("DELETE FROM items WHERE id = 'g1'", [])
+            .unwrap();
         assert!(list_suggestions(&conn, 10).unwrap().is_empty());
     }
 
@@ -1756,12 +1946,28 @@ mod tests {
             [],
         )
         .unwrap();
-        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g1','local','file:///D:/games/g1')", []).unwrap();
-        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g2','local','file:///D:/games/g2')", []).unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('g1','local','file:///D:/games/g1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('g2','local','file:///D:/games/g2')",
+            [],
+        )
+        .unwrap();
         conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g2','dlsite','https://www.dlsite.com/maniax/work/=/product_id/RJ1.html')", []).unwrap();
-        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('p1','local','file:///D:/img.jpg')", []).unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('p1','local','file:///D:/img.jpg')",
+            [],
+        )
+        .unwrap();
 
-        let ids: Vec<String> = games_needing_match(&conn).unwrap().into_iter().map(|(id, _)| id).collect();
+        let ids: Vec<String> = games_needing_match(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(ids, vec!["g1".to_string()]);
     }
 }

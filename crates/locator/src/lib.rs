@@ -42,7 +42,10 @@ pub fn load(exe_dir: &Path) -> Option<Pointer> {
 }
 
 pub fn save(exe_dir: &Path, pointer: &Pointer) -> std::io::Result<()> {
-    fs::write(pointer_path(exe_dir), serde_json::to_vec_pretty(pointer).unwrap())
+    fs::write(
+        pointer_path(exe_dir),
+        serde_json::to_vec_pretty(pointer).unwrap(),
+    )
 }
 
 pub fn clear(exe_dir: &Path) {
@@ -59,7 +62,9 @@ pub fn make_pointer(vault_path: &Path) -> Option<Pointer> {
     if drive.len() != 2 || !drive.ends_with(':') {
         return None; // UNC / unusual path: not supported for M0
     }
-    let volume = volumes().into_iter().find(|v| v.letter == drive.chars().next().unwrap())?;
+    let volume = volumes()
+        .into_iter()
+        .find(|v| v.letter == drive.chars().next().unwrap())?;
     Some(Pointer {
         version: 1,
         volume_label: volume.label.clone(),
@@ -147,9 +152,16 @@ pub fn volumes() -> Vec<Volume> {
         .is_ok();
 
         let label = if ok {
-            let end = name_buf.iter().position(|c| *c == 0).unwrap_or(name_buf.len());
+            let end = name_buf
+                .iter()
+                .position(|c| *c == 0)
+                .unwrap_or(name_buf.len());
             let s = String::from_utf16_lossy(&name_buf[..end]);
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         } else {
             None
         };

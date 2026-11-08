@@ -85,20 +85,19 @@ fn pick_exe(dir: &Path, engine: Option<&str>) -> Option<PathBuf> {
                 .file_name()
                 .map(|s| s.to_string_lossy().trim_end_matches("_Data").to_lowercase())
                 .unwrap_or_default();
-            if let Some(hit) = exes
-                .iter()
-                .find(|p| p.file_stem().map(|s| s.to_string_lossy().to_lowercase()) == Some(name.clone()))
-            {
+            if let Some(hit) = exes.iter().find(|p| {
+                p.file_stem().map(|s| s.to_string_lossy().to_lowercase()) == Some(name.clone())
+            }) {
                 return Some(hit.clone());
             }
         }
     }
     // RPG Maker XP/VX/Ace standard launcher.
     if engine == Some("rpg-maker") {
-        if let Some(hit) = exes
-            .iter()
-            .find(|p| p.file_stem().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("Game")))
-        {
+        if let Some(hit) = exes.iter().find(|p| {
+            p.file_stem()
+                .is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case("Game"))
+        }) {
             return Some(hit.clone());
         }
     }
@@ -161,7 +160,9 @@ pub fn resolve(local_path: Option<&Path>, override_path: Option<&str>) -> Launch
             exe: None,
             cwd: None,
             engine: None,
-            note: Some("this game has no local file source to launch (add one under Sources)".into()),
+            note: Some(
+                "this game has no local file source to launch (add one under Sources)".into(),
+            ),
             pid: None,
         };
     };
@@ -189,13 +190,13 @@ pub fn resolve(local_path: Option<&Path>, override_path: Option<&str>) -> Launch
             cwd: None,
             engine: None,
             note: Some(if is_zip {
-                    format!(
+                format!(
                         "{} is a zip — press Extract zip below to extract it into a launchable folder (the archive is never touched)",
                         path.display()
                     )
-                } else {
-                    format!("{} is not an executable", path.display())
-                }),
+            } else {
+                format!("{} is not an executable", path.display())
+            }),
             pid: None,
         };
     }
@@ -241,7 +242,10 @@ pub fn resolve(local_path: Option<&Path>, override_path: Option<&str>) -> Launch
 /// Actually start the resolved executable. Returns the plan with `pid` filled.
 pub fn launch(plan: &LaunchPlan) -> Result<LaunchPlan, String> {
     if !plan.ok {
-        return Err(plan.note.clone().unwrap_or_else(|| "nothing to launch".into()));
+        return Err(plan
+            .note
+            .clone()
+            .unwrap_or_else(|| "nothing to launch".into()));
     }
     let exe = plan.exe.as_ref().ok_or("nothing to launch")?;
     let mut cmd = std::process::Command::new(exe);
@@ -304,7 +308,10 @@ mod tests {
         let p = resolve(Some(&g), None);
         assert!(p.ok);
         assert_eq!(p.engine, Some("renpy"));
-        assert!(p.exe.unwrap().contains("Summer Witch [renpy] [English].exe"));
+        assert!(p
+            .exe
+            .unwrap()
+            .contains("Summer Witch [renpy] [English].exe"));
         std::fs::remove_dir_all(&b).unwrap();
     }
 

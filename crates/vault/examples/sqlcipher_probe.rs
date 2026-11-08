@@ -38,7 +38,9 @@ fn main() {
             "PRAGMA key = \"x'0000000000000000000000000000000000000000000000000000000000000002'\";",
         )
         .unwrap();
-    match conn2.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get::<_, i64>(0)) {
+    match conn2.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    }) {
         Ok(n) => println!("WRONG KEY OPENED DB! rows={n}"),
         Err(e) => println!("wrong key rejected: {e}"),
     }

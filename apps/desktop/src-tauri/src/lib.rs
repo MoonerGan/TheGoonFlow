@@ -1,9 +1,9 @@
 mod bookmarks;
 mod companion;
-mod importer;
-mod ingest;
 mod extract;
 mod http;
+mod importer;
+mod ingest;
 mod jobs;
 mod launcher;
 mod mods;
@@ -223,7 +223,7 @@ fn lock(state: tauri::State<'_, AppState>, app: tauri::AppHandle) {
 /// key is zeroized.
 fn lock_core(core: &Core, locked: &AtomicBool) {
     core.jobs.cancel_all(); // imports/fetches must stop, not just hide
-    core.queue.clear();     // drop lane timing history too
+    core.queue.clear(); // drop lane timing history too
     let mut inner = core.inner.lock().unwrap();
     inner.opened = None; // drops conn (checkpoint) + zeroizes data key
     locked.store(true, Ordering::SeqCst);
@@ -277,7 +277,10 @@ fn do_scrub(app: &tauri::AppHandle) -> ScrubReport {
         r.webview_cleared = w.clear_all_browsing_data().is_ok();
     }
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        let explorer = Path::new(&local).join("Microsoft").join("Windows").join("Explorer");
+        let explorer = Path::new(&local)
+            .join("Microsoft")
+            .join("Windows")
+            .join("Explorer");
         let (gone, busy) = scrub_cache_dir(&explorer);
         r.thumbcache_removed = gone;
         r.thumbcache_locked = busy;
@@ -301,19 +304,21 @@ fn get_scrub_settings(state: tauri::State<'_, AppState>) -> Result<ScrubSettings
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     Ok(ScrubSettings {
-        scrub_on_lock: goon_core::db::get_meta(&opened.conn, "scrub_on_lock").as_deref() == Some("1"),
+        scrub_on_lock: goon_core::db::get_meta(&opened.conn, "scrub_on_lock").as_deref()
+            == Some("1"),
     })
 }
 
 #[tauri::command]
-fn set_scrub_on_lock(
-    state: tauri::State<'_, AppState>,
-    on: bool,
-) -> Result<ScrubSettings, String> {
+fn set_scrub_on_lock(state: tauri::State<'_, AppState>, on: bool) -> Result<ScrubSettings, String> {
     let mut inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_mut().ok_or("vault is locked")?;
-    goon_core::db::set_meta(&opened.conn, "scrub_on_lock", if on { Some("1") } else { None })
-        .map_err(err)?;
+    goon_core::db::set_meta(
+        &opened.conn,
+        "scrub_on_lock",
+        if on { Some("1") } else { None },
+    )
+    .map_err(err)?;
     Ok(ScrubSettings { scrub_on_lock: on })
 }
 
@@ -369,7 +374,9 @@ struct ChromeInfo {
 
 #[tauri::command]
 fn get_chrome(state: tauri::State<'_, AppState>) -> ChromeInfo {
-    ChromeInfo { decoy: read_chrome(&state.exe_dir) }
+    ChromeInfo {
+        decoy: read_chrome(&state.exe_dir),
+    }
 }
 
 /// Store (or clear) the decoy title and apply it to the live window
@@ -383,7 +390,10 @@ fn set_chrome(
 ) -> Result<ChromeInfo, String> {
     use tauri::Manager;
     let decoy = match title {
-        Some(t) => Some(sanitize_chrome(&t).ok_or("title is empty, all control characters, or over 64 chars")?),
+        Some(t) => Some(
+            sanitize_chrome(&t)
+                .ok_or("title is empty, all control characters, or over 64 chars")?,
+        ),
         None => None,
     };
     let path = chrome_path(&state.exe_dir);
@@ -603,7 +613,9 @@ fn panic_info(state: tauri::State<'_, AppState>) -> Result<PanicInfo, String> {
     let stored = goon_core::db::get_meta(&opened.conn, "panic_hotkey");
     let fault = state.panic_fault.lock().unwrap().clone();
     Ok(PanicInfo {
-        hotkey: stored.clone().unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
+        hotkey: stored
+            .clone()
+            .unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
         stored,
         last_drill: goon_core::db::get_meta(&opened.conn, "nuke_last_drill"),
         armed: fault.is_none(),
@@ -667,7 +679,11 @@ fn run_nuke_drill() -> Result<String, String> {
     goon_vault::nuke(&dir).map_err(err)?;
     if dir.exists() {
         let left: Vec<String> = std::fs::read_dir(&dir)
-            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into()).collect())
+            .map(|rd| {
+                rd.flatten()
+                    .map(|e| e.file_name().to_string_lossy().into())
+                    .collect()
+            })
             .unwrap_or_default();
         if !left.is_empty() {
             return Err(format!("drill FAILED: something survived: {left:?}"));
@@ -683,7 +699,8 @@ fn nuke_drill(state: tauri::State<'_, AppState>) -> Result<String, String> {
     let report = run_nuke_drill()?;
     let mut inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_mut().ok_or("vault is locked")?;
-    goon_core::db::set_meta(&opened.conn, "nuke_last_drill", Some(&crate::now_epoch())).map_err(err)?;
+    goon_core::db::set_meta(&opened.conn, "nuke_last_drill", Some(&crate::now_epoch()))
+        .map_err(err)?;
     Ok(report)
 }
 
@@ -819,7 +836,10 @@ struct ThumbPayload {
 }
 
 #[tauri::command]
-fn get_thumbs(state: tauri::State<'_, AppState>, ids: Vec<String>) -> Result<Vec<ThumbPayload>, String> {
+fn get_thumbs(
+    state: tauri::State<'_, AppState>,
+    ids: Vec<String>,
+) -> Result<Vec<ThumbPayload>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     Ok(goon_core::media::thumbs_for(&opened.conn, &ids)
@@ -851,7 +871,10 @@ struct MediaView {
 const INLINE_MAX: u64 = 96 * 1024 * 1024;
 
 #[tauri::command]
-fn media_view(state: tauri::State<'_, AppState>, item_id: String) -> Result<Option<MediaView>, String> {
+fn media_view(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<Option<MediaView>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     let Some(b) = goon_core::media::best_for(&opened.conn, &item_id) else {
@@ -1221,7 +1244,10 @@ fn dismiss_suggestion(
 }
 
 #[tauri::command]
-fn clear_item_suggestions(state: tauri::State<'_, AppState>, item_id: String) -> Result<(), String> {
+fn clear_item_suggestions(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<(), String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     goon_core::db::clear_suggestions(&opened.conn, &item_id).map_err(err)
@@ -1230,7 +1256,10 @@ fn clear_item_suggestions(state: tauri::State<'_, AppState>, item_id: String) ->
 // ---------- vault video storage (#16, opt-in) ----------
 
 #[tauri::command]
-fn video_info(state: tauri::State<'_, AppState>, item_id: String) -> Result<video::VideoInfo, String> {
+fn video_info(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<video::VideoInfo, String> {
     video::video_info(&state, &item_id)
 }
 
@@ -1248,7 +1277,11 @@ async fn store_video(
         Ok(r) => job.finish(&format!(
             "stored {} MB{}",
             r.stored_bytes / (1024 * 1024),
-            if r.thumb_added { " + first-frame thumb" } else { "" }
+            if r.thumb_added {
+                " + first-frame thumb"
+            } else {
+                ""
+            }
         )),
         Err(e) => job.finish(&format!("failed: {e}")),
     }
@@ -1440,8 +1473,8 @@ fn revert_mod(
         let d = goon_core::db::get_item(&opened.conn, &item_id)
             .map_err(err)?
             .ok_or("item not found")?;
-        let dir = game_folder_for(&d.sources)
-            .ok_or("the game folder is not reachable right now")?;
+        let dir =
+            game_folder_for(&d.sources).ok_or("the game folder is not reachable right now")?;
         (m, dir)
     };
     let manifest: Vec<mods::ManifestEntry> =
@@ -1512,7 +1545,10 @@ fn get_proxy(state: tauri::State<'_, AppState>) -> Result<ProxySettings, String>
 /// Store (or clear with None) the proxy for every networked path.
 /// Validated before saving so a typo can't silently disable enrichment.
 #[tauri::command]
-fn set_proxy(state: tauri::State<'_, AppState>, url: Option<String>) -> Result<ProxySettings, String> {
+fn set_proxy(
+    state: tauri::State<'_, AppState>,
+    url: Option<String>,
+) -> Result<ProxySettings, String> {
     let trimmed = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
     if let Some(u) = &trimmed {
         http::validate_proxy(u)?;
@@ -1707,7 +1743,13 @@ async fn re_enrich_items(
         .jobs
         .start("enrich", &format!("{n} items"))
         .ok_or("an enrichment is already running — see the activity strip")?;
-    let mut sum = RefetchSummary { items: n, enriched: 0, sources: 0, failed: 0, stopped: false };
+    let mut sum = RefetchSummary {
+        items: n,
+        enriched: 0,
+        sources: 0,
+        failed: 0,
+        stopped: false,
+    };
     for (i, id) in item_ids.iter().enumerate() {
         if job.cancelled() {
             sum.stopped = true;
@@ -1764,9 +1806,15 @@ fn add_source(
     if goon_core::db::source_exists(&opened.conn, &cls.site, &url) {
         return Err("that exact link is already tracked somewhere".into());
     }
-    let created =
-        goon_core::db::insert_source(&opened.conn, &item_id, &cls.site, &url, cls.remote_id.as_deref(), None)
-            .map_err(err)?;
+    let created = goon_core::db::insert_source(
+        &opened.conn,
+        &item_id,
+        &cls.site,
+        &url,
+        cls.remote_id.as_deref(),
+        None,
+    )
+    .map_err(err)?;
     if !created {
         return Err("already tracked".into());
     }
@@ -1787,10 +1835,7 @@ fn remove_source(
 }
 
 #[tauri::command]
-fn delete_items(
-    state: tauri::State<'_, AppState>,
-    ids: Vec<String>,
-) -> Result<usize, String> {
+fn delete_items(state: tauri::State<'_, AppState>, ids: Vec<String>) -> Result<usize, String> {
     let mut inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_mut().ok_or("vault is locked")?;
     let mut n = 0;
@@ -1836,7 +1881,10 @@ pub fn run() {
     }
 
     let core = Core {
-        inner: Arc::new(Mutex::new(Inner { vault_root, opened: None })),
+        inner: Arc::new(Mutex::new(Inner {
+            vault_root,
+            opened: None,
+        })),
         jobs: Arc::new(Jobs::default()),
         queue: Arc::new(queue::SiteQueue::default()),
     };
@@ -1999,7 +2047,11 @@ mod integration_tests {
         std::fs::write(chrome_path(&d), "Flow Notes\nonly first line counts\n").unwrap();
         assert_eq!(read_chrome(&d).as_deref(), Some("Flow Notes"));
 
-        assert_eq!(sanitize_chrome("  a\u{7}b  ").as_deref(), Some("ab"), "control chars stripped");
+        assert_eq!(
+            sanitize_chrome("  a\u{7}b  ").as_deref(),
+            Some("ab"),
+            "control chars stripped"
+        );
         assert_eq!(sanitize_chrome("   "), None, "blank = absent");
         assert_eq!(sanitize_chrome(&"x".repeat(65)), None, "over-long refused");
 
@@ -2022,7 +2074,12 @@ mod integration_tests {
         let d = std::env::temp_dir().join(format!("goonflow-scrub-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
-        for f in ["thumbcache_1.db", "thumbcache_99.db", "keepme.db", "thumbcache_notes.txt"] {
+        for f in [
+            "thumbcache_1.db",
+            "thumbcache_99.db",
+            "keepme.db",
+            "thumbcache_notes.txt",
+        ] {
             std::fs::write(d.join(f), b"x").unwrap();
         }
         let (gone, busy) = scrub_cache_dir(&d);
@@ -2072,7 +2129,8 @@ mod integration_tests {
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();
-        let report = importer::import_game_folder(&state, games.display().to_string(), &job).unwrap();
+        let report =
+            importer::import_game_folder(&state, games.display().to_string(), &job).unwrap();
         job.finish("done");
         assert_eq!(report.imported, 1, "titles = {:?}", report.titles);
 
@@ -2085,7 +2143,8 @@ mod integration_tests {
         assert_eq!(items.len(), 1, "imported but list showed nothing");
         assert_eq!(items[0].title, "Game X");
         assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None, None).unwrap();
+        let games_only =
+            goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None, None).unwrap();
         assert_eq!(games_only.len(), 1);
         drop(inner);
 

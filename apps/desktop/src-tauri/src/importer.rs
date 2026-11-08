@@ -102,16 +102,25 @@ fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, notes: &mut 
     let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     let mut sub: Vec<PathBuf> = Vec::new();
     for p in entries {
-        let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         let is_dir = p.is_dir();
         if is_root && notes.root_top.len() < 10 {
-            notes.root_top.push(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+            notes.root_top.push(
+                p.file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            );
         }
         if is_dir {
             if is_internal_dir(&name) || name.ends_with("_data") {
                 if notes.skipped_internal.len() < 6 {
                     notes.skipped_internal.push(
-                        p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default(),
                     );
                 }
                 continue;
@@ -121,7 +130,9 @@ fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, notes: &mut 
             }
             sub.push(p);
         } else if p.extension().is_some_and(|x| {
-            ARCHIVE_EXTS.iter().any(|a| x.to_string_lossy().eq_ignore_ascii_case(a))
+            ARCHIVE_EXTS
+                .iter()
+                .any(|a| x.to_string_lossy().eq_ignore_ascii_case(a))
         }) {
             notes.archives += 1;
         }
@@ -164,7 +175,10 @@ fn describe_empty_scan(root: &Path, notes: &ScanNotes) -> String {
         ));
     }
     if !notes.root_top.is_empty() {
-        msg.push_str(&format!("; top level of the picked folder contains: {}", notes.root_top.join(", ")));
+        msg.push_str(&format!(
+            "; top level of the picked folder contains: {}",
+            notes.root_top.join(", ")
+        ));
     }
     msg.push_str(
         ". A folder counts as a game when it directly contains: game/ with Ren'Py files, Game.exe + Game.ini, *.rmvproject/*.rmmzproject, a <Name>_Data folder (Unity), data.win (GameMaker), package.json + index.html (NW.js), or a game .exe at its top level.",
@@ -355,11 +369,15 @@ fn import_game_dirs(
             updated_at: now.clone(),
         };
         if let Err(e) = db::insert_item(conn, &item) {
-            report.failures.push(format!("{}: insert failed: {e}", raw_name));
+            report
+                .failures
+                .push(format!("{}: insert failed: {e}", raw_name));
             continue;
         }
         if let Err(e) = db::insert_source(conn, &id, "local", &url, None, Some(&now)) {
-            report.failures.push(format!("{}: source failed: {e}", raw_name));
+            report
+                .failures
+                .push(format!("{}: source failed: {e}", raw_name));
             let _ = db::delete_item(conn, &id);
             continue;
         }
@@ -615,7 +633,11 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
                     .as_str()
                     .map(str::to_string)
             });
-        return Ok(ZipEngineInfo { tag: Some("rpg-maker"), title, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("rpg-maker"),
+            title,
+            cover_bytes,
+        });
     }
     // RPG Maker XP/VX/Ace
     if find(&|n| n == "game.exe").is_some() && find(&|n| n == "game.ini").is_some() {
@@ -628,7 +650,11 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
                     .filter(|t| !t.is_empty())
                     .map(str::to_string)
             });
-        return Ok(ZipEngineInfo { tag: Some("rpg-maker"), title, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("rpg-maker"),
+            title,
+            cover_bytes,
+        });
     }
     // Ren'Py — releases ship *compiled* scripts: `game/script-xxxx.rpa`
     // archives, often with no `.rpy` sources and no `renpy/` folder (same
@@ -641,12 +667,17 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
     })
     .is_some()
     {
-        return Ok(ZipEngineInfo { tag: Some("renpy"), title: None, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("renpy"),
+            title: None,
+            cover_bytes,
+        });
     }
     // Unity: a top-level `X_Data/` folder.
-    if let Some(i) = lower.iter().position(|n| {
-        n.split('/').next().is_some_and(|s| s.ends_with("_data")) && n.contains('/')
-    }) {
+    if let Some(i) = lower
+        .iter()
+        .position(|n| n.split('/').next().is_some_and(|s| s.ends_with("_data")) && n.contains('/'))
+    {
         let name = rel[i]
             .split('/')
             .next()
@@ -654,11 +685,19 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
             .trim_end_matches("_Data")
             .trim()
             .to_string();
-        return Ok(ZipEngineInfo { tag: Some("unity"), title: Some(name), cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("unity"),
+            title: Some(name),
+            cover_bytes,
+        });
     }
     // GameMaker
     if find(&|n| n == "data.win").is_some() {
-        return Ok(ZipEngineInfo { tag: Some("gamemaker"), title: None, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("gamemaker"),
+            title: None,
+            cover_bytes,
+        });
     }
     // NW.js / HTML5
     if find(&|n| n == "package.json").is_some() && find(&|n| n == "index.html").is_some() {
@@ -678,16 +717,29 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
                     })
                     .map(str::to_string)
             });
-        return Ok(ZipEngineInfo { tag: Some("html5"), title, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("html5"),
+            title,
+            cover_bytes,
+        });
     }
     // Generic: any exe at zip root.
     if find(&|n| !n.contains('/') && n.ends_with(".exe")).is_some() {
-        return Ok(ZipEngineInfo { tag: Some("pc-game"), title: None, cover_bytes });
+        return Ok(ZipEngineInfo {
+            tag: Some("pc-game"),
+            title: None,
+            cover_bytes,
+        });
     }
     Err("no recognizable game files inside the zip (exe at root, game/ Ren'Py files, engine project files, ...)\nif the game came from a 7z or rar archive, extract it first and use + Game folder".to_string())
 }
 
-fn zip_read(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize, limit: u64) -> Option<Vec<u8>> {
+fn zip_read(
+    za: &mut zip::ZipArchive<fs::File>,
+    names: &[String],
+    idx: usize,
+    limit: u64,
+) -> Option<Vec<u8>> {
     let mut entry = za.by_name(&names[idx]).ok()?;
     let mut buf = Vec::new();
     std::io::Read::take(&mut entry, limit)
@@ -696,7 +748,11 @@ fn zip_read(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize, li
     Some(buf)
 }
 
-fn zip_read_text(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize) -> Option<String> {
+fn zip_read_text(
+    za: &mut zip::ZipArchive<fs::File>,
+    names: &[String],
+    idx: usize,
+) -> Option<String> {
     zip_read(za, names, idx, 2 * 1024 * 1024).map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
@@ -705,7 +761,11 @@ fn common_zip_prefix(names: &[String]) -> String {
         return String::new();
     };
     let seg = &first[..first.find('/').unwrap() + 1];
-    names.iter().all(|n| n.starts_with(seg)).then(|| seg.to_string()).unwrap_or_default()
+    names
+        .iter()
+        .all(|n| n.starts_with(seg))
+        .then(|| seg.to_string())
+        .unwrap_or_default()
 }
 
 // ---------- engine fingerprinting ----------
@@ -944,7 +1004,9 @@ pub fn clean_name(raw: &str) -> (String, Option<String>) {
             i += 1;
         }
     }
-    let trimmed = title.trim_matches(&[' ', '-', '–', '—', '_', '·', '|', ','][..]).trim();
+    let trimmed = title
+        .trim_matches(&[' ', '-', '–', '—', '_', '·', '|', ','][..])
+        .trim();
     let title = if trimmed.is_empty() {
         raw.trim().to_string()
     } else {
@@ -980,7 +1042,9 @@ fn batch_title(paths: &[String]) -> String {
             .unwrap_or_else(|| "Imported image".into());
     }
     let first = Path::new(&paths[0]);
-    let same_parent = paths.iter().all(|p| Path::new(p).parent() == first.parent());
+    let same_parent = paths
+        .iter()
+        .all(|p| Path::new(p).parent() == first.parent());
     match (same_parent, first.parent().and_then(|p| p.file_name())) {
         (true, Some(name)) => name.to_string_lossy().to_string(),
         _ => format!("Imported images ({})", paths.len()),
@@ -1076,7 +1140,10 @@ mod tests {
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
             .collect();
-        assert!(names.iter().any(|n| n == "Game A [v1.0]"), "names = {names:?}");
+        assert!(
+            names.iter().any(|n| n == "Game A [v1.0]"),
+            "names = {names:?}"
+        );
         assert!(names.iter().any(|n| n == "Game B"), "names = {names:?}");
 
         let _ = fs::remove_dir_all(&base);
@@ -1135,7 +1202,8 @@ mod tests {
                 .compression_method(zip::CompressionMethod::Deflated);
             w.start_file("Pumpkin Days/game.rmmzproject", opts).unwrap();
             w.write_all(b"").unwrap();
-            w.start_file("Pumpkin Days/www/data/System.json", opts).unwrap();
+            w.start_file("Pumpkin Days/www/data/System.json", opts)
+                .unwrap();
             w.write_all(br#"{"gameTitle":"Pumpkin Days"}"#).unwrap();
             w.finish().unwrap();
         }
@@ -1156,7 +1224,8 @@ mod tests {
             let mut w = zip::ZipWriter::new(f);
             let opts = zip::write::SimpleFileOptions::default()
                 .compression_method(zip::CompressionMethod::Deflated);
-            w.start_file("Summer Witch/game/script-0a3f2c8b.rpa", opts).unwrap();
+            w.start_file("Summer Witch/game/script-0a3f2c8b.rpa", opts)
+                .unwrap();
             w.write_all(b"rpa").unwrap();
             w.finish().unwrap();
         }

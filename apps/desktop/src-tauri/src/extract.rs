@@ -113,7 +113,9 @@ pub(crate) fn extract_zip(
     // Pre-flight: every entry name must stay inside dest. Checking up front
     // means a malicious archive never gets halfway unpacked.
     for i in 0..total {
-        let entry = za.by_index(i).map_err(|e| format!("zip read failed: {e}"))?;
+        let entry = za
+            .by_index(i)
+            .map_err(|e| format!("zip read failed: {e}"))?;
         let name = entry.name().to_string();
         if safe_join(dest, &name).is_none() {
             return Err(format!(
@@ -134,7 +136,9 @@ pub(crate) fn extract_zip(
             if cancel() {
                 return Err("__cancelled__".into());
             }
-            let mut entry = za.by_index(i).map_err(|e| format!("zip read failed: {e}"))?;
+            let mut entry = za
+                .by_index(i)
+                .map_err(|e| format!("zip read failed: {e}"))?;
             let name = entry.name().to_string();
             let out = safe_join(dest, &name)
                 .ok_or_else(|| format!("archive entry \"{name}\" escapes the folder"))?;
@@ -210,8 +214,15 @@ pub fn extract_for_item(
     let url = format!("file:///{}", link.to_string_lossy().replace('\\', "/"));
     let mut inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_mut().ok_or("vault vanished mid-extract")?;
-    report.source_added = db::insert_source(&opened.conn, item_id, "local", &url, None, Some(&crate::now_epoch()))
-        .unwrap_or(false);
+    report.source_added = db::insert_source(
+        &opened.conn,
+        item_id,
+        "local",
+        &url,
+        None,
+        Some(&crate::now_epoch()),
+    )
+    .unwrap_or(false);
     let _ = db::touch_item(&opened.conn, item_id, &crate::now_epoch());
     Ok(report)
 }
@@ -238,10 +249,7 @@ mod tests {
     use super::*;
 
     fn temp_base(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
-            "goon-extract-{tag}-{}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("goon-extract-{tag}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -274,7 +282,12 @@ mod tests {
         let dest = dest_for(&z);
         assert_eq!(dest, b.join("Summer Witch [v1.2]"));
 
-        let got = extract_zip(&dest.parent().unwrap().join("nope.zip"), &dest, &|| false, &mut |_, _, _| {});
+        let got = extract_zip(
+            &dest.parent().unwrap().join("nope.zip"),
+            &dest,
+            &|| false,
+            &mut |_, _, _| {},
+        );
         assert!(got.is_err(), "missing zip must fail cleanly");
 
         extract_zip(&z, &dest, &|| false, &mut |_, _, _| {}).unwrap();
@@ -297,11 +310,17 @@ mod tests {
     fn zip_slip_is_rejected_and_nothing_is_written() {
         let b = temp_base("slip");
         let z = b.join("evil.zip");
-        make_zip(&z, &[("game/ok.txt", b"fine"), ("../escaped.txt", b"pwned")]);
+        make_zip(
+            &z,
+            &[("game/ok.txt", b"fine"), ("../escaped.txt", b"pwned")],
+        );
         let dest = b.join("evil");
         let e = extract_zip(&z, &dest, &|| false, &mut |_, _, _| {}).unwrap_err();
         assert!(e.contains("escape"), "message was: {e}");
-        assert!(!b.join("escaped.txt").exists(), "escaped file must never appear");
+        assert!(
+            !b.join("escaped.txt").exists(),
+            "escaped file must never appear"
+        );
         assert!(!dest.exists(), "partial folder must be discarded");
     }
 
@@ -309,11 +328,15 @@ mod tests {
     fn cancel_mid_extract_leaves_nothing() {
         let b = temp_base("cancel");
         let z = b.join("big.zip");
-        let many: Vec<(String, Vec<u8>)> =
-            (0..64).map(|i| (format!("f{i}.bin"), vec![i as u8; 16])).collect();
+        let many: Vec<(String, Vec<u8>)> = (0..64)
+            .map(|i| (format!("f{i}.bin"), vec![i as u8; 16]))
+            .collect();
         make_zip(
             &z,
-            &many.iter().map(|(n, b)| (n.as_str(), b.as_slice())).collect::<Vec<_>>(),
+            &many
+                .iter()
+                .map(|(n, b)| (n.as_str(), b.as_slice()))
+                .collect::<Vec<_>>(),
         );
         let dest = b.join("big");
         let e = extract_zip(&z, &dest, &|| true, &mut |_, _, _| {}).unwrap_err();
@@ -331,7 +354,10 @@ mod tests {
             fetched_at: None,
             dead: false,
         };
-        let list = [src("file:///D:/games/Foo/game.exe"), src("file:///D:/games/Foo.zip")];
+        let list = [
+            src("file:///D:/games/Foo/game.exe"),
+            src("file:///D:/games/Foo.zip"),
+        ];
         assert_eq!(zip_source(&list), Some(PathBuf::from("D:/games/Foo.zip")));
         assert!(zip_source(&[src("file:///D:/games/Foo/game.exe")]).is_none());
     }

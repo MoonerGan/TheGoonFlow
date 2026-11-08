@@ -32,9 +32,7 @@ impl SiteQueue {
         let start = {
             let mut lanes = self.lanes.lock().unwrap();
             let now = Instant::now();
-            let slot = lanes
-                .entry(site.to_string())
-                .or_insert_with(|| now - rate); // first request: no initial delay
+            let slot = lanes.entry(site.to_string()).or_insert_with(|| now - rate); // first request: no initial delay
             let start = if *slot < now { now } else { *slot };
             *slot = start + rate;
             start
@@ -71,7 +69,11 @@ mod tests {
         let t0 = Instant::now();
         assert!(q.reserve("rule34", 150, never).await);
         assert!(q.reserve("rule34", 150, never).await);
-        assert!(t0.elapsed() >= Duration::from_millis(140), "elapsed {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() >= Duration::from_millis(140),
+            "elapsed {:?}",
+            t0.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -82,7 +84,11 @@ mod tests {
         // first on rule34 is immediate; e621 is its own lane and also immediate
         assert!(q.reserve("rule34", 5000, never).await);
         assert!(q.reserve("e621", 5000, never).await);
-        assert!(t0.elapsed() < Duration::from_millis(300), "elapsed {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() < Duration::from_millis(300),
+            "elapsed {:?}",
+            t0.elapsed()
+        );
     }
 
     #[tokio::test]
@@ -90,17 +96,19 @@ mod tests {
         let q = SiteQueue::default();
         let never = || false;
         assert!(q.reserve("ehentai", 30_000, never).await); // claims a +30 s lane
-        // cancellation flips after ~150 ms; reserve must give up well before 30 s
+                                                            // cancellation flips after ~150 ms; reserve must give up well before 30 s
         let t0 = Instant::now();
         let ok = q
-            .reserve(
-                "ehentai",
-                30_000,
-                || t0.elapsed() >= Duration::from_millis(150),
-            )
+            .reserve("ehentai", 30_000, || {
+                t0.elapsed() >= Duration::from_millis(150)
+            })
             .await;
         assert!(!ok);
-        assert!(t0.elapsed() < Duration::from_secs(2), "elapsed {:?}", t0.elapsed());
+        assert!(
+            t0.elapsed() < Duration::from_secs(2),
+            "elapsed {:?}",
+            t0.elapsed()
+        );
         q.clear();
         assert!(q.lanes.lock().unwrap().is_empty());
     }

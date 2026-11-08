@@ -33,13 +33,13 @@ mod win {
     use std::path::Path;
     use windows::core::PCWSTR;
     use windows::Win32::Graphics::Gdi::{
-        BI_RGB, BITMAP, BITMAPINFO, BITMAPINFOHEADER, DeleteObject, DIB_RGB_COLORS, GetDIBits,
-        GetDC, GetObjectW, HBITMAP, HGDIOBJ, ReleaseDC,
+        DeleteObject, GetDC, GetDIBits, GetObjectW, ReleaseDC, BITMAP, BITMAPINFO,
+        BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HGDIOBJ,
     };
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
-        IShellItem, IThumbnailProvider, WTS_ALPHATYPE, BHID_ThumbnailHandler,
-        SHCreateItemFromParsingName,
+        BHID_ThumbnailHandler, IShellItem, IThumbnailProvider, SHCreateItemFromParsingName,
+        WTS_ALPHATYPE,
     };
 
     use super::Frame;
@@ -74,8 +74,7 @@ mod win {
 
     unsafe fn inner(wide: &[u16]) -> Option<Frame> {
         let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
-        let provider: IThumbnailProvider =
-            item.BindToHandler(None, &BHID_ThumbnailHandler).ok()?;
+        let provider: IThumbnailProvider = item.BindToHandler(None, &BHID_ThumbnailHandler).ok()?;
 
         let mut hbmp = HBITMAP::default();
         let mut alpha = WTS_ALPHATYPE(0);
@@ -163,7 +162,12 @@ mod tests {
     fn first_frame_live_probe() {
         let p = std::env::var("GOON_FF_PATH").expect("set GOON_FF_PATH to a video file");
         let f = first_frame(std::path::Path::new(&p)).expect("no frame extracted");
-        println!("frame {}x{}, {} bytes RGBA", f.width, f.height, f.rgba.len());
+        println!(
+            "frame {}x{}, {} bytes RGBA",
+            f.width,
+            f.height,
+            f.rgba.len()
+        );
         assert!(f.width > 0 && f.height > 0);
     }
 }

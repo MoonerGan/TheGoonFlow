@@ -111,7 +111,8 @@ fn game_side_launcher(game_dir: &Path) -> Option<PathBuf> {
         if name.contains('_') && name.contains("bak") {
             continue;
         }
-        if stem.contains("withtool") || stem.contains("withmtool") || stem.starts_with("mtool_game") {
+        if stem.contains("withtool") || stem.contains("withmtool") || stem.starts_with("mtool_game")
+        {
             return Some(p);
         }
     }
@@ -168,11 +169,14 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
             //      the game path on the clipboard for the drop box;
             //   3. anything else: pass the game exe as an argument (the old
             //      native MTool flow).
-            let game_dir = game
-                .cwd
-                .clone()
-                .map(PathBuf::from)
-                .or_else(|| game_exe.as_ref().map(|e| PathBuf::from(e).parent().unwrap_or(Path::new(".")).to_path_buf()));
+            let game_dir = game.cwd.clone().map(PathBuf::from).or_else(|| {
+                game_exe.as_ref().map(|e| {
+                    PathBuf::from(e)
+                        .parent()
+                        .unwrap_or(Path::new("."))
+                        .to_path_buf()
+                })
+            });
             if let Some(dir) = &game_dir {
                 if let Some(launcher) = game_side_launcher(dir) {
                     return ModLaunch {
@@ -193,12 +197,16 @@ pub fn recipe(m: &ModRow, game: &LaunchPlan) -> ModLaunch {
             let tool_dir = path.parent().unwrap_or(Path::new("."));
             if is_nwjs_build(tool_dir) {
                 let note = match &game_exe {
-                    Some(_) => "this MTool build (NW.js) takes no game on the command line — \
+                    Some(_) => {
+                        "this MTool build (NW.js) takes no game on the command line — \
                                 the tool is opening and the game's path is on your clipboard: \
-                                drag it into MTool's window",
-                    None => "this MTool build (NW.js) takes no game on the command line, and the \
+                                drag it into MTool's window"
+                    }
+                    None => {
+                        "this MTool build (NW.js) takes no game on the command line, and the \
                             game has no resolvable launcher exe to hand over — open the game \
-                            folder and drag its exe into MTool",
+                            folder and drag its exe into MTool"
+                    }
                 };
                 return ModLaunch {
                     ok: true,
@@ -342,7 +350,9 @@ fn payload_files(payload: &Path) -> Result<Vec<String>, String> {
                         .map_err(|_| "payload walk slipped".to_string())?
                         .to_string_lossy()
                         .replace('\\', "/");
-                    safe_rel(&rel).ok_or_else(|| format!("payload entry \"{rel}\" escapes the game folder"))?;
+                    safe_rel(&rel).ok_or_else(|| {
+                        format!("payload entry \"{rel}\" escapes the game folder")
+                    })?;
                     out.push(rel);
                 }
             }
@@ -352,7 +362,8 @@ fn payload_files(payload: &Path) -> Result<Vec<String>, String> {
         .extension()
         .is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case("zip"))
     {
-        let file = fs::File::open(payload).map_err(|e| format!("cannot open {}: {e}", payload.display()))?;
+        let file = fs::File::open(payload)
+            .map_err(|e| format!("cannot open {}: {e}", payload.display()))?;
         let mut za = zip::ZipArchive::new(file).map_err(|e| format!("unreadable zip: {e}"))?;
         let mut out = Vec::new();
         for i in 0..za.len() {
@@ -361,7 +372,8 @@ fn payload_files(payload: &Path) -> Result<Vec<String>, String> {
                 continue;
             }
             let rel = entry.name().replace('\\', "/");
-            safe_rel(&rel).ok_or_else(|| format!("archive entry \"{rel}\" escapes the game folder"))?;
+            safe_rel(&rel)
+                .ok_or_else(|| format!("archive entry \"{rel}\" escapes the game folder"))?;
             out.push(rel);
         }
         Ok(out)
@@ -399,7 +411,10 @@ fn payload_bytes(payload: &Path, rel: &str) -> Result<Vec<u8>, String> {
 /// any failure everything already done is rolled back.
 pub fn apply(payload: &Path, game_dir: &Path) -> Result<Vec<ManifestEntry>, String> {
     if !game_dir.is_dir() {
-        return Err(format!("game folder {} is not reachable", game_dir.display()));
+        return Err(format!(
+            "game folder {} is not reachable",
+            game_dir.display()
+        ));
     }
     let files = payload_files(payload)?;
     if files.is_empty() {
@@ -429,8 +444,7 @@ pub fn apply(payload: &Path, game_dir: &Path) -> Result<Vec<ManifestEntry>, Stri
             };
             let had_backup = target.is_file();
             if had_backup && !bak.exists() {
-                fs::rename(&target, &bak)
-                    .map_err(|e| format!("could not back up {rel}: {e}"))?;
+                fs::rename(&target, &bak).map_err(|e| format!("could not back up {rel}: {e}"))?;
             }
             if let Some(parent) = target.parent() {
                 fs::create_dir_all(parent).map_err(|e| format!("{rel}: {e}"))?;
@@ -452,7 +466,10 @@ pub fn apply(payload: &Path, game_dir: &Path) -> Result<Vec<ManifestEntry>, Stri
             if entry.had_backup {
                 let mut s = target.into_os_string();
                 s.push(BAK_SUFFIX);
-                let _ = fs::rename(PathBuf::from(s), game_dir.join(entry.file.replace('/', std::path::MAIN_SEPARATOR_STR)));
+                let _ = fs::rename(
+                    PathBuf::from(s),
+                    game_dir.join(entry.file.replace('/', std::path::MAIN_SEPARATOR_STR)),
+                );
             }
         }
         return Err(e);
@@ -535,7 +552,10 @@ mod tests {
         let tool = b.join("MTool.exe");
         std::fs::write(&tool, b"MZ").unwrap();
 
-        let r = recipe(&row("mtool", &tool, ""), &plan(true, Some(r"D:\g\Karryn.exe")));
+        let r = recipe(
+            &row("mtool", &tool, ""),
+            &plan(true, Some(r"D:\g\Karryn.exe")),
+        );
         assert!(r.ok);
         assert_eq!(r.args, vec![r"D:\g\Karryn.exe"]);
         assert_eq!(r.cwd.as_deref(), Some(b.display().to_string().as_str()));
@@ -598,7 +618,10 @@ mod tests {
         let plain = b.join("plain").join("MTool.exe");
         std::fs::create_dir_all(plain.parent().unwrap()).unwrap();
         std::fs::write(&plain, b"MZ").unwrap();
-        let r = recipe(&row("mtool", &plain, ""), &plan(true, Some(r"D:\g\Karryn.exe")));
+        let r = recipe(
+            &row("mtool", &plain, ""),
+            &plan(true, Some(r"D:\g\Karryn.exe")),
+        );
         assert_eq!(r.args, vec![r"D:\g\Karryn.exe"]);
         assert_eq!(r.clipboard, None);
         std::fs::remove_dir_all(&b).unwrap();
@@ -656,7 +679,10 @@ mod tests {
         let m = apply(&payload, &game).expect("apply");
         assert_eq!(m.len(), 2);
         assert_eq!(fs::read(game.join("Game.exe")).unwrap(), b"PATCHED");
-        assert_eq!(fs::read(game.join("Game.exe.flowbak")).unwrap(), b"ORIGINAL");
+        assert_eq!(
+            fs::read(game.join("Game.exe.flowbak")).unwrap(),
+            b"ORIGINAL"
+        );
         assert!(game.join("data").join("extra.dat").is_file());
 
         let notes = revert(&game, &m);
@@ -688,10 +714,7 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].file, "sub/mod.dll");
         assert!(!m[0].had_backup, "new file has no flowbak");
-        assert_eq!(
-            m[0].sha256,
-            goon_core::media::sha256_hex(b"DLLBYTES")
-        );
+        assert_eq!(m[0].sha256, goon_core::media::sha256_hex(b"DLLBYTES"));
         assert!(game.join("sub").join("mod.dll").is_file());
         revert(&game, &m);
         assert!(!game.join("sub").join("mod.dll").exists());
@@ -732,7 +755,11 @@ mod tests {
         std::fs::create_dir_all(game.join("Data")).unwrap();
         let payload = b.join("payload");
         std::fs::create_dir_all(&payload).unwrap();
-        std::fs::write(payload.join("Data"), b"i am a file pretending to be a folder").unwrap();
+        std::fs::write(
+            payload.join("Data"),
+            b"i am a file pretending to be a folder",
+        )
+        .unwrap();
 
         let e = apply(&payload, &game).unwrap_err();
         assert!(e.contains("is a folder"), "message was: {e}");

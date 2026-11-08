@@ -42,7 +42,10 @@ pub struct SiteRef {
 
 /// Repack mirrors are off by default (D8 / PLAN §6).
 pub fn is_mirror_site(site: &str) -> bool {
-    matches!(site, "kimochi" | "otomi" | "ryuugames" | "nagadoki" | "hentaihaven")
+    matches!(
+        site,
+        "kimochi" | "otomi" | "ryuugames" | "nagadoki" | "hentaihaven"
+    )
 }
 
 pub fn default_rate_ms(site: &str) -> i64 {
@@ -239,7 +242,10 @@ pub fn classify(url: &str) -> Option<SiteRef> {
             .or_else(|| {
                 // /index.php?...&id=N and /post/show/N both count
                 let i = segments.iter().position(|s| *s == "show")?;
-                segments.get(i + 1).filter(|s| s.chars().all(|c| c.is_ascii_digit())).map(|s| s.to_string())
+                segments
+                    .get(i + 1)
+                    .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
+                    .map(|s| s.to_string())
             });
         if id.is_some() || media_ext(&path).is_none() {
             return Some(SiteRef {
@@ -415,11 +421,17 @@ async fn get_bytes(
     if let Some(c) = cookie {
         req = req.header(reqwest::header::COOKIE, c);
     }
-    let resp = req.send().await.map_err(|e| format!("download failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("download failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("http {}", resp.status()));
     }
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| format!("download interrupted: {e}"))
+    resp.bytes()
+        .await
+        .map(|b| b.to_vec())
+        .map_err(|e| format!("download interrupted: {e}"))
 }
 
 pub async fn fetch_meta(
@@ -433,7 +445,9 @@ pub async fn fetch_meta(
             "gelbooru" | "rule34" => booru_dapi(client, &s.site, s.remote_id.as_deref()).await,
             "e621" => e621_post(client, s.remote_id.as_deref()).await,
             other => Ok(Meta {
-                note: Some(format!("no metadata API wired for {other} yet — stored as bare link")),
+                note: Some(format!(
+                    "no metadata API wired for {other} yet — stored as bare link"
+                )),
                 ..Default::default()
             }),
         },
@@ -448,7 +462,11 @@ pub async fn fetch_meta(
 
 // ---- booru family (danbooru dapi: gelbooru/rule34) ----
 
-async fn booru_dapi(client: &reqwest::Client, site: &str, id: Option<&str>) -> Result<Meta, String> {
+async fn booru_dapi(
+    client: &reqwest::Client,
+    site: &str,
+    id: Option<&str>,
+) -> Result<Meta, String> {
     let id = id.ok_or_else(|| "no numeric post id in that url".to_string())?;
     let (api, referer) = match site {
         "gelbooru" => (
@@ -475,7 +493,11 @@ async fn booru_dapi(client: &reqwest::Client, site: &str, id: Option<&str>) -> R
     post_from_json(post, referer, client).await
 }
 
-async fn post_from_json(post: &Value, referer: &str, client: &reqwest::Client) -> Result<Meta, String> {
+async fn post_from_json(
+    post: &Value,
+    referer: &str,
+    client: &reqwest::Client,
+) -> Result<Meta, String> {
     let file_url = post
         .get("file_url")
         .and_then(|u| u.as_str())
@@ -500,9 +522,17 @@ async fn post_from_json(post: &Value, referer: &str, client: &reqwest::Client) -
 
 async fn e621_post(client: &reqwest::Client, id: Option<&str>) -> Result<Meta, String> {
     let id = id.ok_or_else(|| "no numeric post id in that url".to_string())?;
-    let text = get_text(client, &format!("https://e621.net/posts/{id}.json"), "https://e621.net", None).await?;
+    let text = get_text(
+        client,
+        &format!("https://e621.net/posts/{id}.json"),
+        "https://e621.net",
+        None,
+    )
+    .await?;
     let v: Value = serde_json::from_str(&text).map_err(|_| "api reply was not json".to_string())?;
-    let post = v.get("post").ok_or_else(|| "post not found (deleted?)".to_string())?;
+    let post = v
+        .get("post")
+        .ok_or_else(|| "post not found (deleted?)".to_string())?;
     let file_url = post
         .get("file")
         .and_then(|f| f.get("url"))
@@ -512,7 +542,11 @@ async fn e621_post(client: &reqwest::Client, id: Option<&str>) -> Result<Meta, S
         .get("tags")
         .and_then(|t| t.get("general"))
         .and_then(|g| g.as_array())
-        .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| t.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let is_video = media_ext(file_url) == Some("video");
     let bytes = get_bytes(client, file_url, "https://e621.net", None).await?;
@@ -562,7 +596,11 @@ pub fn parse_eh_gallery(html: &str) -> (Option<String>, Option<String>) {
     (title, cover)
 }
 
-async fn eh_gallery(client: &reqwest::Client, url: &str, cookie: Option<&str>) -> Result<Meta, String> {
+async fn eh_gallery(
+    client: &reqwest::Client,
+    url: &str,
+    cookie: Option<&str>,
+) -> Result<Meta, String> {
     let html = get_text(client, url, "https://e-hentai.org", cookie).await?;
     if eh_is_gate(&html) {
         return Ok(Meta {
@@ -575,7 +613,10 @@ async fn eh_gallery(client: &reqwest::Client, url: &str, cookie: Option<&str>) -
         });
     }
     let (title, cover) = parse_eh_gallery(&html);
-    let mut m = Meta { title, ..Default::default() };
+    let mut m = Meta {
+        title,
+        ..Default::default()
+    };
     if let Some(cover) = cover {
         if let Ok(bytes) = get_bytes(client, &cover, "https://e-hentai.org", cookie).await {
             m.thumb_bytes = Some(bytes);
@@ -590,18 +631,23 @@ async fn eh_gallery(client: &reqwest::Client, url: &str, cookie: Option<&str>) -
 pub fn parse_dl_product(html: &str) -> (Option<String>, Option<String>, Option<String>) {
     let title = og_content(html, "og:title").map(|t| clean_title_from(&t));
     let cover = og_content(html, "og:image");
-    let updated = ["itemprop=\"dateUpdated\"", "dateUpdated", "最終更新日", "Updated:"]
-        .iter()
-        .find_map(|marker| {
-            let i = html.find(marker)?;
-            let after = &html[i..(i + 160).min(html.len())];
-            let digits: String = after
-                .chars()
-                .skip_while(|c| *c != '2')
-                .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '/')
-                .collect();
-            (digits.len() >= 8).then(|| digits.replace('/', "-")[..10].to_string())
-        });
+    let updated = [
+        "itemprop=\"dateUpdated\"",
+        "dateUpdated",
+        "最終更新日",
+        "Updated:",
+    ]
+    .iter()
+    .find_map(|marker| {
+        let i = html.find(marker)?;
+        let after = &html[i..(i + 160).min(html.len())];
+        let digits: String = after
+            .chars()
+            .skip_while(|c| *c != '2')
+            .take_while(|c| c.is_ascii_digit() || *c == '-' || *c == '/')
+            .collect();
+        (digits.len() >= 8).then(|| digits.replace('/', "-")[..10].to_string())
+    });
     (title, cover, updated)
 }
 
@@ -626,7 +672,11 @@ fn og_content(html: &str, prop: &str) -> Option<String> {
 async fn dl_product(client: &reqwest::Client, url: &str) -> Result<Meta, String> {
     let html = get_text(client, url, "https://www.dlsite.com", None).await?;
     let (title, cover, updated) = parse_dl_product(&html);
-    let mut m = Meta { title, version: updated, ..Default::default() };
+    let mut m = Meta {
+        title,
+        version: updated,
+        ..Default::default()
+    };
     if let Some(cover) = cover {
         if let Ok(bytes) = get_bytes(client, &cover, "https://www.dlsite.com", None).await {
             m.thumb_bytes = Some(bytes);
@@ -686,9 +736,8 @@ pub fn parse_f95_thread(html: &str) -> (Option<String>, Vec<String>) {
             i += 1;
             let lower = tok.trim().to_lowercase();
             match lower.as_str() {
-                "renpy" | "rpg maker" | "rpg-maker" | "rpgm" | "unity" | "gamemaker" | "twine" | "srpg maker" => {
-                    tags.push(lower.replace(' ', "-"))
-                }
+                "renpy" | "rpg maker" | "rpg-maker" | "rpgm" | "unity" | "gamemaker" | "twine"
+                | "srpg maker" => tags.push(lower.replace(' ', "-")),
                 "completed" => tags.push("f95-completed".into()),
                 _ => {} // version + status tokens handled by clean_name
             }
@@ -699,11 +748,18 @@ pub fn parse_f95_thread(html: &str) -> (Option<String>, Vec<String>) {
     (Some(raw.trim().to_string()), tags)
 }
 
-async fn f95_thread(client: &reqwest::Client, url: &str, cookie: Option<&str>) -> Result<Meta, String> {
+async fn f95_thread(
+    client: &reqwest::Client,
+    url: &str,
+    cookie: Option<&str>,
+) -> Result<Meta, String> {
     let html = get_text(client, url, "https://f95zone.to", cookie).await?;
     if html.contains("login required") || html.contains("You do not have permission") {
         return Ok(Meta {
-            note: Some("f95 wants a login for this thread — set its cookie under Sources, then re-clip".into()),
+            note: Some(
+                "f95 wants a login for this thread — set its cookie under Sources, then re-clip"
+                    .into(),
+            ),
             ..Default::default()
         });
     }
@@ -716,12 +772,21 @@ async fn f95_thread(client: &reqwest::Client, url: &str, cookie: Option<&str>) -
         }
         None => (None, None),
     };
-    Ok(Meta { title, version, tags, ..Default::default() })
+    Ok(Meta {
+        title,
+        version,
+        tags,
+        ..Default::default()
+    })
 }
 
 // ---- direct media & local files ----
 
-async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -> Result<Meta, String> {
+async fn direct_media(
+    client: &reqwest::Client,
+    url: &str,
+    site: Option<&str>,
+) -> Result<Meta, String> {
     let kind = media_ext(&host_of(url).1).ok_or("not a recognizable media file")?;
     if kind == "video" {
         return Ok(Meta {
@@ -733,13 +798,11 @@ async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -
     // some bookmarks carry malformed `//images/…` paths — normalize both.
     let (host, path) = host_of(url);
     let clean_path = path.replace("//", "/");
-    let clean = format!(
-        "{}://{}{}",
-        "https",
-        host,
-        clean_path
+    let clean = format!("{}://{}{}", "https", host, clean_path);
+    let referer = format!(
+        "https://{}/",
+        registrable_domain(&host.split(':').next().unwrap_or(&host))
     );
-    let referer = format!("https://{}/", registrable_domain(&host.split(':').next().unwrap_or(&host)));
     let bytes = match get_bytes(client, &clean, &referer, None).await {
         Ok(b) => b,
         Err(first) => {
@@ -768,14 +831,16 @@ async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -
         };
         if !md5.is_empty() {
             if let Some(post) = find_post_by_md5(client, site.unwrap_or(""), &md5).await {
-                let claimed_md5 = post
-                    .get("md5")
-                    .and_then(|m| m.as_str())
-                    .or_else(|| post.get("file").and_then(|f| f.get("md5")).and_then(|m| m.as_str()));
-                let claimed_size = post
-                    .get("filesize")
-                    .and_then(|f| f.as_i64())
-                    .or_else(|| post.get("file").and_then(|f| f.get("size")).and_then(|s| s.as_i64()));
+                let claimed_md5 = post.get("md5").and_then(|m| m.as_str()).or_else(|| {
+                    post.get("file")
+                        .and_then(|f| f.get("md5"))
+                        .and_then(|m| m.as_str())
+                });
+                let claimed_size = post.get("filesize").and_then(|f| f.as_i64()).or_else(|| {
+                    post.get("file")
+                        .and_then(|f| f.get("size"))
+                        .and_then(|s| s.as_i64())
+                });
                 let md5_ok = claimed_md5.is_some_and(|m| m.eq_ignore_ascii_case(&md5));
                 let size_ok = claimed_size.is_none_or(|s| s as usize == bytes.len());
                 if md5_ok && size_ok {
@@ -792,7 +857,11 @@ async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -
                             post.get("tags")
                                 .and_then(|t| t.get("general"))
                                 .and_then(|g| g.as_array())
-                                .map(|a| a.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+                                .map(|a| {
+                                    a.iter()
+                                        .filter_map(|t| t.as_str().map(String::from))
+                                        .collect()
+                                })
                         })
                         .unwrap_or_default();
                     return Ok(Meta {
@@ -812,7 +881,10 @@ async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -
     Ok(Meta {
         store_bytes: Some(bytes.clone()),
         thumb_bytes: Some(bytes),
-        note: Some("direct file link — stored as-is; no post could be identified, edit tags/source later".into()),
+        note: Some(
+            "direct file link — stored as-is; no post could be identified, edit tags/source later"
+                .into(),
+        ),
         ..Default::default()
     })
 }
@@ -822,7 +894,9 @@ async fn direct_media(client: &reqwest::Client, url: &str, site: Option<&str>) -
 async fn find_post_by_md5(client: &reqwest::Client, site: &str, md5: &str) -> Option<Value> {
     let (api, referer) = match site {
         "rule34" => (
-            format!("https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&md5={md5}"),
+            format!(
+                "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&md5={md5}"
+            ),
             "https://rule34.xxx",
         ),
         "gelbooru" => (
@@ -951,7 +1025,10 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
         if !db::site_enabled(conn, &s.site, !is_mirror_site(&s.site)) {
             return Err(format!("{} is disabled — enable it under Sources", s.site));
         }
-        (db::site_cookie(conn, &s.site), db::source_item_id(conn, &s.site, &url))
+        (
+            db::site_cookie(conn, &s.site),
+            db::source_item_id(conn, &s.site, &url),
+        )
     };
     if let Some(existing) = existing {
         return Ok(ClipReport {
@@ -969,7 +1046,9 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     // Phase 2 (async): metadata where available. Never fatal — a failed
     // fetch still stores the link (bare entry beats lost bookmark).
     let client = crate::http::client_for(state, 25)?;
-    let ctx = FetchCtx { cookie: cookie.as_deref() };
+    let ctx = FetchCtx {
+        cookie: cookie.as_deref(),
+    };
     let mut meta = match fetch_meta(&client, &s, &url, &ctx).await {
         Ok(m) => m,
         Err(e) => Meta {
@@ -991,7 +1070,10 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
         .clone()
         .map(|id| format!("{} {}", s.site, id))
         .unwrap_or_else(|| s.site.clone());
-    let title = meta.title.filter(|t| !t.trim().is_empty()).unwrap_or(fallback);
+    let title = meta
+        .title
+        .filter(|t| !t.trim().is_empty())
+        .unwrap_or(fallback);
     let id = new_id("c");
     let item = Item {
         id: id.clone(),
@@ -1072,8 +1154,12 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
         let mut m = BTreeMap::new();
         for t in &targets {
-            m.entry(t.site.clone())
-                .or_insert_with(|| (db::site_cookie(conn, &t.site), db::site_rate_ms(conn, &t.site, default_rate_ms(&t.site))));
+            m.entry(t.site.clone()).or_insert_with(|| {
+                (
+                    db::site_cookie(conn, &t.site),
+                    db::site_rate_ms(conn, &t.site, default_rate_ms(&t.site)),
+                )
+            });
         }
         m
     };
@@ -1087,7 +1173,10 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
             break;
         }
         job.set_progress(i, targets_len, &format!("{} ({})", t.title, t.site));
-        let (cookie, rate) = site_ctx.get(&t.site).cloned().unwrap_or((None, default_rate_ms(&t.site)));
+        let (cookie, rate) = site_ctx
+            .get(&t.site)
+            .cloned()
+            .unwrap_or((None, default_rate_ms(&t.site)));
         // shared per-site lanes (#15), same politeness ledger as enrich
         if !state.queue.reserve(&t.site, rate, || job.cancelled()).await {
             report.stopped = true;
@@ -1099,8 +1188,15 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
             "f95" => Mode::F95,
             _ => Mode::DlSite,
         };
-        let s = SiteRef { site: t.site.clone(), kind: ItemKind::Game, remote_id: None, mode };
-        let ctx = FetchCtx { cookie: cookie.as_deref() };
+        let s = SiteRef {
+            site: t.site.clone(),
+            kind: ItemKind::Game,
+            remote_id: None,
+            mode,
+        };
+        let ctx = FetchCtx {
+            cookie: cookie.as_deref(),
+        };
         match fetch_meta(&client, &s, &t.url, &ctx).await {
             Ok(m) => {
                 if let Some(nv) = m.version.filter(|v| !v.is_empty()) {
@@ -1110,7 +1206,14 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
                         let inner = state.inner.lock().unwrap();
                         if let Some(opened) = inner.opened.as_ref() {
                             let _ = db::set_item_version(&opened.conn, &t.item_id, &nv, &now);
-                            let _ = db::record_update(&opened.conn, &t.item_id, &t.site, t.old_version.as_deref(), Some(&nv), &now);
+                            let _ = db::record_update(
+                                &opened.conn,
+                                &t.item_id,
+                                &t.site,
+                                t.old_version.as_deref(),
+                                Some(&nv),
+                                &now,
+                            );
                         }
                         report.updated += 1;
                         report.updated_titles.push(t.title.clone());
@@ -1128,7 +1231,12 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
 /// Apply a fetched [`Meta`] onto an existing item: stored image, thumbnail,
 /// tags, and — only where the current title is a placeholder — title/version.
 /// Returns `(thumbnail, tags_added, title_updated)`.
-pub fn apply_meta(conn: &rusqlite::Connection, item_id: &str, site: &str, meta: &Meta) -> (bool, usize, bool) {
+pub fn apply_meta(
+    conn: &rusqlite::Connection,
+    item_id: &str,
+    site: &str,
+    meta: &Meta,
+) -> (bool, usize, bool) {
     let mut thumb = false;
     if let Some(bytes) = &meta.store_bytes {
         media::put_full_image(conn, item_id, bytes);
@@ -1191,7 +1299,11 @@ pub struct EnrichReport {
 /// classify → fetch_meta → apply_meta pipeline that clip/bookmark-enrich use.
 /// Local sources are re-read from disk (fixes covers that failed the first
 /// time); remote sources honour their site rate and cookie.
-pub async fn reenrich_item(state: &Core, item_id: &str, job: &JobHandle) -> Result<EnrichReport, String> {
+pub async fn reenrich_item(
+    state: &Core,
+    item_id: &str,
+    job: &JobHandle,
+) -> Result<EnrichReport, String> {
     let sources = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
@@ -1213,7 +1325,9 @@ pub async fn reenrich_item(state: &Core, item_id: &str, job: &JobHandle) -> Resu
         failures: Vec::new(),
     };
     if sources.is_empty() {
-        report.notes.push("this item has no sources to fetch from".into());
+        report
+            .notes
+            .push("this item has no sources to fetch from".into());
         return Ok(report);
     }
 
@@ -1254,13 +1368,21 @@ pub async fn reenrich_item(state: &Core, item_id: &str, job: &JobHandle) -> Resu
 
         let cookie = {
             let inner = state.inner.lock().unwrap();
-            inner.opened.as_ref().and_then(|o| db::site_cookie(&o.conn, site))
+            inner
+                .opened
+                .as_ref()
+                .and_then(|o| db::site_cookie(&o.conn, site))
         };
-        let ctx = FetchCtx { cookie: cookie.as_deref() };
+        let ctx = FetchCtx {
+            cookie: cookie.as_deref(),
+        };
         let meta = match fetch_meta(&client, &cls, url, &ctx).await {
             Ok(m) => m,
             Err(e) => {
-                report.failures.push(EnrichFailure { url: url.clone(), reason: e });
+                report.failures.push(EnrichFailure {
+                    url: url.clone(),
+                    reason: e,
+                });
                 continue;
             }
         };
@@ -1353,10 +1475,16 @@ pub fn title_similarity(a: &str, b: &str) -> f64 {
     if na == 0 || nb == 0 {
         return 0.0;
     }
-    let inter: usize = ba.iter().map(|(k, v)| bb.get(k).copied().unwrap_or(0).min(*v)).sum();
+    let inter: usize = ba
+        .iter()
+        .map(|(k, v)| bb.get(k).copied().unwrap_or(0).min(*v))
+        .sum();
     let dice = 2.0 * inter as f64 / (na + nb) as f64;
     // penalize very different lengths ("cat" vs "cat who saved the world")
-    let (short, long) = (a.chars().count().min(b.chars().count()), a.chars().count().max(b.chars().count()));
+    let (short, long) = (
+        a.chars().count().min(b.chars().count()),
+        a.chars().count().max(b.chars().count()),
+    );
     let ratio = short as f64 / long as f64;
     dice * (0.5 + 0.5 * ratio)
 }
@@ -1386,7 +1514,10 @@ async fn post_form_text(
     if let Some(c) = cookie {
         req = req.header(reqwest::header::COOKIE, c);
     }
-    let resp = req.send().await.map_err(|e| format!("search failed: {e}"))?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("search failed: {e}"))?;
     if !resp.status().is_success() {
         return Err(format!("http {}", resp.status()));
     }
@@ -1396,7 +1527,10 @@ async fn post_form_text(
 /// DLsite has no public JSON API — post the site's own /fs search form and
 /// pull (link, title) from the result anchors. Verified live markup:
 /// `href="https://www.dlsite.com/maniax/work/=/product_id/RJ01731048.html" title="…"`.
-pub async fn dlsite_search(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
+pub async fn dlsite_search(
+    client: &reqwest::Client,
+    query: &str,
+) -> Result<Vec<SearchHit>, String> {
     let html = post_form_text(
         client,
         "https://www.dlsite.com/maniax/fs",
@@ -1425,7 +1559,10 @@ pub fn parse_dl_search(html: &str) -> Vec<SearchHit> {
         let start = idx + rel + "product_id/".len();
         idx = start;
         let after = &html[start..];
-        let id: String = after.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let id: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
         let alpha = id.chars().filter(|c| c.is_ascii_alphabetic()).count();
         let digits = id.chars().filter(|c| c.is_ascii_digit()).count();
         // real product ids are two uppercase letters + 6..8 digits; this also
@@ -1444,7 +1581,10 @@ pub fn parse_dl_search(html: &str) -> Vec<SearchHit> {
         if title.is_empty() || !seen.insert(id.clone()) {
             continue;
         }
-        out.push(SearchHit { url, title: unescape_html(&title) });
+        out.push(SearchHit {
+            url,
+            title: unescape_html(&title),
+        });
     }
     out
 }
@@ -1463,9 +1603,18 @@ pub async fn f95_search(
     if let Some(c) = cookie {
         req = req.header(reqwest::header::COOKIE, c);
     }
-    let resp = req.send().await.map_err(|e| format!("search failed: {e}"))?;
-    if matches!(resp.status(), reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED) {
-        return Err("f95 search wants a login — save your f95 cookie under Sources, then search again".into());
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("search failed: {e}"))?;
+    if matches!(
+        resp.status(),
+        reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED
+    ) {
+        return Err(
+            "f95 search wants a login — save your f95 cookie under Sources, then search again"
+                .into(),
+        );
     }
     if !resp.status().is_success() {
         return Err(format!("http {}", resp.status()));
@@ -1473,7 +1622,10 @@ pub async fn f95_search(
     let html = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
     let hits = parse_f95_search(&html);
     if hits.is_empty() && cookie.is_none() {
-        return Err("f95 found nothing without login — set an f95 cookie under Sources to search threads".into());
+        return Err(
+            "f95 found nothing without login — set an f95 cookie under Sources to search threads"
+                .into(),
+        );
     }
     Ok(hits)
 }
@@ -1492,7 +1644,10 @@ pub fn parse_f95_search(html: &str) -> Vec<SearchHit> {
         let path = raw_href.split(['#', '?']).next().unwrap_or("").to_string();
         let Some(dot) = path.rfind('.') else { continue };
         let after_dot = &path[dot + 1..];
-        let digits: String = after_dot.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = after_dot
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         let rest = &after_dot[digits.len()..];
         if digits.is_empty() || !(rest.is_empty() || rest.starts_with('/')) {
             continue;
@@ -1507,7 +1662,10 @@ pub fn parse_f95_search(html: &str) -> Vec<SearchHit> {
         if text.is_empty() || text.len() > 300 || !seen.insert(digits.clone()) {
             continue;
         }
-        let url = format!("https://f95zone.to/threads/{}/", &path[..dot + 1 + digits.len()]);
+        let url = format!(
+            "https://f95zone.to/threads/{}/",
+            &path[..dot + 1 + digits.len()]
+        );
         out.push(SearchHit { url, title: text });
     }
     out
@@ -1539,16 +1697,25 @@ fn store_hits(
     title: &str,
     hits: &[SearchHit],
 ) -> usize {
-    let mut scored: Vec<(f64, &SearchHit)> =
-        hits.iter().map(|h| (title_similarity(title, &h.title), h)).collect();
+    let mut scored: Vec<(f64, &SearchHit)> = hits
+        .iter()
+        .map(|h| (title_similarity(title, &h.title), h))
+        .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    let keep: Vec<&(f64, &SearchHit)> =
-        scored.iter().take(3).take_while(|(s, _)| *s >= 0.6).collect();
+    let keep: Vec<&(f64, &SearchHit)> = scored
+        .iter()
+        .take(3)
+        .take_while(|(s, _)| *s >= 0.6)
+        .collect();
     if keep.is_empty() {
         return 0;
     }
-    let Ok(inner) = state.inner.try_lock() else { return 0 };
-    let Some(opened) = inner.opened.as_ref() else { return 0 };
+    let Ok(inner) = state.inner.try_lock() else {
+        return 0;
+    };
+    let Some(opened) = inner.opened.as_ref() else {
+        return 0;
+    };
     let now = crate::now_epoch();
     let n = keep.len();
     for (score, h) in keep {
@@ -1567,10 +1734,7 @@ fn store_hits(
 
 /// Scan every game that is tracked only by a local source and store up to
 /// three confident DLsite/f95 matches per game as suggestions.
-pub async fn find_matches(
-    state: &crate::Core,
-    job: &JobHandle,
-) -> Result<MatchReport, String> {
+pub async fn find_matches(state: &crate::Core, job: &JobHandle) -> Result<MatchReport, String> {
     let targets = {
         let inner = state.inner.lock().unwrap();
         let opened = inner.opened.as_ref().ok_or("vault is locked")?;
@@ -1619,7 +1783,11 @@ pub async fn find_matches(
 
         let mut wrote = 0usize;
         if dl_on {
-            if !state.queue.reserve("dlsite", dl_rate, || job.cancelled()).await {
+            if !state
+                .queue
+                .reserve("dlsite", dl_rate, || job.cancelled())
+                .await
+            {
                 report.stopped = true;
                 break;
             }
@@ -1629,7 +1797,11 @@ pub async fn find_matches(
             }
         }
         if f95_on {
-            if !state.queue.reserve("f95", f95_rate, || job.cancelled()).await {
+            if !state
+                .queue
+                .reserve("f95", f95_rate, || job.cancelled())
+                .await
+            {
                 report.stopped = true;
                 break;
             }
@@ -1684,8 +1856,10 @@ mod tests {
     /// that is where the thumbnail 403 was coming from.
     #[test]
     fn booru_cdn_file_links_route_through_the_api() {
-        let s = classify("https://wimg.rule34.xxx//images/3868/7412ed67862b691cceef71b918028f66.jpeg?11353035")
-            .unwrap();
+        let s = classify(
+            "https://wimg.rule34.xxx//images/3868/7412ed67862b691cceef71b918028f66.jpeg?11353035",
+        )
+        .unwrap();
         assert_eq!(s.site, "rule34");
         assert_eq!(s.mode, Mode::BooruId);
         assert_eq!(s.remote_id.as_deref(), Some("11353035"));
@@ -1696,8 +1870,10 @@ mod tests {
         assert_eq!(s.remote_id.as_deref(), Some("4765984"));
 
         // hypnohub has no API wired → stays a direct file, but named correctly
-        let s = classify("https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940")
-            .unwrap();
+        let s = classify(
+            "https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940",
+        )
+        .unwrap();
         assert_eq!(s.site, "hypnohub");
         assert_eq!(s.mode, Mode::DirectMedia);
 
@@ -1714,16 +1890,30 @@ mod tests {
     #[test]
     fn idless_booru_file_links_still_store_the_image() {
         let s = classify("https://img3.gelbooru.com/images/2b/34/2b34cd76ef.jpg").unwrap();
-        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("gelbooru", Mode::DirectMedia, None));
+        assert_eq!(
+            (s.site.as_str(), s.mode, s.remote_id.as_deref()),
+            ("gelbooru", Mode::DirectMedia, None)
+        );
 
-        let s = classify("https://wimg.rule34.xxx/images/3868/7412ed67862b691cceef71b918028f66.jpeg").unwrap();
-        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::DirectMedia, None));
+        let s =
+            classify("https://wimg.rule34.xxx/images/3868/7412ed67862b691cceef71b918028f66.jpeg")
+                .unwrap();
+        assert_eq!(
+            (s.site.as_str(), s.mode, s.remote_id.as_deref()),
+            ("rule34", Mode::DirectMedia, None)
+        );
 
         // a post page URL that carries its id in the path still resolves as a post
         let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=11353035").unwrap();
-        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::BooruId, Some("11353035")));
+        assert_eq!(
+            (s.site.as_str(), s.mode, s.remote_id.as_deref()),
+            ("rule34", Mode::BooruId, Some("11353035"))
+        );
         let s = classify("https://rule34.xxx/post/show/11353035").unwrap();
-        assert_eq!((s.site.as_str(), s.mode, s.remote_id.as_deref()), ("rule34", Mode::BooruId, Some("11353035")));
+        assert_eq!(
+            (s.site.as_str(), s.mode, s.remote_id.as_deref()),
+            ("rule34", Mode::BooruId, Some("11353035"))
+        );
     }
 
     #[test]
@@ -1794,7 +1984,9 @@ mod tests {
         "#;
         let hits = parse_dl_search(html);
         assert_eq!(hits.len(), 3); // thumb+anchor for one product dedupe; maker id ignored
-        assert!(hits.iter().any(|h| h.url.ends_with("RJ01731048.html") && h.title == "Summer Witch Remake [同人誌]"));
+        assert!(hits.iter().any(
+            |h| h.url.ends_with("RJ01731048.html") && h.title == "Summer Witch Remake [同人誌]"
+        ));
         assert!(hits.iter().any(|h| h.title == "Summer & Rain")); // entity unescaped
         assert!(hits.iter().any(|h| h.url.ends_with("RJ123456.html")));
     }
@@ -1809,7 +2001,10 @@ mod tests {
         "#;
         let hits = parse_f95_search(html);
         assert_eq!(hits.len(), 2);
-        assert_eq!(hits[0].url, "https://f95zone.to/threads/summer-witch.10599/");
+        assert_eq!(
+            hits[0].url,
+            "https://f95zone.to/threads/summer-witch.10599/"
+        );
         assert_eq!(hits[0].title, "Summer Witch [v1.2] [renpy] [WiP]");
         assert_eq!(hits[1].title, "Other Game & Sequel");
     }
@@ -1842,7 +2037,10 @@ mod tests {
     #[test]
     fn windows_file_urls_become_paths() {
         let p = local_path("/C:/Users/Admin/Videos/EnomeSnake.mp4").unwrap();
-        assert_eq!(p.display().to_string(), "C:/Users/Admin/Videos/EnomeSnake.mp4");
+        assert_eq!(
+            p.display().to_string(),
+            "C:/Users/Admin/Videos/EnomeSnake.mp4"
+        );
         let p = local_path("//nas/share/clip.mp4").unwrap();
         assert_eq!(p.display().to_string(), r"\\nas\share\clip.mp4");
         assert!(local_path("/").is_err());
@@ -1880,7 +2078,10 @@ mod tests {
         </head><body><span itemprop="dateUpdated" content="2026-03-01T12:00:00+09:00"></span></body></html>"#;
         let (title, cover, updated) = parse_dl_product(page);
         assert_eq!(title.as_deref(), Some("Summer Witch [PC版]"));
-        assert_eq!(cover.as_deref(), Some("https://img.dlsite.jp/works/RJ123456.jpg"));
+        assert_eq!(
+            cover.as_deref(),
+            Some("https://img.dlsite.jp/works/RJ123456.jpg")
+        );
         assert_eq!(updated.as_deref(), Some("2026-03-01"));
     }
 
@@ -1901,7 +2102,9 @@ mod tests {
             .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap();
-        let hits = dlsite_search(&client, "karryn").await.expect("dlsite search");
+        let hits = dlsite_search(&client, "karryn")
+            .await
+            .expect("dlsite search");
         assert!(!hits.is_empty(), "dlsite search returned nothing");
         assert!(hits.iter().all(|h| h.url.contains("/product_id/")));
         println!("dlsite hits: {}", hits.len());
@@ -1910,6 +2113,9 @@ mod tests {
         }
         // without a cookie f95 answers the login page — expect the friendly error
         let r = f95_search(&client, "spring seed", None).await;
-        println!("f95 no-cookie result: {}", r.err().unwrap_or_else(|| "hits without a cookie?!".into()));
+        println!(
+            "f95 no-cookie result: {}",
+            r.err().unwrap_or_else(|| "hits without a cookie?!".into())
+        );
     }
 }

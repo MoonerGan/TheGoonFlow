@@ -237,7 +237,13 @@ fn wrap(master: &[u8; 32], data_key: &[u8; 32]) -> Result<WrappedRecord, VaultEr
     OsRng.fill_bytes(&mut nonce_bytes);
     let nonce = GenericArray::from_slice(&nonce_bytes);
     let ct = cipher
-        .encrypt(nonce, Payload { aad: AAD, msg: data_key })
+        .encrypt(
+            nonce,
+            Payload {
+                aad: AAD,
+                msg: data_key,
+            },
+        )
         .map_err(|e| VaultError::Keyfile(format!("wrap failed: {e}")))?;
     Ok(WrappedRecord {
         alg: "xchacha20poly1305".into(),
@@ -247,7 +253,10 @@ fn wrap(master: &[u8; 32], data_key: &[u8; 32]) -> Result<WrappedRecord, VaultEr
 }
 
 fn unwrap_data_key(passphrase: &str, record: &KeyFileRecord) -> Result<DataKey, VaultError> {
-    if record.version != 1 || record.kdf.alg != "argon2id" || record.wrapped.alg != "xchacha20poly1305" {
+    if record.version != 1
+        || record.kdf.alg != "argon2id"
+        || record.wrapped.alg != "xchacha20poly1305"
+    {
         return Err(VaultError::Keyfile(format!(
             "unsupported keyfile format v{}",
             record.version
@@ -340,7 +349,10 @@ mod tests {
         }
         // Re-open with the *wrong* key must fail as InvalidPassphrase, not corrupt silently.
         let wrong = DataKey([7u8; 32]);
-        assert!(matches!(open_db(&dir, &wrong), Err(VaultError::InvalidPassphrase)));
+        assert!(matches!(
+            open_db(&dir, &wrong),
+            Err(VaultError::InvalidPassphrase)
+        ));
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -351,7 +363,10 @@ mod tests {
         change_passphrase(&dir, "old", "new").unwrap();
         let after = open_keyfile(&dir, "new").unwrap();
         assert_eq!(original.0, after.0);
-        assert!(matches!(open_keyfile(&dir, "old"), Err(VaultError::InvalidPassphrase)));
+        assert!(matches!(
+            open_keyfile(&dir, "old"),
+            Err(VaultError::InvalidPassphrase)
+        ));
         fs::remove_dir_all(&dir).ok();
     }
 
