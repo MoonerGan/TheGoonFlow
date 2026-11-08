@@ -283,7 +283,6 @@ pub async fn import_bookmarks(
             .map_err(|e| e.to_string())?;
         let total = bookmarks.len() + ordered.len();
         let mut done = bookmarks.len();
-        let mut last: Option<(String, std::time::Instant)> = None;
         for p in ordered {
             if job.cancelled() {
                 report.stopped = true;
@@ -293,15 +292,12 @@ pub async fn import_bookmarks(
             let rate = rate_of(state, &p.site);
             job.set_note(&format!("fetching {} (polite delay {rate} ms)", p.site));
 
-            if let Some((prev_site, when)) = &last {
-                if prev_site == &p.site {
-                    let need = Duration::from_millis(rate as u64);
-                    if when.elapsed() < need {
-                        tokio::time::sleep(need - when.elapsed()).await;
-                    }
-                }
+            // Shared per-site lane (#15): guaranteed spacing against *all*
+            // other fetch work, not just this loop's previous request.
+            if !state.queue.reserve(&p.site, rate, || job.cancelled()).await {
+                report.stopped = true;
+                break;
             }
-            last = Some((p.site.clone(), std::time::Instant::now()));
 
             let cookie = {
                 let inner = state.inner.lock().unwrap();
@@ -436,6 +432,7 @@ mod tests {
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Jobs::default()),
+            queue: Arc::new(crate::queue::SiteQueue::default()),
         };
         (state, tmp)
     }

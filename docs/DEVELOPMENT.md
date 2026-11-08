@@ -154,6 +154,15 @@ tools/
     — pulling bytes from a CDN with the CDN as referer is what hotlink
     protection kills. `JobInfo.finished_at` exists so the ActivityBar can
     expire finished rows; don't remove it.
+11. **One politeness ledger (`queue::SiteQueue`, #15).** Every network fetch —
+    bookmark enrich, re-fetch, update checks, and the future M3 downloader —
+    claims its slot with `state.queue.reserve(site, rate_ms, cancel).await`
+    instead of tracking a private "last request per site" and sleeping inline.
+    That guarantees spacing *across* concurrent jobs (two jobs hammering one
+    booru was the old bug), keeps different sites progressing in parallel, and
+    bails within ~100 ms of Stop. A cancelled wait leaves the lane advanced by
+    at most one slot — harmless politeness, not rolled back. Lock/Nuke/
+    forget-pointer also `queue.clear()`.
 
 ## 5. Testing
 

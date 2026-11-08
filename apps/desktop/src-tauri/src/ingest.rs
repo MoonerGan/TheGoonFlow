@@ -974,7 +974,6 @@ pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateRe
     if targets.is_empty() {
         return Ok(report);
     }
-
     let site_ctx: BTreeMap<String, (Option<String>, i64)> = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
@@ -993,7 +992,6 @@ pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateRe
         .map_err(|e| e.to_string())?;
 
     let targets_len = targets.len();
-    let mut last: Option<(String, std::time::Instant)> = None;
     for (i, t) in targets.into_iter().enumerate() {
         if job.cancelled() {
             report.stopped = true;
@@ -1001,16 +999,11 @@ pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateRe
         }
         job.set_progress(i, targets_len, &format!("{} ({})", t.title, t.site));
         let (cookie, rate) = site_ctx.get(&t.site).cloned().unwrap_or((None, default_rate_ms(&t.site)));
-        if let Some((prev_site, when)) = &last {
-            if prev_site == &t.site {
-                let need = Duration::from_millis(rate as u64);
-                let elapsed = when.elapsed();
-                if elapsed < need {
-                    tokio::time::sleep(need - elapsed).await;
-                }
-            }
+        // shared per-site lanes (#15), same politeness ledger as enrich
+        if !state.queue.reserve(&t.site, rate, || job.cancelled()).await {
+            report.stopped = true;
+            break;
         }
-        last = Some((t.site.clone(), std::time::Instant::now()));
         report.checked += 1;
 
         let mode = match t.site.as_str() {
@@ -1141,7 +1134,6 @@ pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> 
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut last: Option<(String, std::time::Instant)> = None;
     for (i, (site, url)) in sources.iter().enumerate() {
         if job.cancelled() {
             report.stopped = true;
@@ -1157,7 +1149,7 @@ pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> 
             continue;
         };
 
-        // remote fetches are polite per site; local files need no delay
+        // remote fetches share the per-site lanes (#15); local files need none
         if !matches!(cls.mode, Mode::LocalFile) {
             let rate = {
                 let inner = state.inner.lock().unwrap();
@@ -1169,15 +1161,10 @@ pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> 
                     }
                 }
             };
-            if let Some((prev_site, when)) = &last {
-                if prev_site == site {
-                    let need = Duration::from_millis(rate as u64);
-                    if when.elapsed() < need {
-                        tokio::time::sleep(need - when.elapsed()).await;
-                    }
-                }
+            if !state.queue.reserve(site, rate, || job.cancelled()).await {
+                report.stopped = true;
+                break;
             }
-            last = Some((site.clone(), std::time::Instant::now()));
         }
 
         let cookie = {

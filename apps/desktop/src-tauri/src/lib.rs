@@ -3,6 +3,7 @@ mod companion;
 mod importer;
 mod ingest;
 mod jobs;
+mod queue;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -51,6 +52,9 @@ pub struct AppState {
     /// Long-running work (imports, update checks) runs as jobs: observable,
     /// stoppable, and cancelled by Lock/Nuke.
     jobs: Arc<Jobs>,
+    /// #15: shared per-site rate lanes for every network fetch — one
+    /// politeness ledger for all jobs, not one per work-loop.
+    queue: Arc<queue::SiteQueue>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -162,6 +166,7 @@ fn unlock(state: tauri::State<'_, AppState>, passphrase: String) -> Result<(), S
 #[tauri::command]
 fn lock(state: tauri::State<'_, AppState>) {
     state.jobs.cancel_all(); // imports/fetches must stop, not just hide
+    state.queue.clear();     // drop lane timing history too
     let mut inner = state.inner.lock().unwrap();
     inner.opened = None; // drops conn (checkpoint) + zeroizes data key
     state.locked.store(true, Ordering::SeqCst);
@@ -183,6 +188,7 @@ fn nuke_vault(
     // Stop every job first: nothing should be fetching or writing while the
     // files are being shredded, and no loop may re-open anything afterwards.
     state.jobs.cancel_all();
+    state.queue.clear();
     let root = {
         let mut inner = state.inner.lock().unwrap();
         let root = inner
@@ -210,6 +216,7 @@ fn nuke_vault(
 #[tauri::command]
 fn reset_pointer(state: tauri::State<'_, AppState>) {
     state.jobs.cancel_all();
+    state.queue.clear();
     goon_locator::clear(&state.exe_dir);
     let mut inner = state.inner.lock().unwrap();
     inner.vault_root = None;
@@ -771,6 +778,7 @@ pub fn run() {
         companion,
         locked,
         jobs: Arc::new(Jobs::default()),
+        queue: Arc::new(queue::SiteQueue::default()),
     };
 
     tauri::Builder::default()
@@ -854,6 +862,7 @@ mod integration_tests {
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
             jobs: Arc::new(Jobs::default()),
+            queue: Arc::new(queue::SiteQueue::default()),
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();

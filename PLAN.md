@@ -251,6 +251,10 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
 - Repo is now on GitHub (`MoonerGan/TheGoonFlow`); milestones + the whole
   backlog live in GitHub Issues/Project (project 1). M2.6 items are P0;
   M3–M5 sit in Backlog. Field reports continue as issues.
+- M3 progress ahead of schedule: **#15 (async per-source request queue) is
+  done early** — `queue::SiteQueue` (per-site `reserve()` lanes, cancellable,
+  cleared on Lock/Nuke) now backs bookmark enrich, re-fetch, and update
+  checks; the M3 downloader (#17) must reuse it. See DEVELOPMENT §4 inv 11.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.
