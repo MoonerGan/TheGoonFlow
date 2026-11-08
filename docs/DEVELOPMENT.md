@@ -53,7 +53,7 @@ crates/
   vault/        crypto core: Argon2id KDF → XChaCha20-Poly1305-wrapped data key
                 → SQLCipher PRAGMA key; nuke = shred keyfile first, then files
   locator/      flow.cfg pointer + volume-label resolution (drive-letter agnostic)
-  goon-core/    domain model, SQLite schema (v1), media pipeline (thumbnail gen,
+  goon-core/    domain model, SQLite schema (v2), media pipeline (thumbnail gen,
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
@@ -61,27 +61,38 @@ apps/desktop/
     src/
       lib.rs        AppState, vault lifecycle commands, all tauri commands
       companion.rs  127.0.0.1 axum API (handshake/ping/clip stub)
+      ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
-      bookmarks.rs  D13: Netscape bookmark parse + classify + polite enrichment
+      bookmarks.rs  D13: Netscape bookmark parse + polite per-site enrichment
     capabilities/   Tauri 2 permission sets (core + dialog)
 tools/
   dev-env.ps1       MSVC/toolchain env import
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v1, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v2, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
   first-class column. **Completion is NOT a status** — it's a `user_status`
   tag (D9): exactly one per item, e.g. `complete` (green, priority 100).
 - `sources` — many→one to items; `UNIQUE(site, url)`; `site='local'` +
-  `file:///…` url for imported games; raw snapshot column reserved for M1.
+  `file:///…` url for imported games **and local media bookmarks**; raw
+  snapshot column reserved for M3 selector recovery. Because of that unique
+  key, `merge_items` moves sources with `UPDATE OR IGNORE` (a copy would
+  collide with the keeper's own rows).
 - `tags`/`tag_types`/`item_tags` — types 1 `user_status`, 2 `site_flag`,
-  3 `content`. `tag_get_or_create` + `link_item_tag` are the write paths.
+  3 `content`. `add_item_tag` / `remove_item_tag` / `top_tags` are the M1
+  read+write paths; `list_items(…, tag)` filters on them.
 - `media` — thumbnails (`kind='thumb'`, one per item, replaced on update) and
   originals (`kind='full'`), content-hash deduped BLOBs. Keeping them in the
   DB keeps the wipe story to "shred one directory".
+- `site_settings` (v2) — per site: `enabled`, `cookie`, `rate_ms`. Read with
+  `site_enabled(conn, site, default)` — the default differs per site (repack
+  mirrors ship **off**, D8), so never assume `true`.
+- `updates` (v2) — the change feed: `record_update` + `list_updates`;
+  `update_targets` picks the game rows worth re-visiting (dlsite/f95 sources,
+  non-DNF statuses).
 
 ## 4. Invariants (do not break without updating PLAN.md)
 
@@ -120,10 +131,16 @@ cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
 - `goon-core` — schema idempotency, media put/replace/dedup.
 - `importer` — version/title parsing, engine fingerprints (Ren'Py, RPGM w/
   System.json title, non-game rejection).
-- `bookmarks` — Netscape parser (entity decoding), per-site classification and
-  id extraction (gelbooru/rule34/e621/e-hentai/DLsite/f95).
+- `bookmarks` — Netscape parser (entity decoding, including entity-escaped
+  `file:///…` links), and a real-vault roundtrip proving local `file:///…mp4`
+  / `.png` bookmarks and direct booru CDN links import as **media** (the M1
+  field report said they landed in "unrecognized").
+- `ingest` — classify() for every supported shape (post pages, `…/file.gif?267940`
+  CDN links, `file:///C:/…`, UNC, mirrors), `local_path` Windows path handling,
+  and the HTML parsers (e-hentai gate vs gallery, DLsite og:*, f95 og:title →
+  title + version + engine tags). All parse-only: no network in tests.
 
-When M1 extractors land: save HTML/JSON **fixtures** per site and test
+When M3 site-packs land: save HTML/JSON **fixtures** per site and test
 parsers against them (site redesigns must become failing tests, not silent
 breakage). Network tests stay opt-in; the enrichment path is exercised
 manually.
@@ -133,8 +150,20 @@ manually.
 - **New command**: add to `lib.rs` (mirror the scoped `inner.opened` lock
   pattern — never hold the `MutexGuard` across `.await`), register in
   `generate_handler!`, mirror the type in `api.ts`.
-- **New site support**: see PLAN §6 — first-class Rust `Ingestor` modules for
-  API-backed sites; declarative site-packs (M1+) for selector-based ones.
+- **New site support**: add it in `ingest::classify` (host → `SiteRef` with a
+  `Mode`) and, if it has an API or scrapeable page, `ingest::fetch_meta`
+  (return a `Meta`: title / store_bytes / thumb_bytes / tags / version / note).
+  Also list it in `ingest::KNOWN_SITES` so the Sources panel can enable/disable
+  it, set its cookie and its `rate_ms`. Bookmark import and "+ Clip URL" both
+  go through this one path — that's deliberate, so the M4 extension needs no new
+  logic. PLAN §6 keeps the split: Rust ingestors for API-backed sites,
+  declarative site-packs (M3) for selector-based ones.
+- **Media policy**: images get stored in the vault (`put_full_image` +
+  `put_thumbnail`); **videos stay links** (note on the item), because a 400 MB
+  BLOB would make the one-action nuke slow and the DB unwieldy.
+- **New site support, gated**: check `db::site_enabled(conn, site, !is_mirror_site(site))`
+  before any fetch; disabled sites must produce a visible "site off" line in the
+  report, never a silent skip.
 - **Async commands + DB**: do all DB writes in sync scopes before/after the
   network phase (see `bookmarks::import_bookmarks` two-phase flow).
 - **Thumbnails**: always through `goon_core::media::put_thumbnail` (hash,

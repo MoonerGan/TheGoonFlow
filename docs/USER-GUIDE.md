@@ -45,11 +45,27 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 - Forgotten passphrase ≠ lost content forever only via backups: without it the
   vault is a brick. That's the point.
 
-## 3. Import what you already have
+## 3. Getting things in
 
-Five import buttons in the top bar. Everything imported is just a normal
-library entry — click any card to correct it. The sidebar splits the library
-into **Games** and **Media** (galleries/posts) views, filterable by status.
+Six buttons in the top bar. Everything you add becomes a normal library entry —
+click any card to correct it. The sidebar splits the library into **Games** and
+**Media** (galleries/posts) views, filterable by status and by tag.
+
+### + Clip URL (the everyday one)
+Paste a single link and it is identified, stored, and decorated where possible:
+
+| You paste | What happens |
+|---|---|
+| a booru post page (gelbooru, rule34, e621) | post tracked, image + tags pulled in |
+| a direct file link (`…/6ce01.gif?267940`) | file grabbed for images; **videos stay a link** |
+| `file:///D:/Media/clip.mp4` or `.png` | resolves as media: images are stored + thumbnailed, videos tracked by path |
+| e-hentai / exhentai gallery | title + cover (if the page isn't the IP-login gate) |
+| DLsite product, f95 thread | title, version, cover/engine tags |
+| a repack mirror (kimochi, otomi, ryuugames…) | tracked as a DLsite mirror — **off by default**, switch it on under *Sources* |
+
+If the link is already in the vault it is not duplicated — the app tells you
+which item already holds it. If a site needs a login, the clip still stores the
+link and says so; add the cookie under *Sources* and clip again to enrich it.
 
 ### + Game folder
 Point it at the folder that contains your game folders (or at a single game
@@ -91,17 +107,21 @@ removes the vault copy only.
 
 ### + Bookmarks
 Import a browser bookmarks export (Firefox: *Bookmarks → Export Bookmarks to
-HTML*; Chrome: *Bookmarks Manager → Export*). Each bookmark is classified by
-site — gelbooru, rule34, e621, e-hentai/exhentai, DLsite, f95zone, and other
-known boorus — and becomes a tracked item with its source URL.
+HTML*; Chrome: *Bookmarks Manager → Export*). Each bookmark is classified the
+same way *+ Clip URL* classifies one link: gelbooru, rule34, e621 and other
+known boorus, e-hentai/exhentai, DLsite, f95zone, **direct image/video file
+URLs**, and **`file:///` links to media already on this machine** — so a
+bookmark to `file:///D:/Videos/clip.mp4` becomes a media item, not an error.
+Anything else counts as *unrecognized* and is listed in the report.
 
 **Enrich online** (checkbox, on by default): when checked, the app politely
-(one request at a time, ~0.7 s apart) fetches thumbnails, full images, and
-tags for booru posts (gelbooru/rule34/e621 APIs) and cover art for DLsite
-products. e-hentai and f95zone import title+URL only until session cookies
-land in M2. Unchecked = pure offline metadata import. This only decorates
-bookmarks you import — it is **not** the browser integration (that's the
-companion extension in M4).
+(one request per site at a time, honouring that site's rate) fetches
+thumbnails, full images, and tags for booru posts, cover art for DLsite and
+repack pages, and title/version/engine tags for f95 threads. e-hentai and
+login-gated sites import title+URL unless you saved a cookie for them under
+*Sources*. Unchecked = pure offline import (local files are still read and
+thumbnailed — they need no network). This only decorates what you import — it
+is **not** the browser integration (that's the companion extension in M4).
 
 > Note: "enrich online" contacts those sites directly from this machine — same
 > as browsing them. If that matters to you, uncheck it or run behind your
@@ -121,7 +141,22 @@ fetch.
 - **Editor:** fix the title, set circle/developer, version, pipeline
   **status** (`seen / tracking / wishlist / downloaded / played`), and the
   **✓ Complete** personal marker (green chip — it means *"I finished this"*,
-  independent of status, and it survives game updates).
+  independent of status, and it survives game updates). Add or remove **tags**
+  (booru tags arrive on their own when you clip/enrich; add your own, e.g.
+  `renpy`, `dnf`). The editor also lists every **source** link an item has.
+- **Tagged** (sidebar): the most used tags in your vault; click one to filter,
+  click again (or *clear*) to unfilter.
+- **Updates**: re-visits the DLsite pages and f95 threads of games you track
+  and records version changes. A game marked Complete still surfaces here —
+  completion is a tag, not a full stop.
+- **Possible dupes**: the same title from DLsite + f95 + a local folder is
+  almost certainly one work. Nothing merges itself; you pick which entry to
+  keep and the other's sources/tags/art are folded into it.
+- **Sources**: turn each site on or off, set how polite it should be (ms
+  between requests), and paste a **cookie** for sites that need a login
+  (e-hentai, f95 threads). Repack mirrors are off by default — they are
+  re-uploads of DLsite works, and their links fold into the original through
+  *Possible dupes* rather than staying separate entries.
 - **Remove from vault:** deletes the entry (and vault-stored images) — your
   game folders on disk are never touched.
 - Sidebar filters by status; counts are live.
@@ -146,4 +181,8 @@ fetch.
 | "that folder is not a goonflow vault" | You picked the wrong folder (e.g. the parent). Pick the one containing `vault.marker`. |
 | Wrong passphrase loop | No recovery — that's crypto, not a bug. Restore from a backup or nuke & restart. |
 | Import found 0 games | The scan goes 4 levels deep; the game folder itself must contain the engine files. If the game is inside a .zip, use *+ Game zip*. Selecting the game's folder directly always works. |
+| Clip says "…is disabled — enable it under Sources" | That site is switched off (repack mirrors ship off). Turn it on in *Sources* and clip again. |
+| Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
+| Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |
+| Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. |
 | White/blank window at launch | WebView2 runtime missing — install "Microsoft Edge WebView2 Runtime". |

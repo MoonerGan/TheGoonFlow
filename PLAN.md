@@ -123,6 +123,8 @@ TheGoonFlow/
 
 `trait Ingestor { identify(url) -> SiteRef; fetch(url); search(q, page); }` — reqwest with per-source rate limiters, referer headers (hotlinked thumbnails), global + per-source proxy (HTTP/SOCKS5 → Tor-able).
 
+**As built (M1/M2):** `apps/desktop/src-tauri/src/ingest.rs` — `classify(url) -> SiteRef{site, kind, remote_id, Mode}` + `fetch_meta(...) -> Meta{title, store_bytes, thumb_bytes, tags, version, note}` + `clip()` (dedup on `sources(site,url)`; the link is stored even when the fetch fails, with the reason as a note). Trait objects deferred until site-packs make the shape real. Policy: images are stored in the vault, **videos stay links**; `file:///…` URLs and direct CDN file URLs (`…/file.gif?267940`) classify as media (`local` / host slug), which is also how bookmark imports resolve them. Per-site enable/cookie/rate come from `site_settings`.
+
 **First-class modules (defaults per D8):**
 - **booru family:** gelbooru.com public API, rule34.xxx danbooru-style API, e621 (UA required). Clean JSON — ship first (M1). e926 filter wiring available via tag blocklist.
 - **e-hentai:** API3 + APIDB cookie auth; hard 10 s rate limit; 114/124 gate pages → manual pass-through UI.
@@ -174,9 +176,9 @@ Ships behind an experimental flag; never auto-deletes. Target: post-M5.
 
 | # | Deliverable | Acceptance |
 |---|---|---|
-| **M0** | Tauri 2 + Svelte 5 + Cargo scaffold; portable vault root + `flow.cfg` pointer + volume-label resolution; SQLCipher vault + unlock screen; companion API skeleton; **importers (D13): game-folder scan w/ engine fingerprinting, image batch import, bookmark HTML import w/ optional online enrichment; library grid with thumbnail display + item editor** | App runs from USB, encrypted shell works, existing media lands in the flow |
-| **M1** | Booru ingestors (gelbooru, rule34, e621) + URL clip + thumbnail BLOB cache + tag grid + tag types w/ Complete chip | Usable daily |
-| **M2** | DLsite + f95zone ingest; cross-site pairing; versions/update feed; repack mirrors (off default); e-hentai w/ gate pass-through | Game half works |
+| **M0** ✅ | Tauri 2 + Svelte 5 + Cargo scaffold; portable vault root + `flow.cfg` pointer + volume-label resolution; SQLCipher vault + unlock screen; companion API skeleton; **importers (D13): game-folder scan w/ engine fingerprinting, image batch import, bookmark HTML import w/ optional online enrichment; library grid with thumbnail display + item editor** | App runs from USB, encrypted shell works, existing media lands in the flow |
+| **M1** ✅ | Booru ingestors (gelbooru, rule34, e621) + URL clip + thumbnail BLOB cache + tag grid + tag types w/ Complete chip. Also landed here: one shared ingest path (`ingest.rs`) covering `file:///…` and direct media URLs, so bookmarks to local media resolve as media (field report) | Usable daily |
+| **M2** ✅ | DLsite + f95zone ingest; cross-site pairing (suggest, never auto-merge) + merge UI; versions/update feed + "check updates"; repack mirrors (off default) + per-site enable/cookie/rate under *Sources*; e-hentai gate pass-through. **Not in this pass:** e-hentai cookie-gated *enrichment* is wired but untested against the live site, and `/api/clip` still returns 501 (needs `Arc<AppState>` in the companion — M4) | Game half works |
 | **M3** | Downloader: DLsite library sync + downloads, booru full-res, seed-host mirror picker, archive extract, local game folder linking + launch; container-encryption perf decision | Full pipeline |
 | **M4** | MV3 extension (Chrome+Firefox) w/ per-site clip extractors from site-packs; embedded WebView2 tabs + clip bar + metadata-only mode; token pairing | The "wrapper" feel |
 | **M5** | Nuke + panic hotkey + crypto-erase; scrubber; deniability (renaming, decoy chrome); proxy/Tor; mods/MTool/CE layer; settings polish; portable packaging | Hardened 1.0 |
@@ -201,13 +203,23 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
 1. Plain download folder + shred vs encrypted containers (perf vs deniability) → decide at M3.
 2. Extension pairing UX: paste token vs Native Messaging shim → decide at M4.
 3. UI framework details: Svelte 5 + which component kit (skeleton? plain CSS) → decide at M0.
-4. f95 account cookie storage & whether tracker sync is bidirectional by default → M2.
+4. ~~f95 account cookie storage~~ → decided in M2: cookies live in `site_settings` **inside the encrypted vault** (so a nuke takes them with it), pasted by the user under *Sources*. Still open: whether tracker sync is bidirectional by default.
 5. User asked for a stack tutorial (Tauri/Rust/Svelte) later — provide when M0 is scaffolded.
 
 ---
 
 ## 13. Session handoff notes
 
-- User will give explicit approval before any implementation. Plan mode until then.
+- User approves milestones before implementation; M1 + M2 approved and built.
 - When resuming: read this file top-to-bottom, check §10 for next milestone, then §12 for pending decisions.
-- Repo root: `C:\Source\TheGoonFlow` (currently empty except this file).
+- Repo root: `C:\Source\TheGoonFlow`. Build/test recipe in `docs/DEVELOPMENT.md`
+  (import `tools\dev-env.ps1` before cargo; SQLCipher/OpenSSL need MSVC + Strawberry Perl + NASM).
+- Shipped artifact for testing: `target\release\GoonFlow.exe` (single file, ~19 MB,
+  frontend embedded; only WebView2 runtime required). Debug builds of the UI are a
+  trap — they point at the Vite dev server and show "connection refused" without it.
+- Schema is at **v2** (`site_settings`, `updates`). `init_schema` is idempotent,
+  so unlocking an older vault upgrades it in place; no migration path exists yet
+  because nothing is published — add one before any release tag.
+- Deliberate gaps left for M3/M4: companion `/api/clip` (needs the shared state
+  refactor), downloads, selector site-packs + raw HTML snapshots for rot recovery,
+  and a fixture suite for the HTML parsers (currently string-literal fixtures).

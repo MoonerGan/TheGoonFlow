@@ -51,6 +51,44 @@ export type ItemSummary = {
   updatedAt: string;
 };
 
+export type SourceRow = {
+  id: number;
+  site: string;
+  url: string;
+  sourceId: string | null;
+  fetchedAt: string | null;
+  dead: boolean;
+};
+
+export type TagOnItem = {
+  id: number;
+  name: string;
+  typeKey: string;
+};
+
+export type ItemDetail = {
+  id: string;
+  kind: string;
+  title: string;
+  originalTitle: string | null;
+  circle: string | null;
+  status: string;
+  version: string | null;
+  notes: string;
+  createdAt: string;
+  updatedAt: string;
+  hasThumb: boolean;
+  sources: SourceRow[];
+  tags: TagOnItem[];
+};
+
+export type TagCount = {
+  id: number;
+  name: string;
+  typeKey: string;
+  count: number;
+};
+
 export type ThumbPayload = { id: string; mime: string; data: string };
 
 export type GameImportReport = {
@@ -75,6 +113,7 @@ export type BookmarkReport = {
   imported: number;
   duplicates: number;
   unrecognized: number;
+  disabled: number;
   thumbnailed: number;
   tagsAdded: number;
   fetchFailures: number;
@@ -83,12 +122,69 @@ export type BookmarkReport = {
   unrecognizedSample: string[];
 };
 
-export const listItems = (limit = 300, offset = 0, search?: string, kind?: string) =>
+export type ClipReport = {
+  itemId: string;
+  title: string;
+  site: string;
+  created: boolean;
+  storedImage: boolean;
+  thumb: boolean;
+  tags: number;
+  note: string | null;
+};
+
+export type SiteInfo = {
+  site: string;
+  kind: string;
+  mirror: boolean;
+  defaultRateMs: number;
+};
+
+export type SiteSetting = {
+  site: string;
+  enabled: boolean;
+  cookieSet: boolean;
+  rateMs: number;
+};
+
+export type UpdateRow = {
+  itemId: string;
+  title: string;
+  site: string;
+  oldVersion: string | null;
+  newVersion: string | null;
+  seenAt: string;
+};
+
+export type UpdateReport = {
+  checked: number;
+  updated: number;
+  failures: number;
+  updatedTitles: string[];
+};
+
+export type PairSuggestion = {
+  aId: string;
+  aTitle: string;
+  aSites: string;
+  bId: string;
+  bTitle: string;
+  bSites: string;
+};
+
+export const listItems = (
+  limit = 300,
+  offset = 0,
+  search?: string,
+  kind?: string,
+  tag?: string,
+) =>
   invoke<ItemSummary[]>("list_items", {
     limit,
     offset,
     search: search ?? null,
     kind: kind ?? null,
+    tag: tag ?? null,
   });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
@@ -112,3 +208,34 @@ export const importImageFiles = (paths: string[]) =>
   invoke<ImageImportReport>("import_image_files", { paths });
 export const importBookmarks = (path: string, fetchOnline: boolean) =>
   invoke<BookmarkReport>("import_bookmarks", { path, fetchOnline });
+
+// ---------- M1: clip + tags ----------
+export const clipUrl = (url: string) => invoke<ClipReport>("clip_url", { url });
+export const getItem = (id: string) => invoke<ItemDetail | null>("get_item", { id });
+export const topTags = (limit = 40) => invoke<TagCount[]>("top_tags", { limit });
+export const addItemTag = (id: string, name: string, kind?: "content" | "site" | "status") =>
+  invoke<void>("add_item_tag", { id, name, kind: kind ?? null });
+export const removeItemTag = (id: string, tagId: number) =>
+  invoke<void>("remove_item_tag", { id, tagId });
+
+// ---------- M2: sources, updates, pairing ----------
+export const knownSites = () => invoke<SiteInfo[]>("known_sites");
+export const getSiteSettings = () => invoke<SiteSetting[]>("get_site_settings");
+export const setSiteSetting = (
+  site: string,
+  enabled?: boolean,
+  cookie?: string,
+  rateMs?: number,
+) =>
+  invoke<void>("set_site_setting", {
+    site,
+    enabled: enabled ?? null,
+    cookie: cookie ?? null,
+    rateMs: rateMs ?? null,
+  });
+export const checkUpdates = () => invoke<UpdateReport>("check_updates");
+export const listUpdates = (limit = 100) => invoke<UpdateRow[]>("list_updates", { limit });
+export const pairingSuggestions = () =>
+  invoke<PairSuggestion[]>("pairing_suggestions");
+export const mergeItems = (keepId: string, dropId: string) =>
+  invoke<void>("merge_items", { keepId, dropId });

@@ -1,6 +1,7 @@
 mod bookmarks;
 mod companion;
 mod importer;
+mod ingest;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -230,6 +231,7 @@ fn list_items(
     offset: Option<i64>,
     search: Option<String>,
     kind: Option<String>,
+    tag: Option<String>,
 ) -> Result<Vec<goon_core::db::ItemSummary>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
@@ -239,6 +241,7 @@ fn list_items(
         offset.unwrap_or(0),
         search.as_deref(),
         kind.as_deref(),
+        tag.as_deref(),
     )
     .map_err(err)
 }
@@ -306,6 +309,167 @@ fn set_complete(
     let mut inner = state.inner.lock().unwrap();
     let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
     goon_core::db::set_user_status_tag(conn, &id, complete.then_some("complete")).map_err(err)
+}
+
+// ---------- clip / ingest (M1) ----------
+
+#[tauri::command]
+async fn clip_url(
+    state: tauri::State<'_, AppState>,
+    url: String,
+) -> Result<ingest::ClipReport, String> {
+    ingest::clip(&state, url).await
+}
+
+#[tauri::command]
+fn get_item(
+    state: tauri::State<'_, AppState>,
+    id: String,
+) -> Result<Option<goon_core::db::ItemDetail>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::get_item(&opened.conn, &id).map_err(err)
+}
+
+// ---------- tags (M1) ----------
+
+#[tauri::command]
+fn top_tags(
+    state: tauri::State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<goon_core::db::TagCount>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::top_tags(&opened.conn, limit.unwrap_or(40)).map_err(err)
+}
+
+#[tauri::command]
+fn add_item_tag(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    name: String,
+    kind: Option<String>,
+) -> Result<(), String> {
+    let type_id = match kind.as_deref() {
+        Some("site") => goon_core::db::TYPE_SITE_FLAG,
+        Some("status") => goon_core::db::TYPE_USER_STATUS,
+        _ => goon_core::db::TYPE_CONTENT,
+    };
+    let name = name.trim().to_lowercase().replace(' ', "-");
+    if name.is_empty() {
+        return Err("tag cannot be empty".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    goon_core::db::add_item_tag(conn, &id, &name, type_id).map_err(err)?;
+    Ok(())
+}
+
+#[tauri::command]
+fn remove_item_tag(
+    state: tauri::State<'_, AppState>,
+    id: String,
+    tag_id: i64,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    goon_core::db::remove_item_tag(conn, &id, tag_id).map_err(err)
+}
+
+// ---------- sources (M2: enable, cookie, rate) ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SiteInfo {
+    site: String,
+    kind: &'static str,
+    mirror: bool,
+    default_rate_ms: i64,
+}
+
+#[tauri::command]
+fn known_sites() -> Vec<SiteInfo> {
+    ingest::KNOWN_SITES
+        .iter()
+        .map(|(site, kind)| SiteInfo {
+            site: (*site).to_string(),
+            kind: *kind,
+            mirror: ingest::is_mirror_site(site),
+            default_rate_ms: ingest::default_rate_ms(site),
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_site_settings(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<goon_core::db::SiteSetting>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::get_site_settings(&opened.conn).map_err(err)
+}
+
+#[tauri::command]
+fn set_site_setting(
+    state: tauri::State<'_, AppState>,
+    site: String,
+    enabled: Option<bool>,
+    cookie: Option<String>,
+    rate_ms: Option<i64>,
+) -> Result<(), String> {
+    let site = site.trim().to_lowercase();
+    if site.is_empty() {
+        return Err("no site".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    goon_core::db::set_site_setting(
+        conn,
+        &site,
+        enabled,
+        cookie.as_deref().map(str::trim),
+        rate_ms.map(|r| r.clamp(0, 600_000)),
+    )
+    .map_err(err)
+}
+
+// ---------- update feed (M2) ----------
+
+#[tauri::command]
+async fn check_updates(state: tauri::State<'_, AppState>) -> Result<ingest::UpdateReport, String> {
+    ingest::check_updates(&state).await
+}
+
+#[tauri::command]
+fn list_updates(
+    state: tauri::State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<goon_core::db::UpdateRow>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::list_updates(&opened.conn, limit.unwrap_or(100)).map_err(err)
+}
+
+// ---------- pairing / merge (M2) ----------
+
+#[tauri::command]
+fn pairing_suggestions(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<goon_core::db::PairSuggestion>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::pairing_suggestions(&opened.conn).map_err(err)
+}
+
+#[tauri::command]
+fn merge_items(
+    state: tauri::State<'_, AppState>,
+    keep_id: String,
+    drop_id: String,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    goon_core::db::merge_items(conn, &keep_id, &drop_id).map_err(err)
 }
 
 // ---------- import (D13) ----------
@@ -404,6 +568,18 @@ pub fn run() {
             update_item,
             delete_item,
             set_complete,
+            clip_url,
+            get_item,
+            top_tags,
+            add_item_tag,
+            remove_item_tag,
+            known_sites,
+            get_site_settings,
+            set_site_setting,
+            check_updates,
+            list_updates,
+            pairing_suggestions,
+            merge_items,
             import_game_folder,
             import_game_exe,
             import_game_zip,
@@ -451,11 +627,11 @@ mod integration_tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let items = goon_core::db::list_items(conn, 300, 0, None, None).unwrap();
+        let items = goon_core::db::list_items(conn, 300, 0, None, None, None).unwrap();
         assert_eq!(items.len(), 1, "imported but list showed nothing");
         assert_eq!(items[0].title, "Game X");
         assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game")).unwrap();
+        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None).unwrap();
         assert_eq!(games_only.len(), 1);
         drop(inner);
 
