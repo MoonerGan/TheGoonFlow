@@ -188,6 +188,7 @@ export type UpdateRow = {
   oldVersion: string | null;
   newVersion: string | null;
   seenAt: string;
+  hasMods: boolean;
 };
 
 export type UpdateReport = {
@@ -393,10 +394,12 @@ export const extractGame = (itemId: string) =>
 export type ModRow = {
   id: number;
   name: string;
-  kind: "mtool" | "cheat" | "other";
+  kind: "mtool" | "cheat" | "other" | "dll";
   path: string;
   args: string;
   createdAt: string;
+  status: "linked" | "applied";
+  manifest: string | null;
 };
 export type ModLaunch = {
   ok: boolean;
@@ -418,6 +421,10 @@ export const deleteMod = (itemId: string, modId: number) =>
   invoke<void>("delete_mod", { itemId, modId });
 export const launchMod = (itemId: string, modId: number) =>
   invoke<ModLaunch>("launch_mod", { itemId, modId });
+export const applyMod = (itemId: string, modId: number) =>
+  invoke<ModRow>("apply_mod", { itemId, modId });
+export const revertMod = (itemId: string, modId: number) =>
+  invoke<string[]>("revert_mod", { itemId, modId });
 
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");

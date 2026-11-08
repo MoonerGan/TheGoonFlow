@@ -425,6 +425,12 @@
             <span class="hint">
               {u.site}{u.oldVersion ? ` v${u.oldVersion}` : ""} → {u.newVersion ? `v${u.newVersion}` : "?"} · {when(u.seenAt)}
             </span>
+            {#if u.hasMods}
+              <span
+                class="chip"
+                title="This game has Mods & tools registered. A new build lands on top of that folder — anything deployed inside it (DLL mods, MTool files) gets clobbered. Clean up before updating, re-apply after."
+              >⚠ mods on this game</span>
+            {/if}
           </div>
         {/each}
       {/if}

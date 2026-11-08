@@ -230,8 +230,19 @@ app reaches the content sites (and through your proxy if you set one).
   inject flow), **Cheat Engine** (started; you attach inside it), or any
   patcher with saved arguments (`{game}` expands to the game's exe). Each row
   gets a ▶ button. These are *launch recipes only*: the app never injects,
-  wraps or patches anything itself. (Applying/reverting DLL mods with backups
-  is the next step for this feature.)
+  wraps or patches anything itself.
+  - **DLL / patch mods** go one step further: add a mod kind of *DLL / patch
+    mod* pointing at its **zip, single .dll, or an unpacked folder**, then
+    **Apply** deploys the files into the game folder — every file it replaces
+    is first moved to `<name>.flowbak`, and the exact file list is recorded
+    on the item. **Revert** restores the originals and removes what the mod
+    added. A payload with entries that would escape the game folder, or that
+    collide with a folder, is refused whole; a failure mid-deploy rolls
+    everything back. You can't delete an applied mod before reverting it.
+  - **Update-clobber warning:** when an update is recorded for a game that
+    has Mods & tools registered, the updates panel flags it with
+    *⚠ mods on this game* — the new build will land on top of that folder.
+    Revert (or expect to re-apply) around updates.
 - **Editor (media):** title and tags only — no status/version/circle and no
   Complete marker, because none of that applies to a post or gallery.
 - Both editors: add or remove **tags** (booru tags arrive on their own when you

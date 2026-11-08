@@ -225,9 +225,13 @@ tools/
     game, and never runs anything that isn't a user-registered `.exe` path.
     Kind semantics are fixed: `mtool` = tool exe + game exe as its one
     argument, `cheat` = start the tool (attaching stays the tool's job),
-    `other` = stored args with `{game}` expansion. DLL apply/revert must
-    back up originals (`*.flowbak`) before touching game files — when that
-    increment lands, it grows the `mods` table, it does not fork it.
+    `other` = stored args with `{game}` expansion. DLL deploy (`apply`) is
+    the one file-writing path and it is guarded: entry names pre-screened
+    (no escapes, no directory overwrites), originals moved to `*.flowbak`
+    (never overwrite an existing flowbak), the manifest (paths + sha256)
+    recorded on the row, mid-run failures roll back, `revert` restores, and
+    an applied row can't be deleted until reverted. It lives in the same
+    `mods` table (v7 columns) — no forked state.
 
 ## 5. Testing
 

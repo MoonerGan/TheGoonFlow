@@ -19,7 +19,7 @@ use rand::rngs::OsRng;
 use rand::RngCore;
 use rusqlite::Connection;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -796,8 +796,8 @@ fn add_mod(
     path: String,
     args: Option<String>,
 ) -> Result<goon_core::db::ModRow, String> {
-    if !matches!(kind.as_str(), "mtool" | "cheat" | "other") {
-        return Err("recipe kind must be mtool, cheat or other".into());
+    if !matches!(kind.as_str(), "mtool" | "cheat" | "other" | "dll") {
+        return Err("recipe kind must be mtool, cheat, other or dll".into());
     }
     let path = path.trim().to_string();
     if path.is_empty() {
@@ -834,10 +834,99 @@ fn delete_mod(
 ) -> Result<(), String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    if let Some(m) = goon_core::db::get_mod(&opened.conn, &item_id, mod_id).map_err(err)? {
+        if m.status == "applied" {
+            return Err("this mod is deployed — press Revert first (removing it now would strand the .flowbak backups)".into());
+        }
+    }
     if !goon_core::db::delete_mod(&opened.conn, &item_id, mod_id).map_err(err)? {
         return Err("that recipe is not on this item".into());
     }
     Ok(())
+}
+
+/// The folder a mod deploys into: the game's local source folder (or an exe
+/// source's parent). None when the game isn't on disk.
+fn game_folder_for(sources: &[goon_core::db::SourceRow]) -> Option<PathBuf> {
+    let p = local_source_path(sources)?;
+    if p.is_dir() {
+        Some(p)
+    } else if p.is_file() {
+        p.parent().map(|x| x.to_path_buf())
+    } else {
+        None
+    }
+}
+
+/// Deploy a dll/patch mod into the game folder with *.flowbak backups.
+#[tauri::command]
+fn apply_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    mod_id: i64,
+) -> Result<goon_core::db::ModRow, String> {
+    let (m, game_dir) = {
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        let m = goon_core::db::get_mod(&opened.conn, &item_id, mod_id)
+            .map_err(err)?
+            .ok_or("recipe not found")?;
+        if m.kind != "dll" {
+            return Err("only dll/patch mods can be deployed".into());
+        }
+        if m.status == "applied" {
+            return Err("already deployed — revert first".into());
+        }
+        let d = goon_core::db::get_item(&opened.conn, &item_id)
+            .map_err(err)?
+            .ok_or("item not found")?;
+        let dir = game_folder_for(&d.sources)
+            .ok_or("the game is not on disk (link a folder or exe source first)")?;
+        (m, dir)
+    };
+    let manifest = mods::apply(Path::new(&m.path), &game_dir)?;
+    let json = serde_json::to_string(&manifest).map_err(err)?;
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault vanished mid-apply")?;
+    goon_core::db::set_mod_status(&opened.conn, &item_id, mod_id, "applied", Some(&json))
+        .map_err(err)?;
+    let _ = goon_core::db::touch_item(&opened.conn, &item_id, &crate::now_epoch());
+    goon_core::db::get_mod(&opened.conn, &item_id, mod_id)
+        .map_err(err)?
+        .ok_or_else(|| "mod vanished".to_string())
+}
+
+/// Restore originals from the manifest; returns per-file notes (missing
+/// backups after a game update, etc.).
+#[tauri::command]
+fn revert_mod(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    mod_id: i64,
+) -> Result<Vec<String>, String> {
+    let (m, game_dir) = {
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        let m = goon_core::db::get_mod(&opened.conn, &item_id, mod_id)
+            .map_err(err)?
+            .ok_or("recipe not found")?;
+        if m.status != "applied" {
+            return Err("nothing is deployed for this mod".into());
+        }
+        let d = goon_core::db::get_item(&opened.conn, &item_id)
+            .map_err(err)?
+            .ok_or("item not found")?;
+        let dir = game_folder_for(&d.sources)
+            .ok_or("the game folder is not reachable right now")?;
+        (m, dir)
+    };
+    let manifest: Vec<mods::ManifestEntry> =
+        serde_json::from_str(m.manifest.as_deref().unwrap_or("[]")).map_err(err)?;
+    let notes = mods::revert(&game_dir, &manifest);
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault vanished mid-revert")?;
+    goon_core::db::set_mod_status(&opened.conn, &item_id, mod_id, "linked", None).map_err(err)?;
+    Ok(notes)
 }
 
 /// What a recipe would run (and why not) — never spawns.
@@ -853,6 +942,9 @@ fn preview_mod(
         let m = goon_core::db::get_mod(&opened.conn, &item_id, mod_id)
             .map_err(err)?
             .ok_or("recipe not found")?;
+        if m.kind == "dll" {
+            return Err("dll mods are deployed with Apply/Revert, not launched".into());
+        }
         let Some(d) = goon_core::db::get_item(&opened.conn, &item_id).map_err(err)? else {
             return Err("item not found".into());
         };
@@ -1236,6 +1328,8 @@ pub fn run() {
             delete_mod,
             preview_mod,
             launch_mod,
+            apply_mod,
+            revert_mod,
             get_proxy,
             set_proxy,
             list_jobs,

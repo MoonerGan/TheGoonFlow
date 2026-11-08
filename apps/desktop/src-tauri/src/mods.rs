@@ -18,8 +18,10 @@
 
 use crate::launcher::LaunchPlan;
 use goon_core::db::ModRow;
-use serde::Serialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
@@ -156,10 +158,207 @@ pub fn launch(l: &ModLaunch) -> Result<ModLaunch, String> {
     Ok(out)
 }
 
+// ---------- dll / patch mod deploy (#25 increment 2) ----------
+//
+// Apply = deploy the mod's files into the game folder, but *never* destroy
+// anything: every file we replace is first moved to `<name>.flowbak` (only if
+// no flowbak exists yet — the original game file always wins), and the exact
+// file list is recorded in the manifest so Revert can undo it. Everything is
+// pre-screened (zip-slip names, directory collisions) so a bad payload never
+// lands half-applied; a mid-run failure rolls the whole attempt back.
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct ManifestEntry {
+    /// path inside the game folder, relative, with '/' separators
+    pub file: String,
+    /// true when an original was backed up to `<file>.flowbak`
+    pub had_backup: bool,
+    /// sha256 of the deployed mod bytes (integrity + clobber detection)
+    pub sha256: String,
+}
+
+pub const BAK_SUFFIX: &str = ".flowbak";
+
+/// Reject traversal/absolute entry names (same discipline as extract.rs).
+fn safe_rel(name: &str) -> Option<()> {
+    let rel = Path::new(name);
+    for c in rel.components() {
+        match c {
+            std::path::Component::Normal(_) | std::path::Component::CurDir => {}
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// List the mod payload's files (relative names, '/' separators) from a
+/// folder or zip, pre-screened for safety.
+fn payload_files(payload: &Path) -> Result<Vec<String>, String> {
+    if payload.is_dir() {
+        let mut out = Vec::new();
+        let mut stack = vec![payload.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for e in fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))? {
+                let e = e.map_err(|e| e.to_string())?;
+                let p = e.path();
+                if p.is_dir() {
+                    stack.push(p);
+                } else {
+                    let rel = p
+                        .strip_prefix(payload)
+                        .map_err(|_| "payload walk slipped".to_string())?
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    safe_rel(&rel).ok_or_else(|| format!("payload entry \"{rel}\" escapes the game folder"))?;
+                    out.push(rel);
+                }
+            }
+        }
+        Ok(out)
+    } else if payload
+        .extension()
+        .is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case("zip"))
+    {
+        let file = fs::File::open(payload).map_err(|e| format!("cannot open {}: {e}", payload.display()))?;
+        let mut za = zip::ZipArchive::new(file).map_err(|e| format!("unreadable zip: {e}"))?;
+        let mut out = Vec::new();
+        for i in 0..za.len() {
+            let entry = za.by_index(i).map_err(|e| e.to_string())?;
+            if entry.is_dir() {
+                continue;
+            }
+            let rel = entry.name().replace('\\', "/");
+            safe_rel(&rel).ok_or_else(|| format!("archive entry \"{rel}\" escapes the game folder"))?;
+            out.push(rel);
+        }
+        Ok(out)
+    } else {
+        // single loose file (a bare .dll) — deploys under its own name
+        let name = payload
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .ok_or("payload has no file name")?;
+        Ok(vec![name])
+    }
+}
+
+/// Read one payload entry's bytes (folder file, zip entry, or loose file).
+fn payload_bytes(payload: &Path, rel: &str) -> Result<Vec<u8>, String> {
+    if payload.is_dir() {
+        fs::read(payload.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR)))
+            .map_err(|e| format!("{rel}: {e}"))
+    } else if payload
+        .extension()
+        .is_some_and(|x| x.to_string_lossy().eq_ignore_ascii_case("zip"))
+    {
+        let file = fs::File::open(payload).map_err(|e| e.to_string())?;
+        let mut za = zip::ZipArchive::new(file).map_err(|e| e.to_string())?;
+        let mut entry = za.by_name(rel).map_err(|e| format!("{rel}: {e}"))?;
+        let mut buf = Vec::new();
+        io::Read::read_to_end(&mut entry, &mut buf).map_err(|e| format!("{rel}: {e}"))?;
+        Ok(buf)
+    } else {
+        fs::read(payload).map_err(|e| e.to_string())
+    }
+}
+
+/// Deploy the payload into `game_dir`. Returns the manifest on success; on
+/// any failure everything already done is rolled back.
+pub fn apply(payload: &Path, game_dir: &Path) -> Result<Vec<ManifestEntry>, String> {
+    if !game_dir.is_dir() {
+        return Err(format!("game folder {} is not reachable", game_dir.display()));
+    }
+    let files = payload_files(payload)?;
+    if files.is_empty() {
+        return Err("the mod payload contains no files".into());
+    }
+
+    // Pre-flight: no mod file may land on top of a directory.
+    for rel in &files {
+        let target = game_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+        if target.is_dir() {
+            return Err(format!(
+                "{} is a folder in the game — a mod file cannot replace it",
+                rel
+            ));
+        }
+    }
+
+    let mut done: Vec<ManifestEntry> = Vec::new();
+    let run = (|| -> Result<(), String> {
+        for rel in &files {
+            let bytes = payload_bytes(payload, rel)?;
+            let target = game_dir.join(rel.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let bak = {
+                let mut s = target.clone().into_os_string();
+                s.push(BAK_SUFFIX);
+                PathBuf::from(s)
+            };
+            let had_backup = target.is_file();
+            if had_backup && !bak.exists() {
+                fs::rename(&target, &bak)
+                    .map_err(|e| format!("could not back up {rel}: {e}"))?;
+            }
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("{rel}: {e}"))?;
+            }
+            fs::write(&target, &bytes).map_err(|e| format!("{rel}: {e}"))?;
+            done.push(ManifestEntry {
+                file: rel.clone(),
+                had_backup,
+                sha256: goon_core::media::sha256_hex(&bytes),
+            });
+        }
+        Ok(())
+    })();
+    if let Err(e) = run {
+        // Roll everything back so the game is exactly as it was before.
+        for entry in done.iter().rev() {
+            let target = game_dir.join(entry.file.replace('/', std::path::MAIN_SEPARATOR_STR));
+            let _ = fs::remove_file(&target);
+            if entry.had_backup {
+                let mut s = target.into_os_string();
+                s.push(BAK_SUFFIX);
+                let _ = fs::rename(PathBuf::from(s), game_dir.join(entry.file.replace('/', std::path::MAIN_SEPARATOR_STR)));
+            }
+        }
+        return Err(e);
+    }
+    Ok(done)
+}
+
+/// Undo a recorded deploy. Missing flowbaks (a game update already wiped
+/// them) are reported per file instead of aborting the whole revert.
+pub fn revert(game_dir: &Path, manifest: &[ManifestEntry]) -> Vec<String> {
+    let mut notes = Vec::new();
+    for entry in manifest.iter().rev() {
+        let sep = entry.file.replace('/', std::path::MAIN_SEPARATOR_STR);
+        let target = game_dir.join(&sep);
+        if entry.had_backup {
+            let mut s = target.clone().into_os_string();
+            s.push(BAK_SUFFIX);
+            let bak = PathBuf::from(s);
+            if bak.exists() {
+                let _ = fs::remove_file(&target);
+                if let Err(e) = fs::rename(&bak, &target) {
+                    notes.push(format!("could not restore {}: {e}", entry.file));
+                }
+            } else {
+                notes.push(format!(
+                    "{}: no .flowbak backup to restore (an update probably removed it)",
+                    entry.file
+                ));
+            }
+        } else if target.exists() {
+            let _ = fs::remove_file(&target);
+        }
+    }
+    notes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     fn plan(ok: bool, exe: Option<&str>) -> LaunchPlan {
         LaunchPlan {
@@ -180,6 +379,8 @@ mod tests {
             path: path.display().to_string(),
             args: args.into(),
             created_at: "0".into(),
+            status: "linked".into(),
+            manifest: None,
         }
     }
 
@@ -246,6 +447,107 @@ mod tests {
         let r = recipe(&row("cheat", &dir, ""), &plan(false, None));
         assert!(!r.ok);
         assert!(r.note.unwrap().contains("not an .exe"));
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// #25 increment 2: apply backs originals up as *.flowbak, revert
+    /// restores them and removes files the mod added.
+    #[test]
+    fn apply_revert_roundtrip_folder_payload() {
+        let b = std::env::temp_dir().join("goon-mods-apply");
+        let _ = std::fs::remove_dir_all(&b);
+        let game = b.join("game");
+        let payload = b.join("modfiles");
+        std::fs::create_dir_all(&game).unwrap();
+        std::fs::create_dir_all(payload.join("data")).unwrap();
+        std::fs::write(game.join("Game.exe"), b"ORIGINAL").unwrap();
+        std::fs::write(payload.join("Game.exe"), b"PATCHED").unwrap();
+        std::fs::write(payload.join("data").join("extra.dat"), b"NEW").unwrap();
+
+        let m = apply(&payload, &game).expect("apply");
+        assert_eq!(m.len(), 2);
+        assert_eq!(fs::read(game.join("Game.exe")).unwrap(), b"PATCHED");
+        assert_eq!(fs::read(game.join("Game.exe.flowbak")).unwrap(), b"ORIGINAL");
+        assert!(game.join("data").join("extra.dat").is_file());
+
+        let notes = revert(&game, &m);
+        assert!(notes.is_empty(), "notes: {notes:?}");
+        assert_eq!(fs::read(game.join("Game.exe")).unwrap(), b"ORIGINAL");
+        assert!(!game.join("Game.exe.flowbak").exists());
+        assert!(!game.join("data").join("extra.dat").exists());
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// A zip payload deploys the same way; the sha256 in the manifest matches
+    /// the deployed bytes (clobber detection will use it).
+    #[test]
+    fn apply_zip_payload_records_hashes() {
+        let b = std::env::temp_dir().join("goon-mods-zip");
+        let _ = std::fs::remove_dir_all(&b);
+        let game = b.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let z = b.join("mod.zip");
+        let f = fs::File::create(&z).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("sub/mod.dll", opts).unwrap();
+        io::Write::write_all(&mut zw, b"DLLBYTES").unwrap();
+        zw.finish().unwrap();
+
+        let m = apply(&z, &game).expect("apply zip");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].file, "sub/mod.dll");
+        assert!(!m[0].had_backup, "new file has no flowbak");
+        assert_eq!(
+            m[0].sha256,
+            goon_core::media::sha256_hex(b"DLLBYTES")
+        );
+        assert!(game.join("sub").join("mod.dll").is_file());
+        revert(&game, &m);
+        assert!(!game.join("sub").join("mod.dll").exists());
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// A zip-slip entry aborts the whole apply before anything is written.
+    #[test]
+    fn apply_refuses_escaping_entries() {
+        let b = std::env::temp_dir().join("goon-mods-slip");
+        let _ = std::fs::remove_dir_all(&b);
+        let game = b.join("game");
+        std::fs::create_dir_all(&game).unwrap();
+        let z = b.join("evil.zip");
+        let f = fs::File::create(&z).unwrap();
+        let mut zw = zip::ZipWriter::new(f);
+        let opts = zip::write::FileOptions::<()>::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        zw.start_file("ok.dll", opts).unwrap();
+        io::Write::write_all(&mut zw, b"x").unwrap();
+        zw.start_file("../escaped.dll", opts).unwrap();
+        io::Write::write_all(&mut zw, b"x").unwrap();
+        zw.finish().unwrap();
+
+        let e = apply(&z, &game).unwrap_err();
+        assert!(e.contains("escapes"), "message was: {e}");
+        assert!(!game.join("ok.dll").exists(), "nothing may be written");
+        assert!(!b.join("escaped.dll").exists());
+        std::fs::remove_dir_all(&b).unwrap();
+    }
+
+    /// A mod file that would overwrite an existing *directory* aborts clean.
+    #[test]
+    fn apply_refuses_directory_collisions() {
+        let b = std::env::temp_dir().join("goon-mods-dircol");
+        let _ = std::fs::remove_dir_all(&b);
+        let game = b.join("game");
+        std::fs::create_dir_all(game.join("Data")).unwrap();
+        let payload = b.join("payload");
+        std::fs::create_dir_all(&payload).unwrap();
+        std::fs::write(payload.join("Data"), b"i am a file pretending to be a folder").unwrap();
+
+        let e = apply(&payload, &game).unwrap_err();
+        assert!(e.contains("is a folder"), "message was: {e}");
+        assert!(game.join("Data").is_dir());
         std::fs::remove_dir_all(&b).unwrap();
     }
 }

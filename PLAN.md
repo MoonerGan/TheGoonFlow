@@ -317,6 +317,17 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   gained a *Mods & tools* block (add via exe picker, ▶ launch, × remove).
   Still open in #25: DLL apply/revert with `*.flowbak` backups + manifests,
   and the update-clobber warning wired into the version watcher.
+- **#25 increment 2 (DLL deploy + clobber guard)** — schema v7 adds
+  `status`/`manifest` to `mods`. A `dll` kind recipe can be **Applied**:
+  payload = zip / loose .dll / folder; entries pre-screened (zip-slip +
+  would-overwrite-a-directory abort whole), replaced originals move to
+  `<name>.flowbak` (oldest original wins), deployed files recorded as a
+  JSON manifest (path + sha256) on the row; mid-run failure rolls back.
+  **Revert** restores from the manifest and removes mod-added files; missing
+  flowbaks (an update already ate them) become per-file notes. Deleting an
+  applied mod is refused until reverted. `list_updates` now carries
+  `has_mods`, and the updates panel shows *⚠ mods on this game* — the
+  update-clobber warning. 4 more mods tests + status round-trip (78 green).
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

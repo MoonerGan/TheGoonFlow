@@ -10,6 +10,7 @@
     addItemTag,
     addMod,
     addSource,
+    applyMod,
     deleteItem,
     deleteMod,
     getItem,
@@ -23,6 +24,7 @@
     setComplete,
     setLaunchPath,
     removeStoredVideo,
+    revertMod,
     extractGame,
     extractPlan,
     storeVideo,
@@ -85,7 +87,7 @@
 
   // mods / tool recipes (#25, games only)
   let mods = $state<ModRow[]>([]);
-  let modKind = $state<"mtool" | "cheat" | "other">("mtool");
+  let modKind = $state<"mtool" | "cheat" | "other" | "dll">("mtool");
   let modName = $state("");
   let modPath = $state("");
   let modArgs = $state("");
@@ -290,13 +292,19 @@
     mtool: "starts the tool with this game's exe passed to it (MTool's inject flow)",
     cheat: "starts the tool; attach to the game inside it (Cheat Engine)",
     other: "starts the tool with the arguments below ({game} = the game's exe)",
+    dll: "deployed into the game folder on Apply — originals kept as .flowbak, one-click Revert",
   };
 
-  async function pickModExe() {
-    const p = await open({
-      multiple: false,
-      filters: [{ name: "Executable", extensions: ["exe"] }],
-    });
+  async function pickModPayload(asFolder: boolean) {
+    const p = asFolder
+      ? await open({ multiple: false, directory: true })
+      : await open({
+          multiple: false,
+          filters:
+            modKind === "dll"
+              ? [{ name: "Mod payload", extensions: ["zip", "dll"] }]
+              : [{ name: "Executable", extensions: ["exe"] }],
+        });
     if (typeof p === "string") modPath = p;
   }
 
@@ -334,6 +342,31 @@
       modMsg = String(e);
     } finally {
       launchingMod = null;
+    }
+  }
+
+  async function doApplyMod(m: ModRow) {
+    modMsg = null;
+    try {
+      const r = await applyMod(item.id, m.id);
+      mods = await listMods(item.id);
+      modMsg = `deployed ${m.name} — originals kept as .flowbak`;
+      void r;
+      onChanged();
+    } catch (e) {
+      modMsg = String(e);
+    }
+  }
+
+  async function doRevertMod(m: ModRow) {
+    modMsg = null;
+    try {
+      const notes = await revertMod(item.id, m.id);
+      mods = await listMods(item.id);
+      modMsg = notes.length ? `reverted with notes: ${notes.join("; ")}` : `reverted ${m.name}`;
+      onChanged();
+    } catch (e) {
+      modMsg = String(e);
     }
   }
 
@@ -516,15 +549,29 @@
       {#if mods.length}
         {#each mods as m (m.id)}
           <div class="row mod-row">
-            <button
-              class="primary"
-              disabled={launchingMod !== null}
-              onclick={() => doLaunchMod(m)}
-              title={KIND_HINT[m.kind]}
-            >
-              {launchingMod === m.id ? "Starting…" : `▶ ${m.name}`}
-            </button>
-            <span class="hint mod-kind">{m.kind}</span>
+            {#if m.kind === "dll"}
+              {#if m.status === "applied"}
+                <button class="primary" disabled={launchingMod !== null} onclick={() => doRevertMod(m)}>
+                  ↺ Revert {m.name}
+                </button>
+                <span class="chip">deployed</span>
+              {:else}
+                <button class="primary" disabled={launchingMod !== null} onclick={() => doApplyMod(m)}>
+                  Apply {m.name}
+                </button>
+                <span class="hint mod-kind">dll · not deployed</span>
+              {/if}
+            {:else}
+              <button
+                class="primary"
+                disabled={launchingMod !== null}
+                onclick={() => doLaunchMod(m)}
+                title={KIND_HINT[m.kind]}
+              >
+                {launchingMod === m.id ? "Starting…" : `▶ ${m.name}`}
+              </button>
+              <span class="hint mod-kind">{m.kind}</span>
+            {/if}
             <span class="hint path mod-path" title={m.path + (m.args ? ` ${m.args}` : "")}>
               {m.path}{#if m.args} <em>{m.args}</em>{/if}
             </span>
@@ -540,12 +587,23 @@
           <option value="mtool">MTool recipe</option>
           <option value="cheat">Cheat Engine recipe</option>
           <option value="other">Other tool</option>
+          <option value="dll">DLL / patch mod (apply/revert)</option>
         </select>
         <input type="text" placeholder="name (optional)" bind:value={modName} />
       </div>
       <div class="row">
-        <input type="text" class="proxy-input" placeholder={modPath || "tool .exe path"} bind:value={modPath} />
-        <button onclick={pickModExe}>Browse…</button>
+        <input
+          type="text"
+          class="proxy-input"
+          placeholder={modKind === "dll" ? "mod zip / .dll / folder path" : "tool .exe path"}
+          bind:value={modPath}
+        />
+        <button onclick={() => pickModPayload(false)}>
+          {modKind === "dll" ? "Zip/dll…" : "Exe…"}
+        </button>
+        {#if modKind === "dll"}
+          <button onclick={() => pickModPayload(true)}>Folder…</button>
+        {/if}
       </div>
       <div class="row">
         <input

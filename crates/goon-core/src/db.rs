@@ -194,6 +194,27 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             COMMIT;",
         )?;
     }
+    if v < 7 {
+        // #25 increment 2: DLL mod deploy state. A recipe is either just
+        // linked (a launch recipe) or applied (files deployed into the game
+        // folder with *.flowbak backups). Guarded ALTER for existing vaults.
+        let has_col = conn
+            .prepare("SELECT 1 FROM pragma_table_info('mods') WHERE name = 'status'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap_or(false);
+        conn.execute_batch(&format!(
+            "BEGIN;
+            {alter}
+            UPDATE meta SET value = '7' WHERE key = 'schema_version';
+            COMMIT;",
+            alter = if has_col {
+                ""
+            } else {
+                "ALTER TABLE mods ADD COLUMN status TEXT NOT NULL DEFAULT 'linked';
+                 ALTER TABLE mods ADD COLUMN manifest TEXT;"
+            }
+        ))?;
+    }
     Ok(())
 }
 
@@ -477,49 +498,49 @@ pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqli
 pub struct ModRow {
     pub id: i64,
     pub name: String,
-    /// launch recipe: "mtool" | "cheat" | "other"
+    /// launch recipe: "mtool" | "cheat" | "other"; "dll" = deployable mod
     pub kind: String,
-    /// the tool's .exe on disk (plain path, not a URL)
+    /// the tool's .exe (or mod zip/folder) on disk — plain path, not a URL
     pub path: String,
     /// extra arguments recorded with the recipe (empty = none)
     pub args: String,
     pub created_at: String,
+    /// "linked" (recipe only) or "applied" (files deployed, backups exist)
+    pub status: String,
+    /// JSON manifest of deployed files when status = applied
+    #[serde(rename = "manifest")]
+    pub manifest: Option<String>,
+}
+
+const MOD_COLS: &str = "id, name, kind, path, args, created_at, status, manifest";
+
+fn row_to_mod(r: &rusqlite::Row) -> rusqlite::Result<ModRow> {
+    Ok(ModRow {
+        id: r.get(0)?,
+        name: r.get(1)?,
+        kind: r.get(2)?,
+        path: r.get(3)?,
+        args: r.get(4)?,
+        created_at: r.get(5)?,
+        status: r.get(6)?,
+        manifest: r.get(7)?,
+    })
 }
 
 pub fn list_mods(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<ModRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, kind, path, args, created_at FROM mods
-         WHERE item_id = ?1 ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map(params![item_id], |r| {
-        Ok(ModRow {
-            id: r.get(0)?,
-            name: r.get(1)?,
-            kind: r.get(2)?,
-            path: r.get(3)?,
-            args: r.get(4)?,
-            created_at: r.get(5)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {MOD_COLS} FROM mods WHERE item_id = ?1 ORDER BY created_at, id",
+    ))?;
+    let rows = stmt.query_map(params![item_id], row_to_mod)?;
     rows.collect()
 }
 
 pub fn get_mod(conn: &Connection, item_id: &str, mod_id: i64) -> rusqlite::Result<Option<ModRow>> {
     Ok(conn
         .query_row(
-            "SELECT id, name, kind, path, args, created_at FROM mods
-             WHERE id = ?1 AND item_id = ?2",
+            &format!("SELECT {MOD_COLS} FROM mods WHERE id = ?1 AND item_id = ?2",),
             params![mod_id, item_id],
-            |r| {
-                Ok(ModRow {
-                    id: r.get(0)?,
-                    name: r.get(1)?,
-                    kind: r.get(2)?,
-                    path: r.get(3)?,
-                    args: r.get(4)?,
-                    created_at: r.get(5)?,
-                })
-            },
+            row_to_mod,
         )
         .ok())
 }
@@ -545,6 +566,22 @@ pub fn delete_mod(conn: &Connection, item_id: &str, mod_id: i64) -> rusqlite::Re
     let n = conn.execute(
         "DELETE FROM mods WHERE id = ?1 AND item_id = ?2",
         params![mod_id, item_id],
+    )?;
+    Ok(n > 0)
+}
+
+/// Record a deploy/revert transition (#25 increment 2). `manifest` is the
+/// JSON file list when applied, None when back to linked.
+pub fn set_mod_status(
+    conn: &Connection,
+    item_id: &str,
+    mod_id: i64,
+    status: &str,
+    manifest: Option<&str>,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE mods SET status = ?3, manifest = ?4 WHERE id = ?1 AND item_id = ?2",
+        params![mod_id, item_id, status, manifest],
     )?;
     Ok(n > 0)
 }
@@ -969,6 +1006,9 @@ pub struct UpdateRow {
     pub old_version: Option<String>,
     pub new_version: Option<String>,
     pub seen_at: String,
+    /// #25 clobber guard: this game has mod/tool recipes registered, and an
+    /// update deployed over its folder will wipe them.
+    pub has_mods: bool,
 }
 
 pub fn record_update(
@@ -989,7 +1029,8 @@ pub fn record_update(
 
 pub fn list_updates(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<UpdateRow>> {
     let mut stmt = conn.prepare(
-        "SELECT u.item_id, i.title, u.site, u.old_version, u.new_version, u.seen_at
+        "SELECT u.item_id, i.title, u.site, u.old_version, u.new_version, u.seen_at,
+                EXISTS (SELECT 1 FROM mods m WHERE m.item_id = u.item_id)
          FROM updates u JOIN items i ON i.id = u.item_id
          ORDER BY u.id DESC LIMIT ?1",
     )?;
@@ -1001,6 +1042,7 @@ pub fn list_updates(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<Updat
             old_version: r.get(3)?,
             new_version: r.get(4)?,
             seen_at: r.get(5)?,
+            has_mods: r.get(6)?,
         })
     })?;
     rows.collect()
@@ -1429,6 +1471,14 @@ mod tests {
         assert!(delete_mod(&conn, "g1", m1).unwrap());
         assert_eq!(list_mods(&conn, "g1").unwrap().len(), 1);
         assert_eq!(list_mods(&conn, "g1").unwrap()[0].id, m2);
+
+        // #25 increment 2: deploy state round-trips
+        assert!(set_mod_status(&conn, "g1", m2, "applied", Some(r#"[{"file":"a.dll"}]"#)).unwrap());
+        let m = get_mod(&conn, "g1", m2).unwrap().unwrap();
+        assert_eq!(m.status, "applied");
+        assert!(m.manifest.unwrap().contains("a.dll"));
+        assert!(set_mod_status(&conn, "g1", m2, "linked", None).unwrap());
+        assert_eq!(get_mod(&conn, "g1", m2).unwrap().unwrap().status, "linked");
 
         delete_item(&conn, "g1").unwrap();
         assert!(list_mods(&conn, "g1").unwrap().is_empty());
