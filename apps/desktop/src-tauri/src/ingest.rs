@@ -1202,6 +1202,372 @@ pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> 
     Ok(report)
 }
 
+// ---------- #14: title search (online match suggestions) ----------
+//
+// Local-only games get *proposed* online matches, never merged automatically:
+// we search DLsite's and f95zone's own site search, score the candidates
+// against the game's title, and store the top hits as suggestions the user
+// accepts (attach source + re-fetch) or dismisses in the Games view.
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchHit {
+    pub url: String,
+    pub title: String,
+}
+
+/// Normalize a title for fuzzy compare: bracketed noise (engine/language/
+/// version tags) dropped, everything non-alphanumeric folded to spaces,
+/// lowercased. "Summer Witch [renpy] [English] [v1.2]" → "summer witch".
+pub fn normalize_title(s: &str) -> String {
+    let mut out = String::new();
+    let mut depth = 0usize;
+    for c in s.chars() {
+        match c {
+            '[' | '(' => depth += 1,
+            ']' | ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => {
+                if c.is_alphanumeric() {
+                    for l in c.to_lowercase() {
+                        out.push(l);
+                    }
+                } else {
+                    out.push(' ');
+                }
+            }
+            _ => {}
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn char_bigrams(s: &str) -> std::collections::BTreeMap<(char, char), usize> {
+    let cs: Vec<char> = s.chars().collect();
+    let mut m = std::collections::BTreeMap::new();
+    for w in cs.windows(2) {
+        *m.entry((w[0], w[1])).or_default() += 1;
+    }
+    m
+}
+
+/// Character-bigram Dice coefficient over normalized titles, 0.0..=1.0.
+/// Short titles are forgiving via a length-ratio guard so "Tomato" vs
+/// "Tomato Story" doesn't read as a strong hit.
+pub fn title_similarity(a: &str, b: &str) -> f64 {
+    let a = normalize_title(a);
+    let b = normalize_title(b);
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    if a == b {
+        return 1.0;
+    }
+    let ba = char_bigrams(&a);
+    let bb = char_bigrams(&b);
+    let na: usize = ba.values().sum();
+    let nb: usize = bb.values().sum();
+    if na == 0 || nb == 0 {
+        return 0.0;
+    }
+    let inter: usize = ba.iter().map(|(k, v)| bb.get(k).copied().unwrap_or(0).min(*v)).sum();
+    let dice = 2.0 * inter as f64 / (na + nb) as f64;
+    // penalize very different lengths ("cat" vs "cat who saved the world")
+    let (short, long) = (a.chars().count().min(b.chars().count()), a.chars().count().max(b.chars().count()));
+    let ratio = short as f64 / long as f64;
+    dice * (0.5 + 0.5 * ratio)
+}
+
+fn unescape_html(s: &str) -> String {
+    s.replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#039;", "'")
+        .replace("&#x27;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&nbsp;", " ")
+}
+
+async fn post_form_text(
+    client: &reqwest::Client,
+    url: &str,
+    referer: &str,
+    cookie: Option<&str>,
+    form: &[(&str, &str)],
+) -> Result<String, String> {
+    let mut req = client
+        .post(url)
+        .header(reqwest::header::REFERER, referer)
+        .header(reqwest::header::ACCEPT, "text/html")
+        .form(form);
+    if let Some(c) = cookie {
+        req = req.header(reqwest::header::COOKIE, c);
+    }
+    let resp = req.send().await.map_err(|e| format!("search failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("http {}", resp.status()));
+    }
+    resp.text().await.map_err(|e| format!("read failed: {e}"))
+}
+
+/// DLsite has no public JSON API — post the site's own /fs search form and
+/// pull (link, title) from the result anchors. Verified live markup:
+/// `href="https://www.dlsite.com/maniax/work/=/product_id/RJ01731048.html" title="…"`.
+pub async fn dlsite_search(client: &reqwest::Client, query: &str) -> Result<Vec<SearchHit>, String> {
+    let html = post_form_text(
+        client,
+        "https://www.dlsite.com/maniax/fs",
+        "https://www.dlsite.com",
+        None,
+        &[
+            ("_qf__fulltext_search", ""),
+            ("_layout", "fs"),
+            ("_site", "maniax"),
+            ("_form_id", "FulltextSearchProductForm"),
+            ("_view", "input"),
+            ("from", "fs.header"),
+            ("ana_flg", "all"),
+            ("keywords", query),
+        ],
+    )
+    .await?;
+    Ok(parse_dl_search(&html))
+}
+
+pub fn parse_dl_search(html: &str) -> Vec<SearchHit> {
+    let mut out: Vec<SearchHit> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut idx = 0usize;
+    while let Some(rel) = html[idx..].find("product_id/") {
+        let start = idx + rel + "product_id/".len();
+        idx = start;
+        let after = &html[start..];
+        let id: String = after.chars().take_while(|c| c.is_ascii_alphanumeric()).collect();
+        let alpha = id.chars().filter(|c| c.is_ascii_alphabetic()).count();
+        let digits = id.chars().filter(|c| c.is_ascii_digit()).count();
+        // real product ids are two uppercase letters + 6..8 digits; this also
+        // rejects maker ids (RG…) because those appear under maker_id/, not here
+        if alpha != 2 || !(6..=8).contains(&digits) {
+            continue;
+        }
+        // title lives inside the same tag: title="…" (anchor) or alt="…" (thumb tile)
+        let tag = &after[..after.find('>').unwrap_or(after.len().min(2000))];
+        let title = ["title=\"", "alt=\""]
+            .iter()
+            .find_map(|m| tag.find(m).map(|i| &tag[i + m.len()..]))
+            .map(|t| t.split('"').next().unwrap_or("").trim().to_string())
+            .unwrap_or_default();
+        let url = format!("https://www.dlsite.com/maniax/work/=/product_id/{id}.html");
+        if title.is_empty() || !seen.insert(id.clone()) {
+            continue;
+        }
+        out.push(SearchHit { url, title: unescape_html(&title) });
+    }
+    out
+}
+
+/// f95zone search lives behind XenForo login. With the user's saved f95
+/// cookie (Sources panel) it works; without one the reply is the login page.
+pub async fn f95_search(
+    client: &reqwest::Client,
+    query: &str,
+    cookie: Option<&str>,
+) -> Result<Vec<SearchHit>, String> {
+    let mut req = client
+        .get("https://f95zone.to/search/search")
+        .header(reqwest::header::REFERER, "https://f95zone.to")
+        .query(&[("q", query), ("c", "message")]);
+    if let Some(c) = cookie {
+        req = req.header(reqwest::header::COOKIE, c);
+    }
+    let resp = req.send().await.map_err(|e| format!("search failed: {e}"))?;
+    if matches!(resp.status(), reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED) {
+        return Err("f95 search wants a login — save your f95 cookie under Sources, then search again".into());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("http {}", resp.status()));
+    }
+    let html = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
+    let hits = parse_f95_search(&html);
+    if hits.is_empty() && cookie.is_none() {
+        return Err("f95 found nothing without login — set an f95 cookie under Sources to search threads".into());
+    }
+    Ok(hits)
+}
+
+pub fn parse_f95_search(html: &str) -> Vec<SearchHit> {
+    let mut out: Vec<SearchHit> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    const P: &str = "href=\"https://f95zone.to/threads/";
+    let mut idx = 0usize;
+    while let Some(rel) = html[idx..].find(P) {
+        let start = idx + rel;
+        let after = &html[start + P.len()..];
+        let raw_href: String = after.chars().take_while(|c| *c != '"').collect();
+        idx = start + P.len();
+        // thread form: slug.12345/, also seen as slug.12345/page-2#post-… or ?page=2
+        let path = raw_href.split(['#', '?']).next().unwrap_or("").to_string();
+        let Some(dot) = path.rfind('.') else { continue };
+        let after_dot = &path[dot + 1..];
+        let digits: String = after_dot.chars().take_while(|c| c.is_ascii_digit()).collect();
+        let rest = &after_dot[digits.len()..];
+        if digits.is_empty() || !(rest.is_empty() || rest.starts_with('/')) {
+            continue;
+        }
+        // link text: from the first '>' after the href up to the next '<'
+        let gt = after.find('>').unwrap_or(usize::MAX);
+        if gt == usize::MAX || gt > 4000 {
+            continue;
+        }
+        let text: String = after[gt + 1..].chars().take_while(|c| *c != '<').collect();
+        let text = unescape_html(text.trim());
+        if text.is_empty() || text.len() > 300 || !seen.insert(digits.clone()) {
+            continue;
+        }
+        let url = format!("https://f95zone.to/threads/{}/", &path[..dot + 1 + digits.len()]);
+        out.push(SearchHit { url, title: text });
+    }
+    out
+}
+
+// ---------- #14: title search (online match suggestions) ----------
+//
+// Local-only games get *proposed* online matches, never merged automatically:
+// we search DLsite's and f95zone's own site search, score the candidates
+// against the game's title, and store the top hits as suggestions the user
+// accepts (attach source + re-fetch) or dismisses in the Games view.
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchReport {
+    pub scanned: usize,
+    pub with_suggestions: usize,
+    pub suggestions: usize,
+    pub failures: Vec<String>,
+    pub stopped: bool,
+}
+
+/// Keep the top few hits above the confidence floor and store them.
+/// Returns how many rows were written.
+fn store_hits(
+    state: &crate::AppState,
+    item_id: &str,
+    site: &str,
+    title: &str,
+    hits: &[SearchHit],
+) -> usize {
+    let mut scored: Vec<(f64, &SearchHit)> =
+        hits.iter().map(|h| (title_similarity(title, &h.title), h)).collect();
+    scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let keep: Vec<&(f64, &SearchHit)> =
+        scored.iter().take(3).take_while(|(s, _)| *s >= 0.6).collect();
+    if keep.is_empty() {
+        return 0;
+    }
+    let Ok(inner) = state.inner.try_lock() else { return 0 };
+    let Some(opened) = inner.opened.as_ref() else { return 0 };
+    let now = crate::now_epoch();
+    let n = keep.len();
+    for (score, h) in keep {
+        let _ = db::put_suggestion(
+            &opened.conn,
+            item_id,
+            site,
+            &h.url,
+            &h.title,
+            (score * 1000.0).round() / 1000.0,
+            &now,
+        );
+    }
+    n
+}
+
+/// Scan every game that is tracked only by a local source and store up to
+/// three confident DLsite/f95 matches per game as suggestions.
+pub async fn find_matches(
+    state: &crate::AppState,
+    job: &JobHandle,
+) -> Result<MatchReport, String> {
+    let targets = {
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        db::games_needing_match(&opened.conn).map_err(crate::err)?
+    };
+    let mut report = MatchReport::default();
+    if targets.is_empty() {
+        return Ok(report);
+    }
+    let client = reqwest::Client::builder()
+        .user_agent(UA)
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(crate::err)?;
+    let total = targets.len();
+    for (i, (id, title)) in targets.into_iter().enumerate() {
+        if job.cancelled() {
+            report.stopped = true;
+            break;
+        }
+        job.set_progress(i, total, &title);
+        let query = normalize_title(&title);
+        if query.replace(' ', "").chars().count() < 3 {
+            continue; // nothing meaningful to search for
+        }
+
+        let (dl_on, dl_rate, f95_on, f95_rate, f95_cookie) = {
+            let inner = state.inner.lock().unwrap();
+            match inner.opened.as_ref() {
+                Some(o) => (
+                    db::site_enabled(&o.conn, "dlsite", true),
+                    db::site_rate_ms(&o.conn, "dlsite", default_rate_ms("dlsite")),
+                    db::site_enabled(&o.conn, "f95", true),
+                    db::site_rate_ms(&o.conn, "f95", default_rate_ms("f95")),
+                    db::site_cookie(&o.conn, "f95"),
+                ),
+                None => {
+                    report.stopped = true; // vault gone mid-run
+                    break;
+                }
+            }
+        };
+
+        // a rescan replaces this item's old proposals
+        if let Ok(inner) = state.inner.try_lock() {
+            if let Some(o) = inner.opened.as_ref() {
+                let _ = db::clear_suggestions(&o.conn, &id);
+            }
+        }
+
+        let mut wrote = 0usize;
+        if dl_on {
+            if !state.queue.reserve("dlsite", dl_rate, || job.cancelled()).await {
+                report.stopped = true;
+                break;
+            }
+            match dlsite_search(&client, &query).await {
+                Ok(hits) => wrote += store_hits(state, &id, "dlsite", &title, &hits),
+                Err(e) => report.failures.push(format!("dlsite: {e}")),
+            }
+        }
+        if f95_on {
+            if !state.queue.reserve("f95", f95_rate, || job.cancelled()).await {
+                report.stopped = true;
+                break;
+            }
+            match f95_search(&client, &query, f95_cookie.as_deref()).await {
+                Ok(hits) => wrote += store_hits(state, &id, "f95", &title, &hits),
+                Err(e) => report.failures.push(format!("f95: {e}")),
+            }
+        }
+        report.scanned += 1;
+        if wrote > 0 {
+            report.with_suggestions += 1;
+            report.suggestions += wrote;
+        }
+    }
+    report.failures.sort();
+    report.failures.dedup();
+    Ok(report)
+}
+
 // ---------- tests: parsing only (no network) ----------
 
 #[cfg(test)]
@@ -1294,6 +1660,60 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    // ---- #14: title search ----
+
+    #[test]
+    fn normalize_title_drops_bracket_noise() {
+        assert_eq!(
+            normalize_title("Summer Witch [renpy] [English] [v1.2]"),
+            "summer witch"
+        );
+        assert_eq!(normalize_title("Karryn's Prison (PC)"), "karryn s prison");
+    }
+
+    #[test]
+    fn title_similarity_scores_titles() {
+        // exact after normalization
+        assert!((title_similarity("Summer Witch [v1.0]", "SUMMER  WITCH") - 1.0).abs() < 1e-9);
+        // a real f95 title vs the same game on DLsite
+        assert!(title_similarity("Karryn's Prison", "Karryn's Prison [v0.9.2] [renpy]") > 0.9);
+        // short vs long with an unrelated tail must NOT read as strong
+        assert!(title_similarity("cat", "cat who saved the whole world") < 0.6);
+        // disjoint (common bigrams like "ta" keep unrelated words ~0.2)
+        assert!(title_similarity("alpha beta", "gamma delta") < 0.5);
+    }
+
+    #[test]
+    fn dl_search_anchors_parse_verified_markup() {
+        let html = r#"
+        <thumb-with-ng-filter-block link="https://www.dlsite.com/maniax/work/=/product_id/RJ01731048.html" :thumb-candidates="['x.webp']" alt="Summer Witch Remake [同人誌]" ></thumb-with-ng-filter-block>
+        <a href="https://www.dlsite.com/maniax/work/=/product_id/RJ01731048.html" title="Summer Witch Remake [同人誌]">t</a>
+        <a href="https://www.dlsite.com/maniax/work/=/product_id/RJ01752389.html" title="Summer &amp; Rain">t</a>
+        <a href="https://www.dlsite.com/maniax/circle/profile/=/maker_id/RG22701.html">maker</a>
+        <a href="https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html" title="Old Six Digit">t</a>
+        "#;
+        let hits = parse_dl_search(html);
+        assert_eq!(hits.len(), 3); // thumb+anchor for one product dedupe; maker id ignored
+        assert!(hits.iter().any(|h| h.url.ends_with("RJ01731048.html") && h.title == "Summer Witch Remake [同人誌]"));
+        assert!(hits.iter().any(|h| h.title == "Summer & Rain")); // entity unescaped
+        assert!(hits.iter().any(|h| h.url.ends_with("RJ123456.html")));
+    }
+
+    #[test]
+    fn f95_search_parses_thread_links_and_dedupes() {
+        let html = r#"
+        <div class="block-row"><a href="https://f95zone.to/threads/summer-witch.10599/"><img src="x.jpg"></a>
+        <h3 class="structItem-title"><a href="https://f95zone.to/threads/summer-witch.10599/">Summer Witch [v1.2] [renpy] [WiP]</a></h3>
+        <a href="https://f95zone.to/threads/other-game.99999/page-2#post-1">Other Game &amp; Sequel</a>
+        <a href="https://f95zone.to/threads/">bad</a>
+        "#;
+        let hits = parse_f95_search(html);
+        assert_eq!(hits.len(), 2);
+        assert_eq!(hits[0].url, "https://f95zone.to/threads/summer-witch.10599/");
+        assert_eq!(hits[0].title, "Summer Witch [v1.2] [renpy] [WiP]");
+        assert_eq!(hits[1].title, "Other Game & Sequel");
+    }
+
     /// The exact shapes from the M1 field report — these used to land in
     /// "not a known site yet".
     #[test]
@@ -1369,5 +1789,27 @@ mod tests {
         let s = classify("https://kimochi.net/fgo-lilith/").unwrap();
         assert_eq!(s.site, "kimochi");
         assert!(is_mirror_site("kimochi"));
+    }
+
+    /// Manual smoke against the live sites (rate-limits ignored, run by hand):
+    /// `cargo test -p goonflow-desktop --lib -- --ignored --nocapture match_live`
+    #[tokio::test]
+    #[ignore]
+    async fn match_live_search_smoke() {
+        let client = reqwest::Client::builder()
+            .user_agent(UA)
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap();
+        let hits = dlsite_search(&client, "karryn").await.expect("dlsite search");
+        assert!(!hits.is_empty(), "dlsite search returned nothing");
+        assert!(hits.iter().all(|h| h.url.contains("/product_id/")));
+        println!("dlsite hits: {}", hits.len());
+        for h in hits.iter().take(3) {
+            println!("  {} | {}", h.url, h.title);
+        }
+        // without a cookie f95 answers the login page — expect the friendly error
+        let r = f95_search(&client, "spring seed", None).await;
+        println!("f95 no-cookie result: {}", r.err().unwrap_or_else(|| "hits without a cookie?!".into()));
     }
 }

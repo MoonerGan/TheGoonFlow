@@ -54,7 +54,8 @@ Three tabs across the top — **Games**, **Media**, **Sources** — and each vie
 carries only its own actions:
 
 - **Games** view: *+ Game folder / + Game zip / + Game .exe*, pipeline filters
-  (seen / tracking / wishlist / downloaded / played), Updates, Possible dupes.
+  (seen / tracking / wishlist / downloaded / played), Updates, Possible dupes,
+  Online matches.
 - **Media** view: *+ Clip URL / + Images / + Bookmarks*, filters by **source
   site** and **tag**. No pipeline filters — a booru post has no "wishlist"
   state, so you will never be offered one.
@@ -210,6 +211,13 @@ fetch.
   the **exact same image bytes** (reposted across boorus, imported twice) show
   up here. Nothing merges itself; you pick which entry to keep and the other's
   sources/tags/art are folded into it.
+- **Online matches** (Games view): games you imported from a folder are matched
+  *by title* against DLsite's and f95zone's own search (version/engine brackets
+  like `[v0.12] [renpy]` are stripped first). Only confident hits (≥60%) are
+  proposed, up to three per game, each with a score. **Attach + fetch** links
+  that page as a source and pulls its cover/title/version; **Dismiss** throws
+  the proposal away. Nothing ever links itself. f95 search runs only with your
+  saved f95 cookie (Sources tab); without it, DLsite matching still works.
 - **Sources** (tab): turn each site on or off, set how polite it should be (ms
   between requests), paste a **cookie** for sites that need a login (e-hentai,
   f95 threads), and see how many items each site currently accounts for.

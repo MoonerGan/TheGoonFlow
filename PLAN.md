@@ -261,6 +261,11 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   set from the editor's Launch block), and spawns it with its folder as cwd.
   Loose `.zip` sources report "extract first" (extraction is the #17 downloader's
   job). `preview_launch` never spawns so the UI can show what it *would* run.
+- **#14 (automated metadata for local games) landed next** — schema v5
+  `match_suggestions`; `ingest::find_matches` searches DLsite (POST /fs,
+  verified live) and f95 (login-cookie only), scores titles with bracket-strip +
+  bigram-Dice (floor 0.6, top 3), and the Games view *Online matches* panel
+  attaches or dismisses proposals. Never auto-merge (issue requirement).
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

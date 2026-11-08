@@ -311,6 +311,31 @@ export const launchItem = (itemId: string) =>
 export const setLaunchPath = (itemId: string, path: string | null) =>
   invoke<void>("set_launch_path", { itemId, path });
 
+// ---------- online match suggestions (#14) ----------
+export type MatchSuggestion = {
+  itemId: string;
+  itemTitle: string;
+  site: string;
+  url: string;
+  title: string;
+  confidence: number;
+  foundAt: string;
+};
+export type MatchReport = {
+  scanned: number;
+  withSuggestions: number;
+  suggestions: number;
+  failures: string[];
+  stopped: boolean;
+};
+export const findMatches = () => invoke<MatchReport>("find_matches");
+export const listMatchSuggestions = (limit = 200) =>
+  invoke<MatchSuggestion[]>("list_match_suggestions", { limit });
+export const dismissSuggestion = (itemId: string, site: string, url: string) =>
+  invoke<void>("dismiss_suggestion", { itemId, site, url });
+export const clearItemSuggestions = (itemId: string) =>
+  invoke<void>("clear_item_suggestions", { itemId });
+
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });

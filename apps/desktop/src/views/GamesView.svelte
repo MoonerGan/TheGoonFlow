@@ -4,8 +4,12 @@
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import {
+    addSource,
     checkUpdates,
+    clearItemSuggestions,
     deleteItems,
+    dismissSuggestion,
+    findMatches,
     getKindStats,
     getStats,
     getThumbs,
@@ -13,13 +17,16 @@
     importGameFolder,
     importGameZip,
     listItems,
+    listMatchSuggestions,
     listUpdates,
     mergeItems,
     pairingSuggestions,
+    reEnrichItem,
     topTags,
     type AppStatus,
     type GameImportReport,
     type ItemSummary,
+    type MatchSuggestion,
     type PairSuggestion,
     type StatusCount,
     type TagCount,
@@ -41,7 +48,7 @@
   let search = $state("");
   let filter = $state("all");
   let tagFilter = $state<string | null>(null);
-  let panel = $state<"library" | "updates" | "pairs">("library");
+  let panel = $state<"library" | "updates" | "pairs" | "matches">("library");
   let report = $state<string | null>(null);
   let gameFailures = $state<string[]>([]);
   let loadError = $state<string | null>(null);
@@ -50,10 +57,14 @@
   let pairNote = $state<string | null>(null);
   let pairs = $state<PairSuggestion[]>([]);
   let checkingUpdates = $state(false);
+  let matches = $state<MatchSuggestion[]>([]);
+  let matchNote = $state<string | null>(null);
+  let attaching = $state<string | null>(null);
   let selected = $state<ItemSummary | null>(null);
 
   const importJob = $derived(jobState("games"));
   const updatesJob = $derived(jobState("updates"));
+  const matchesJob = $derived(jobState("matches"));
   const filtered = $derived(
     filter === "all" ? items : items.filter((i) => i.status === filter),
   );
@@ -220,6 +231,66 @@
     }
   }
 
+  // ---- online match suggestions (#14) ----
+
+  function openMatches() {
+    panel = "matches";
+    matchNote = null;
+    listMatchSuggestions()
+      .then((m) => (matches = m))
+      .catch((e) => (matchNote = String(e)));
+  }
+
+  async function doFindMatches() {
+    if (matchesJob === "running") return;
+    matchNote = "searching DLsite (and f95 with a login cookie) for your local-only games…";
+    try {
+      const r = await findMatches();
+      matchNote =
+        `scanned ${r.scanned} local-only game${r.scanned === 1 ? "" : "s"} → ` +
+        (r.suggestions
+          ? `${r.suggestions} suggestions for ${r.withSuggestions} game${r.withSuggestions === 1 ? "" : "s"}`
+          : "no confident matches") +
+        (r.failures.length ? ` (${r.failures.length} site problems — see below)` : "") +
+        (r.stopped ? " (stopped)" : "");
+      matches = await listMatchSuggestions();
+      await load();
+    } catch (e) {
+      matchNote = `match search failed: ${e}`;
+    }
+  }
+
+  async function doAttach(s: MatchSuggestion) {
+    if (attaching) return;
+    attaching = `${s.site}|${s.url}`;
+    try {
+      await addSource(s.itemId, s.url);
+      await clearItemSuggestions(s.itemId);
+      matchNote = `linked ${s.site} to "${s.itemTitle}" — fetching its metadata…`;
+      try {
+        await reEnrichItem(s.itemId); // job: cover + title/version arrive in the strip
+      } catch {
+        // enrich job busy — the user can re-fetch from the item editor
+        matchNote = `linked ${s.site} to "${s.itemTitle}" — press Re-fetch metadata in its editor when the queue is free`;
+      }
+      matches = await listMatchSuggestions();
+      await load();
+    } catch (e) {
+      matchNote = `attach failed: ${e}`;
+    } finally {
+      attaching = null;
+    }
+  }
+
+  async function doDismiss(s: MatchSuggestion) {
+    try {
+      await dismissSuggestion(s.itemId, s.site, s.url);
+      matches = matches.filter((m) => !(m.itemId === s.itemId && m.site === s.site && m.url === s.url));
+    } catch (e) {
+      matchNote = `dismiss failed: ${e}`;
+    }
+  }
+
   function when(epoch: string): string {
     const n = Number(epoch);
     return Number.isFinite(n) && n > 0 ? new Date(n * 1000).toLocaleString() : "—";
@@ -318,6 +389,9 @@
     <button class="nav-item" class:active={panel === "pairs"} onclick={openPairs}>
       Possible dupes <span class="count">{pairs.length || ""}</span>
     </button>
+    <button class="nav-item" class:active={panel === "matches"} onclick={openMatches}>
+      Online matches <span class="count">{matches.length || ""}</span>
+    </button>
 
     <div class="section">Vault</div>
     <div class="vault-info">{status.vaultRoot}</div>
@@ -376,6 +450,42 @@
             <div class="row">
               <button onclick={() => doMerge(p, "a")}>Keep first</button>
               <button onclick={() => doMerge(p, "b")}>Keep second</button>
+            </div>
+          </div>
+        {/each}
+      {/if}
+
+    {:else if panel === "matches"}
+      <h2 class="panel-title">Online matches for local games</h2>
+      <p class="hint">Games tracked only by a local folder are matched against DLsite's and f95zone's own search.
+        f95 search needs its login cookie (Sources panel). Nothing links itself — you accept a match or dismiss it.</p>
+      <div class="row">
+        <button class="primary" disabled={matchesJob === "running"} onclick={doFindMatches}>
+          {matchesJob === "running" ? "Searching… (see strip)" : "Find online matches"}
+        </button>
+        <span class="hint">Only games with no online source yet; polite per-site rate limits apply.</span>
+      </div>
+      {#if matchNote}
+        <p class="report-inline">{matchNote}</p>
+      {/if}
+      {#if matches.length === 0}
+        <div class="empty"><strong>No open suggestions.</strong><br />Press <em>Find online matches</em> —
+          imported games are matched by title once <code>[v0.12]</code> / <code>[renpy]</code> noise is stripped,
+          and only confident hits (≥60%) are proposed.</div>
+      {:else}
+        {#each matches as s (`${s.itemId}-${s.site}-${s.url}`)}
+          <div class="pair-row">
+            <div>
+              <strong>{s.itemTitle}</strong> <span class="hint">local</span>
+              <br />
+              → <strong>{s.title}</strong>
+              <span class="hint">
+                {s.site} · {Math.round(s.confidence * 100)}% match · {when(s.foundAt)}
+              </span>
+            </div>
+            <div class="row">
+              <button class="primary" disabled={attaching !== null} onclick={() => doAttach(s)}>Attach + fetch</button>
+              <button class="ghost" onclick={() => doDismiss(s)}>Dismiss</button>
             </div>
           </div>
         {/each}

@@ -96,6 +96,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS updates_item_idx ON updates (item_id);
 
+        CREATE TABLE IF NOT EXISTS match_suggestions (
+            item_id    TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            site       TEXT NOT NULL,
+            url        TEXT NOT NULL,
+            title      TEXT NOT NULL,
+            confidence REAL NOT NULL,
+            found_at   TEXT NOT NULL,
+            UNIQUE (item_id, site, url)
+        );
+
         COMMIT;"
         ,
     )?;
@@ -153,6 +163,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
                 "ALTER TABLE items ADD COLUMN launch_path TEXT;"
             }
         ))?;
+    }
+    if v < 5 {
+        // #14: online-match suggestions. The table itself is in the base batch
+        // (CREATE TABLE IF NOT EXISTS), so existing vaults pick it up there —
+        // this step only records the version.
+        conn.execute_batch(
+            "BEGIN;
+            UPDATE meta SET value = '5' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
     }
     Ok(())
 }
@@ -619,6 +639,93 @@ pub fn set_launch_path(
         params![id, path, updated_at],
     )?;
     Ok(n > 0)
+}
+
+// ---------- match suggestions (#14) ----------
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuggestionRow {
+    pub item_id: String,
+    pub item_title: String,
+    pub site: String,
+    pub url: String,
+    pub title: String,
+    pub confidence: f64,
+    pub found_at: String,
+}
+
+/// Store/replace one proposed online match for an item.
+pub fn put_suggestion(
+    conn: &Connection,
+    item_id: &str,
+    site: &str,
+    url: &str,
+    title: &str,
+    confidence: f64,
+    found_at: &str,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO match_suggestions (item_id, site, url, title, confidence, found_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![item_id, site, url, title, confidence, found_at],
+    )?;
+    Ok(())
+}
+
+/// Drop all suggestions for an item (re-scan or after attaching).
+pub fn clear_suggestions(conn: &Connection, item_id: &str) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM match_suggestions WHERE item_id = ?1", params![item_id])?;
+    Ok(())
+}
+
+pub fn delete_suggestion(conn: &Connection, item_id: &str, site: &str, url: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM match_suggestions WHERE item_id = ?1 AND site = ?2 AND url = ?3",
+        params![item_id, site, url],
+    )?;
+    Ok(())
+}
+
+fn suggestion_from_row(r: &rusqlite::Row) -> rusqlite::Result<SuggestionRow> {
+    Ok(SuggestionRow {
+        item_id: r.get(0)?,
+        item_title: r.get(1)?,
+        site: r.get(2)?,
+        url: r.get(3)?,
+        title: r.get(4)?,
+        confidence: r.get(5)?,
+        found_at: r.get(6)?,
+    })
+}
+
+const SUGGEST_SELECT: &str = "SELECT s.item_id, i.title, s.site, s.url, s.title, s.confidence, s.found_at \
+     FROM match_suggestions s JOIN items i ON i.id = s.item_id ";
+
+pub fn list_suggestions(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<SuggestionRow>> {
+    let mut stmt = conn.prepare(&format!("{SUGGEST_SELECT} ORDER BY s.confidence DESC LIMIT ?1"))?;
+    let rows = stmt.query_map(params![limit], suggestion_from_row)?;
+    rows.collect()
+}
+
+pub fn suggestions_for_item(conn: &Connection, item_id: &str) -> rusqlite::Result<Vec<SuggestionRow>> {
+    let mut stmt = conn.prepare(&format!("{SUGGEST_SELECT} WHERE s.item_id = ?1 ORDER BY s.confidence DESC"))?;
+    let rows = stmt.query_map(params![item_id], suggestion_from_row)?;
+    rows.collect()
+}
+
+/// Games tracked only by a local file source — the candidates for online
+/// matching (#14). Returns (id, title).
+pub fn games_needing_match(conn: &Connection) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id, i.title FROM items i
+         WHERE i.kind = 'game'
+           AND EXISTS (SELECT 1 FROM sources s WHERE s.item_id = i.id AND s.site = 'local')
+           AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.item_id = i.id AND s.site <> 'local')
+         ORDER BY i.updated_at DESC",
+    )?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+    rows.collect()
 }
 
 pub fn set_item_version(
@@ -1144,5 +1251,54 @@ mod tests {
         assert_eq!(sugg.len(), 1);
         // the games panel must not offer media pairs
         assert!(pairing_suggestions(&conn, Some("game")).unwrap().is_empty());
+    }
+
+    /// #14: suggestion rows survive re-inserts, delete individually, and
+    /// disappear with the item (ON DELETE CASCADE).
+    #[test]
+    fn match_suggestions_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('g1','game','Summer Witch','0','1')",
+            [],
+        )
+        .unwrap();
+        put_suggestion(&conn, "g1", "dlsite", "https://dlsite/RJ1.html", "Summer Witch Art", 0.92, "7").unwrap();
+        put_suggestion(&conn, "g1", "dlsite", "https://dlsite/RJ1.html", "Summer Witch Art", 0.93, "8").unwrap(); // replace
+        put_suggestion(&conn, "g1", "f95", "https://f95zone.to/threads/sw.1/", "Summer Witch [renpy]", 0.71, "7").unwrap();
+        let all = list_suggestions(&conn, 10).unwrap();
+        assert_eq!(all.len(), 2); // same url replaced, not doubled
+        assert_eq!(all[0].confidence, 0.93);
+        assert_eq!(all[0].item_title, "Summer Witch");
+        delete_suggestion(&conn, "g1", "f95", "https://f95zone.to/threads/sw.1/").unwrap();
+        assert_eq!(suggestions_for_item(&conn, "g1").unwrap().len(), 1);
+        clear_suggestions(&conn, "g1").unwrap();
+        assert!(suggestions_for_item(&conn, "g1").unwrap().is_empty());
+
+        conn.execute("DELETE FROM items WHERE id = 'g1'", []).unwrap();
+        assert!(list_suggestions(&conn, 10).unwrap().is_empty());
+    }
+
+    /// #14 targeting: only games tracked solely by a local source are scanned.
+    #[test]
+    fn games_needing_match_targets_local_only_games() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES
+             ('g1','game','Local Only','0','3'),
+             ('g2','game','Has DLsite','0','2'),
+             ('p1','post','Not A Game','0','1')",
+            [],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g1','local','file:///D:/games/g1')", []).unwrap();
+        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g2','local','file:///D:/games/g2')", []).unwrap();
+        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('g2','dlsite','https://www.dlsite.com/maniax/work/=/product_id/RJ1.html')", []).unwrap();
+        conn.execute("INSERT INTO sources (item_id, site, url) VALUES ('p1','local','file:///D:/img.jpg')", []).unwrap();
+
+        let ids: Vec<String> = games_needing_match(&conn).unwrap().into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, vec!["g1".to_string()]);
     }
 }

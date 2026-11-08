@@ -77,7 +77,7 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v4, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v5, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
@@ -85,6 +85,9 @@ tools/
   tag (D9): exactly one per item, e.g. `complete` (green, priority 100).
   Media items never get it (D16 — enforced in the editor UI). `launch_path`
   (v4) is the optional per-game launcher override for #18.
+  `match_suggestions` (v5) stores proposed online matches per item:
+  `(item_id, site, url)` unique, title + confidence + found_at; rows cascade
+  with the item.
 - `sources` — many→one to items; `UNIQUE(site, url)`; `site='local'` +
   `file:///…` url for imported games, **local media bookmarks and `+ Video`
   entries**; raw snapshot column reserved for M3 selector recovery. Because of
@@ -167,6 +170,15 @@ tools/
     bails within ~100 ms of Stop. A cancelled wait leaves the lane advanced by
     at most one slot — harmless politeness, not rolled back. Lock/Nuke/
     forget-pointer also `queue.clear()`.
+12. **Match suggestions are proposals, never actions (#14).** `match_suggestions`
+    rows come from `ingest::find_matches`: DLsite full-text search is a POST to
+    `www.dlsite.com/maniax/fs` (no public API; result anchors carry
+    `product_id/RJ…` + `title="…"`), f95's XenForo `/search/search` is login-
+    gated (403 without the saved cookie — say so, don't retry). Scoring is
+    char-bigram Dice over bracket-stripped titles: floor 0.6, top 3 per game.
+    Attaching = `add_source` + re-enrich, decided by the user in the Online
+    matches panel. If live markup drifts, re-check with the ignored
+    `match_live_search_smoke` test (`-- --ignored match_live`).
 
 ## 5. Testing
 

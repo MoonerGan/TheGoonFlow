@@ -573,6 +573,57 @@ fn set_launch_path(
         .map_err(err)
 }
 
+// ---------- online match suggestions (#14) ----------
+
+/// Search DLsite/f95 for every local-only game and store proposals.
+#[tauri::command]
+async fn find_matches(state: tauri::State<'_, AppState>) -> Result<ingest::MatchReport, String> {
+    let job = state
+        .jobs
+        .start("matches", "online match search")
+        .ok_or("a match search is already running — see the activity strip")?;
+    let report = ingest::find_matches(&state, &job).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} scanned, {} with suggestions{}",
+            r.scanned,
+            r.with_suggestions,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
+}
+
+#[tauri::command]
+fn list_match_suggestions(
+    state: tauri::State<'_, AppState>,
+    limit: Option<i64>,
+) -> Result<Vec<goon_core::db::SuggestionRow>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::list_suggestions(&opened.conn, limit.unwrap_or(200)).map_err(err)
+}
+
+#[tauri::command]
+fn dismiss_suggestion(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    site: String,
+    url: String,
+) -> Result<(), String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::delete_suggestion(&opened.conn, &item_id, &site, &url).map_err(err)
+}
+
+#[tauri::command]
+fn clear_item_suggestions(state: tauri::State<'_, AppState>, item_id: String) -> Result<(), String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::clear_suggestions(&opened.conn, &item_id).map_err(err)
+}
+
 // ---------- import (D13) — every import runs as a job ----------
 // Async so Tauri runs them off the main thread: a 3000-link bookmark import
 // must never freeze the window or block other commands.
@@ -881,6 +932,10 @@ pub fn run() {
             preview_launch,
             launch_item,
             set_launch_path,
+            find_matches,
+            list_match_suggestions,
+            dismiss_suggestion,
+            clear_item_suggestions,
             list_jobs,
             cancel_job
         ])
