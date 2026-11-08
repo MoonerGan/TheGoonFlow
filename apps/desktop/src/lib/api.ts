@@ -75,6 +75,7 @@ export type ItemDetail = {
   status: string;
   version: string | null;
   notes: string;
+  launchPath: string | null;
   createdAt: string;
   updatedAt: string;
   hasThumb: boolean;
@@ -293,6 +294,22 @@ export const addSource = (itemId: string, url: string) =>
   invoke<string>("add_source", { itemId, url });
 export const removeSource = (itemId: string, sourceId: number) =>
   invoke<void>("remove_source", { itemId, sourceId });
+
+// ---------- launch (#18) ----------
+export type LaunchPlan = {
+  ok: boolean;
+  exe: string | null;
+  cwd: string | null;
+  engine: string | null;
+  note: string | null;
+  pid: number | null;
+};
+export const previewLaunch = (itemId: string) =>
+  invoke<LaunchPlan>("preview_launch", { itemId });
+export const launchItem = (itemId: string) =>
+  invoke<LaunchPlan>("launch_item", { itemId });
+export const setLaunchPath = (itemId: string, path: string | null) =>
+  invoke<void>("set_launch_path", { itemId, path });
 
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");

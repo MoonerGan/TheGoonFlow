@@ -180,6 +180,13 @@ fetch.
   (`seen / tracking / wishlist / downloaded / played`), and the **✓ Complete**
   personal marker (green chip — it means *"I finished this"*, independent of
   status, and it survives game updates).
+- **▶ Launch (game editor):** starts the game. The app finds the launcher from
+  the engine layout (Unity `<Name>.exe`, RPG Maker `Game.exe`, Ren'Py, or an
+  exe named after the folder) and runs it with its own folder as the working
+  directory. If auto-detect picks wrong, **Set launcher…** lets you point at
+  the right `.exe` (saved per game; **Clear override** reverts). A game still
+  inside a `.zip` says so — extract it first (downloads/extracting arrive in
+  M3). The game keeps running if you close the app.
 - **Editor (media):** title and tags only — no status/version/circle and no
   Complete marker, because none of that applies to a post or gallery.
 - Both editors: add or remove **tags** (booru tags arrive on their own when you

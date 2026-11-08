@@ -255,6 +255,12 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   done early** — `queue::SiteQueue` (per-site `reserve()` lanes, cancellable,
   cleared on Lock/Nuke) now backs bookmark enrich, re-fetch, and update
   checks; the M3 downloader (#17) must reuse it. See DEVELOPMENT §4 inv 11.
+- **#18 (game launching) is done early too** — `launcher.rs` resolves a game's
+  local source to a concrete `.exe` (engine-aware, folder-name preference,
+  helper-exe filtering), honours a per-game `launch_path` override (schema v4,
+  set from the editor's Launch block), and spawns it with its folder as cwd.
+  Loose `.zip` sources report "extract first" (extraction is the #17 downloader's
+  job). `preview_launch` never spawns so the UI can show what it *would* run.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

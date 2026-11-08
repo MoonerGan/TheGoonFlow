@@ -3,6 +3,7 @@ mod companion;
 mod importer;
 mod ingest;
 mod jobs;
+mod launcher;
 mod queue;
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -519,6 +520,59 @@ fn merge_items(
     goon_core::db::merge_items(conn, &keep_id, &drop_id).map_err(err)
 }
 
+// ---------- launch (#18) ----------
+
+/// The importer stores local files as `file:///<path>` — decode back.
+fn local_source_path(sources: &[goon_core::db::SourceRow]) -> Option<PathBuf> {
+    let s = sources.iter().find(|s| s.site == "local")?;
+    let rest = s.url.strip_prefix("file:///")?;
+    Some(PathBuf::from(rest))
+}
+
+fn plan_for(state: &AppState, item_id: &str) -> Result<launcher::LaunchPlan, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let Some(d) = goon_core::db::get_item(&opened.conn, item_id).map_err(err)? else {
+        return Err("item not found".into());
+    };
+    Ok(launcher::resolve(
+        local_source_path(&d.sources).as_deref(),
+        d.launch_path.as_deref(),
+    ))
+}
+
+/// What launching would run (and why not) — never spawns.
+#[tauri::command]
+fn preview_launch(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<launcher::LaunchPlan, String> {
+    plan_for(&state, &item_id)
+}
+
+/// Resolve and start it. Games keep running after the app closes.
+#[tauri::command]
+fn launch_item(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<launcher::LaunchPlan, String> {
+    let plan = plan_for(&state, &item_id)?;
+    launcher::launch(&plan)
+}
+
+#[tauri::command]
+fn set_launch_path(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    path: Option<String>,
+) -> Result<(), String> {
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    goon_core::db::set_launch_path(&opened.conn, &item_id, path.as_deref(), &now_epoch())
+        .map(|_| ())
+        .map_err(err)
+}
+
 // ---------- import (D13) — every import runs as a job ----------
 // Async so Tauri runs them off the main thread: a 3000-link bookmark import
 // must never freeze the window or block other commands.
@@ -824,6 +878,9 @@ pub fn run() {
             add_source,
             remove_source,
             delete_items,
+            preview_launch,
+            launch_item,
+            set_launch_path,
             list_jobs,
             cancel_job
         ])

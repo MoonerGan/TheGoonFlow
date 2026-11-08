@@ -844,7 +844,7 @@ fn game_dir_has_contents(game_dir: &Path) -> bool {
     false
 }
 
-fn sub_dirs_ending(dir: &Path, suffix: &str) -> Option<PathBuf> {
+pub(crate) fn sub_dirs_ending(dir: &Path, suffix: &str) -> Option<PathBuf> {
     fs::read_dir(dir).ok()?.flatten().find_map(|e| {
         let p = e.path();
         (p.is_dir()

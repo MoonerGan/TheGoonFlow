@@ -5,19 +5,24 @@
   // M2.6 also adds the source editor: attach/remove source links and re-fetch
   // metadata, so a folder-only game can be pointed at its DLsite/f95 page.
   import { onMount } from "svelte";
+  import { open } from "@tauri-apps/plugin-dialog";
   import {
     addItemTag,
     addSource,
     deleteItem,
     getItem,
+    launchItem,
+    previewLaunch,
     removeItemTag,
     removeSource,
     reEnrichItem,
     setComplete,
+    setLaunchPath,
     updateItem,
     type EnrichReport,
     type ItemDetail,
     type ItemSummary,
+    type LaunchPlan,
   } from "../lib/api";
   import ConfirmDialog from "./ConfirmDialog.svelte";
 
@@ -56,6 +61,11 @@
   let enrichReport = $state<EnrichReport | null>(null);
   let enrichError = $state<string | null>(null);
 
+  // launch (#18, games only)
+  let launchPlan = $state<LaunchPlan | null>(null);
+  let launching = $state(false);
+  let launchMsg = $state<string | null>(null);
+
   onMount(async () => {
     try {
       const d = await getItem(item.id);
@@ -63,6 +73,13 @@
         detail = d;
         circle = d.circle ?? "";
         complete = d.tags.some((t) => t.name === "complete" && t.typeKey === "user_status");
+      }
+      if (isGame) {
+        try {
+          launchPlan = await previewLaunch(item.id);
+        } catch {
+          // launch preview is advisory; ignore
+        }
       }
     } catch (e) {
       error = String(e);
@@ -146,6 +163,46 @@
       enrichError = String(e);
     } finally {
       enriching = false;
+    }
+  }
+
+  async function doLaunch() {
+    if (launching) return;
+    launching = true;
+    launchMsg = null;
+    try {
+      const r = await launchItem(item.id);
+      launchPlan = r;
+      launchMsg = r.ok ? `launched${r.pid ? ` (pid ${r.pid})` : ""} — ${r.exe}` : r.note;
+    } catch (e) {
+      launchMsg = String(e);
+    } finally {
+      launching = false;
+    }
+  }
+
+  async function chooseLauncher() {
+    const path = await open({
+      title: "Pick this game's launcher .exe",
+      filters: [{ name: "Executable", extensions: ["exe"] }],
+    });
+    if (typeof path !== "string") return;
+    try {
+      await setLaunchPath(item.id, path);
+      launchPlan = await previewLaunch(item.id);
+      launchMsg = "saved as this game's launcher";
+    } catch (e) {
+      launchMsg = String(e);
+    }
+  }
+
+  async function clearLauncher() {
+    try {
+      await setLaunchPath(item.id, null);
+      launchPlan = await previewLaunch(item.id);
+      launchMsg = "launcher override cleared";
+    } catch (e) {
+      launchMsg = String(e);
     }
   }
 
@@ -250,6 +307,32 @@
     </div>
     {#if sourceMsg}
       <p class="report-inline">{sourceMsg}</p>
+    {/if}
+
+    {#if isGame}
+      <div class="field-label">
+        Launch
+        <span class="hint">— {launchPlan?.engine ? `detected ${launchPlan.engine}` : "start it from the library"}</span>
+      </div>
+      {#if launchPlan?.ok}
+        <p class="hint path">{launchPlan.exe}</p>
+      {:else if launchPlan?.note}
+        <p class="hint">{launchPlan.note}</p>
+      {/if}
+      <div class="row">
+        <button class="primary" disabled={launching || !launchPlan?.ok} onclick={doLaunch}>
+          {launching ? "Launching…" : "▶ Launch"}
+        </button>
+        <button onclick={chooseLauncher} title="If auto-detect picked the wrong .exe, point at the right one">
+          Set launcher…
+        </button>
+        {#if detail?.launchPath}
+          <button class="ghost" onclick={clearLauncher}>Clear override</button>
+        {/if}
+      </div>
+      {#if launchMsg}
+        <p class="report-inline">{launchMsg}</p>
+      {/if}
     {/if}
 
     <div class="row modal-actions">

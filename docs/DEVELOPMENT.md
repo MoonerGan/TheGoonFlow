@@ -53,17 +53,20 @@ crates/
   vault/        crypto core: Argon2id KDF → XChaCha20-Poly1305-wrapped data key
                 → SQLCipher PRAGMA key; nuke = shred keyfile first, then files
   locator/      flow.cfg pointer + volume-label resolution (drive-letter agnostic)
-  goon-core/    domain model, SQLite schema (v2), media pipeline (thumbnail gen,
+  goon-core/    domain model, SQLite schema (v4), media pipeline (thumbnail gen,
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
     views/      LibraryView (tab shell) + GamesView / MediaView (separate views)
-    components/ TileGrid, ItemEditor, ActivityBar, ClipDialog, SourcesPanel
+    components/ TileGrid, ItemEditor, ActivityBar, ClipDialog, SourcesPanel,
+                ConfirmDialog, ReportBar
     lib/        api.ts (command bindings), activity.svelte.ts (job polling store)
   src-tauri/
     src/
       lib.rs        AppState, vault lifecycle commands, all tauri commands
       jobs.rs       job registry: progress, cancellation, one job per kind
+      queue.rs      #15: per-site rate lanes shared by every network fetch
+      launcher.rs   #18: engine-aware game-launch resolution + spawn
       companion.rs  127.0.0.1 axum API (handshake/ping/clip stub)
       ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
@@ -74,13 +77,14 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v3, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v4, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
   first-class column. **Completion is NOT a status** — it's a `user_status`
   tag (D9): exactly one per item, e.g. `complete` (green, priority 100).
-  Media items never get it (D16 — enforced in the editor UI).
+  Media items never get it (D16 — enforced in the editor UI). `launch_path`
+  (v4) is the optional per-game launcher override for #18.
 - `sources` — many→one to items; `UNIQUE(site, url)`; `site='local'` +
   `file:///…` url for imported games, **local media bookmarks and `+ Video`
   entries**; raw snapshot column reserved for M3 selector recovery. Because of

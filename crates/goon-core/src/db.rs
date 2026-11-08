@@ -134,6 +134,26 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             COMMIT;",
         )?;
     }
+    if v < 4 {
+        // #18: optional per-game launcher override. Kept out of the base CREATE
+        // so ALTER runs exactly once on both fresh and existing vaults. Guarded
+        // so re-running is a no-op (idempotent migrations).
+        let has_col = conn
+            .prepare("SELECT 1 FROM pragma_table_info('items') WHERE name = 'launch_path'")
+            .and_then(|mut s| s.exists([]))
+            .unwrap_or(false);
+        conn.execute_batch(&format!(
+            "BEGIN;
+            {alter}
+            UPDATE meta SET value = '4' WHERE key = 'schema_version';
+            COMMIT;",
+            alter = if has_col {
+                ""
+            } else {
+                "ALTER TABLE items ADD COLUMN launch_path TEXT;"
+            }
+        ))?;
+    }
     Ok(())
 }
 
@@ -515,6 +535,9 @@ pub struct ItemDetail {
     pub status: String,
     pub version: Option<String>,
     pub notes: String,
+    /// #18: optional per-game launcher override (absolute path to the .exe
+    /// to start). Empty/None = auto-detect from the engine layout.
+    pub launch_path: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub has_thumb: bool,
@@ -525,6 +548,7 @@ pub struct ItemDetail {
 pub fn get_item(conn: &Connection, id: &str) -> rusqlite::Result<Option<ItemDetail>> {
     let mut stmt = conn.prepare(
         "SELECT id, kind, title, original_title, circle, status, version, notes,
+                launch_path,
                 created_at, updated_at,
                 EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb')
          FROM items WHERE id = ?1",
@@ -540,9 +564,10 @@ pub fn get_item(conn: &Connection, id: &str) -> rusqlite::Result<Option<ItemDeta
                 r.get::<_, String>(5)?,
                 r.get::<_, Option<String>>(6)?,
                 r.get::<_, String>(7)?,
-                r.get::<_, String>(8)?,
+                r.get::<_, Option<String>>(8)?,
                 r.get::<_, String>(9)?,
-                r.get::<_, bool>(10)?,
+                r.get::<_, String>(10)?,
+                r.get::<_, bool>(11)?,
             ))
         })
         .ok()
@@ -573,12 +598,27 @@ pub fn get_item(conn: &Connection, id: &str) -> rusqlite::Result<Option<ItemDeta
         status: base.5,
         version: base.6,
         notes: base.7,
-        created_at: base.8,
-        updated_at: base.9,
-        has_thumb: base.10,
+        launch_path: base.8,
+        created_at: base.9,
+        updated_at: base.10,
+        has_thumb: base.11,
         sources,
         tags: tags_for_item(conn, id)?,
     }))
+}
+
+/// #18: set/clear the per-game launcher override.
+pub fn set_launch_path(
+    conn: &Connection,
+    id: &str,
+    path: Option<&str>,
+    updated_at: &str,
+) -> rusqlite::Result<bool> {
+    let n = conn.execute(
+        "UPDATE items SET launch_path = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, path, updated_at],
+    )?;
+    Ok(n > 0)
 }
 
 pub fn set_item_version(
