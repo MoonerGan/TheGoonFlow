@@ -9,8 +9,11 @@
     getSiteSettings,
     knownSites,
     nukeDrill,
+    getScrubSettings,
+    scrubNow,
     setPanicHotkey,
     setProxy,
+    setScrubOnLock,
     setSiteSetting,
     siteStats,
     type CompanionStatus,
@@ -41,6 +44,11 @@
   let panicMsg = $state<string | null>(null);
   let drilling = $state(false);
 
+  // scrubber (#23)
+  let scrubOnLock = $state(false);
+  let scrubResult = $state<string | null>(null);
+  let scrubbing = $state(false);
+
   onMount(async () => {
     try {
       siteInfos = await knownSites();
@@ -65,7 +73,35 @@
     } catch {
       // advisory (vault locked → the unlock screen has the panic defaults)
     }
+    try {
+      scrubOnLock = (await getScrubSettings()).scrubOnLock;
+    } catch {
+      // advisory
+    }
   });
+
+  async function toggleScrubOnLock() {
+    try {
+      scrubOnLock = (await setScrubOnLock(!scrubOnLock)).scrubOnLock;
+    } catch (e) {
+      scrubResult = String(e);
+    }
+  }
+
+  async function doScrub() {
+    if (scrubbing) return;
+    scrubbing = true;
+    try {
+      const r = await scrubNow();
+      scrubResult =
+        `webview profile ${r.webviewCleared ? "cleared" : "could not clear"}` +
+        ` · thumbcache: ${r.thumbcacheRemoved} gone, ${r.thumbcacheLocked} still held by Explorer`;
+    } catch (e) {
+      scrubResult = String(e);
+    } finally {
+      scrubbing = false;
+    }
+  }
 
   async function savePanic() {
     panicMsg = null;
@@ -202,6 +238,20 @@
 </div>
 {#if panicMsg}
   <p class="report-inline">{panicMsg}</p>
+{/if}
+
+<div class="field-label" style="margin-top:1.2rem">
+  Scrubber <span class="hint">— cleans traces the vault never held (web session, Explorer thumbnails)</span>
+</div>
+<div class="row">
+  <button disabled={scrubbing} onclick={doScrub}>{scrubbing ? "Scrubbing…" : "Scrub now"}</button>
+  <label class="inline-check">
+    <input type="checkbox" checked={scrubOnLock} onchange={toggleScrubOnLock} />
+    scrub every time I lock or hit the panic key
+  </label>
+</div>
+{#if scrubResult}
+  <p class="report-inline">{scrubResult}</p>
 {/if}
 
 {#if counts.length > 0}

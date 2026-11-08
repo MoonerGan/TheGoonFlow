@@ -383,6 +383,18 @@ export const setPanicHotkey = (hotkey: string | null) =>
   invoke<PanicInfo>("set_panic_hotkey", { hotkey });
 export const nukeDrill = () => invoke<string>("nuke_drill");
 
+// ---------- scrubber (#23) ----------
+export type ScrubReport = {
+  webviewCleared: boolean;
+  thumbcacheRemoved: number;
+  thumbcacheLocked: number;
+};
+export type ScrubSettings = { scrubOnLock: boolean };
+export const scrubNow = () => invoke<ScrubReport>("scrub_now");
+export const getScrubSettings = () => invoke<ScrubSettings>("get_scrub_settings");
+export const setScrubOnLock = (on: boolean) =>
+  invoke<ScrubSettings>("set_scrub_on_lock", { on });
+
 // ---------- archive extraction (#17) ----------
 export type ExtractPlan = {
   zip: string;

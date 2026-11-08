@@ -339,6 +339,15 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   the vault meta. Sources panel gained the Panic key block + drill button.
   New drill test (79 green). Still open in #23: hold-3s variant for
   crypto-erase-by-hotkey (needs a hold-detect loop) and the scrubber.
+- **#23 increment 2 (scrubber)** — `scrub_now` clears the app's own WebView2
+  browsing data (`clear_all_browsing_data`) and deletes Windows Explorer
+  `thumbcache_*.db` files (they can hold previews of games/media on disk —
+  data the vault never held but the OS cached); locked-by-Explorer files are
+  counted, not forced, and nothing else in that folder is touched. A
+  vault-stored `scrub_on_lock` flag makes every Lock *and* every panic
+  press run the scrub automatically. Sources panel gained the Scrubber
+  block (run + toggle + honest report line). Test proves only the
+  thumbcache files die (80 green).
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built
   after #25) runs everything below; existing `C:\GoonFlow` vaults migrate
   v3→v7 on unlock (idempotent, in place). Manual checklist for the In-review

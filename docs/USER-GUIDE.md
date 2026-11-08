@@ -52,6 +52,12 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 - **Forget pointer** (reconnect screen): deletes only the app's `flow.cfg`
   pointer — touches no vault files. The escape hatch when the pointer points
   at a moved/deleted folder and you just want the app working again.
+- **Scrubber** (Sources tab): the vault is encrypted, but *outside* it the OS
+  keeps traces — the app's web session (thumbnails it fetched) and Windows
+  Explorer's thumbnail caches (previews of game/video files on any drive).
+  **Scrub now** clears both; files Explorer is actively holding are reported,
+  not forced. Tick *scrub on every lock* and the same cleanup runs whenever
+  you Lock or hit the panic key — so "locked" really means cleared.
 - Forgotten passphrase ≠ lost content forever only via backups: without it the
   vault is a brick. That's the point.
 

@@ -196,8 +196,12 @@ fn unlock(
 }
 
 #[tauri::command]
-fn lock(state: tauri::State<'_, AppState>) {
+fn lock(state: tauri::State<'_, AppState>, app: tauri::AppHandle) {
+    let scrub = scrub_on_lock_flag(&state.core);
     lock_core(&state.core, &state.locked);
+    if scrub {
+        do_scrub(&app);
+    }
 }
 
 /// The lock half of #23 lives here so the panic hotkey and the Lock button
@@ -209,6 +213,94 @@ fn lock_core(core: &Core, locked: &AtomicBool) {
     let mut inner = core.inner.lock().unwrap();
     inner.opened = None; // drops conn (checkpoint) + zeroizes data key
     locked.store(true, Ordering::SeqCst);
+}
+
+// ---------- scrubber (#23): OS-side traces, never vault contents ----------
+
+#[derive(Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct ScrubReport {
+    /// our WebView2 profile's cookies/cache/localStorage
+    webview_cleared: bool,
+    /// Windows Explorer thumbnail caches (they can hold game/media previews)
+    thumbcache_removed: usize,
+    thumbcache_locked: usize,
+}
+
+fn scrub_on_lock_flag(core: &Core) -> bool {
+    let inner = core.inner.lock().unwrap();
+    inner
+        .opened
+        .as_ref()
+        .and_then(|o| goon_core::db::get_meta(&o.conn, "scrub_on_lock"))
+        .is_some_and(|v| v == "1")
+}
+
+/// Delete `thumbcache_*.db` in `dir`, count removed vs locked-by-Explorer.
+/// Nothing else in that folder is touched.
+fn scrub_cache_dir(dir: &Path) -> (usize, usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return (0, 0);
+    };
+    let (mut gone, mut busy) = (0usize, 0usize);
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        if name.starts_with("thumbcache_") && name.ends_with(".db") {
+            if std::fs::remove_file(e.path()).is_ok() {
+                gone += 1;
+            } else {
+                busy += 1;
+            }
+        }
+    }
+    (gone, busy)
+}
+
+fn do_scrub(app: &tauri::AppHandle) -> ScrubReport {
+    use tauri::Manager;
+    let mut r = ScrubReport::default();
+    if let Some(w) = app.get_webview_window("main") {
+        r.webview_cleared = w.clear_all_browsing_data().is_ok();
+    }
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        let explorer = Path::new(&local).join("Microsoft").join("Windows").join("Explorer");
+        let (gone, busy) = scrub_cache_dir(&explorer);
+        r.thumbcache_removed = gone;
+        r.thumbcache_locked = busy;
+    }
+    r
+}
+
+#[tauri::command]
+fn scrub_now(app: tauri::AppHandle) -> ScrubReport {
+    do_scrub(&app)
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScrubSettings {
+    scrub_on_lock: bool,
+}
+
+#[tauri::command]
+fn get_scrub_settings(state: tauri::State<'_, AppState>) -> Result<ScrubSettings, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    Ok(ScrubSettings {
+        scrub_on_lock: goon_core::db::get_meta(&opened.conn, "scrub_on_lock").as_deref() == Some("1"),
+    })
+}
+
+#[tauri::command]
+fn set_scrub_on_lock(
+    state: tauri::State<'_, AppState>,
+    on: bool,
+) -> Result<ScrubSettings, String> {
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    goon_core::db::set_meta(&opened.conn, "scrub_on_lock", if on { Some("1") } else { None })
+        .map_err(err)?;
+    Ok(ScrubSettings { scrub_on_lock: on })
 }
 
 // ---------- panic hotkey (#23) ----------
@@ -230,11 +322,15 @@ fn toggle_panic(app: &tauri::AppHandle) {
         }
         state.hidden.store(false, Ordering::SeqCst);
     } else {
+        let scrub = scrub_on_lock_flag(&state.core);
         lock_core(&state.core, &state.locked);
         if let Some(w) = win {
             let _ = w.hide();
         }
         state.hidden.store(true, Ordering::SeqCst);
+        if scrub {
+            do_scrub(app);
+        }
     }
 }
 
@@ -1496,6 +1592,9 @@ pub fn run() {
             panic_info,
             set_panic_hotkey,
             nuke_drill,
+            scrub_now,
+            get_scrub_settings,
+            set_scrub_on_lock,
             list_jobs,
             cancel_job
         ])
@@ -1519,6 +1618,24 @@ mod integration_tests {
     fn nuke_drill_leaves_nothing_behind() {
         let r = run_nuke_drill();
         assert!(r.is_ok(), "drill failed: {}", r.unwrap_err());
+    }
+
+    /// #23: the scrubber removes exactly thumbcache_*.db and nothing else.
+    #[test]
+    fn scrubber_only_touches_thumbcache_files() {
+        let d = std::env::temp_dir().join(format!("goonflow-scrub-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for f in ["thumbcache_1.db", "thumbcache_99.db", "keepme.db", "thumbcache_notes.txt"] {
+            std::fs::write(d.join(f), b"x").unwrap();
+        }
+        let (gone, busy) = scrub_cache_dir(&d);
+        assert_eq!((gone, busy), (2, 0));
+        assert!(!d.join("thumbcache_1.db").exists());
+        assert!(!d.join("thumbcache_99.db").exists());
+        assert!(d.join("keepme.db").exists());
+        assert!(d.join("thumbcache_notes.txt").exists());
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     /// Regression for the M0 field report: nested game folders + the
