@@ -383,10 +383,11 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   screens) and what is not (file-properties metadata → needs custom
   resources rebuild; vault folder naming). New sanitize/round-trip test
   (81 green).
-- Field-test resume point: the current `target\release\GoonFlow.exe` (built
-  after #23, schema v7) runs everything below; existing `C:\GoonFlow`
-  vaults migrate v3→v7 on unlock (idempotent, in place). Manual checklist
-  for the In-review issues, in the order that surfaces problems fastest:
+- Field-test resume point: the current `target\release\GoonFlow.exe` (the
+  m9 Tauri build, all work through #27, schema v7) runs everything below;
+  existing `C:\GoonFlow` vaults migrate v3→v7 on unlock (idempotent, in
+  place). Manual checklist for the In-review issues, in the order that
+  surfaces problems fastest:
   1. Unlock the real vault → schema lands at v7, old items intact.
   2. Viewer (#21): click media cards — ←/→ through the grid, +/−/0 zoom,
      space slideshow, big stored video → poster fallback, `i` → editor.
@@ -401,5 +402,15 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
      ⚠ chip on an update row for a modded game.
   6. Proxy (#24): set `socks5://127.0.0.1:9150` with Tor Browser running →
      Re-fetch metadata still succeeds (traffic through Tor); Clear → direct.
+  7. Panic (#23) — tap/hold automation already passed
+     (`tools\panic-tap-test.ps1` / `-hold-` / `-stale-`); the finger pass:
+     from another app tap Ctrl+Alt+L → window vanishes + jobs stop, tap
+     again → locked window returns; run the crypto-erase drill; store a
+     custom key and try both; tick scrub-on-lock and watch the counts.
+     Hold-erase: **throwaway vault only** (make one beside the exe).
+  8. Deniability (#27): copy the exe to a boring name → works (proven);
+     set a Decoy title in Sources → taskbar title changes at once, brand
+     after re-lock; clear → back to Flow. Check chrome.cfg contents read
+     like nothing sensitive.
   Earlier notes still hold: re-clipping old rule34/wimg bare links (or
   Re-fetch metadata on them) now pulls art (v3 migration fixed labels).

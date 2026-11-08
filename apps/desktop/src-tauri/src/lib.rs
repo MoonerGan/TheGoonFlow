@@ -409,23 +409,34 @@ pub const PANIC_HOLD_MS: u64 = 3000;
 
 /// Physical key state via the OS (same mechanism global-hotkey itself uses
 /// to synthesize release events). Escalation must NEVER fire on a lost
-/// release event alone: the watcher verifies the keys are still physically
-/// down at the deadline. Ctrl+Alt are what a held hotkey keeps depressed
-/// (WM_HOTKEY auto-repeat proves L is still down).
+/// release event alone: the watcher verifies the shortcut's own modifiers
+/// are still physically down at the deadline — whatever the stored panic
+/// key happens to be (Ctrl+Alt+L default, or e.g. Alt+F12).
 #[cfg(windows)]
-fn panic_mods_down() -> bool {
+fn panic_mods_down(mods: tauri_plugin_global_shortcut::Modifiers) -> bool {
+    use tauri_plugin_global_shortcut::Modifiers;
     #[link(name = "user32")]
     extern "system" {
         fn GetAsyncKeyState(virt_key: i32) -> i16;
     }
-    const VK_CONTROL: i32 = 0x11;
-    const VK_MENU: i32 = 0x12;
-    (unsafe { (GetAsyncKeyState(VK_CONTROL) as u16 & 0x8000) != 0 })
-        && (unsafe { (GetAsyncKeyState(VK_MENU) as u16 & 0x8000) != 0 })
+    let down = |vk: i32| unsafe { (GetAsyncKeyState(vk) as u16 & 0x8000) != 0 };
+    if mods.contains(Modifiers::CONTROL) && !down(0x11) {
+        return false;
+    }
+    if mods.contains(Modifiers::ALT) && !down(0x12) {
+        return false;
+    }
+    if mods.contains(Modifiers::SHIFT) && !down(0x10) {
+        return false;
+    }
+    if mods.contains(Modifiers::SUPER) && !(down(0x5B) || down(0x5C)) {
+        return false;
+    }
+    true
 }
 
 #[cfg(not(windows))]
-fn panic_mods_down() -> bool {
+fn panic_mods_down(_mods: tauri_plugin_global_shortcut::Modifiers) -> bool {
     false // no reliable physical probe: never escalate, tap-only panic
 }
 
@@ -440,13 +451,17 @@ fn panic_mods_down() -> bool {
 /// A watcher only escalates if it is still the *current* episode when its
 /// deadline lands (`panic_gen` matches): a stale watcher from an earlier
 /// quick tap must never fire while a fresh hold is still under 3 s old.
-fn panic_event(app: &tauri::AppHandle, pressed: bool) {
+fn panic_event(
+    app: &tauri::AppHandle,
+    pressed: bool,
+    mods: tauri_plugin_global_shortcut::Modifiers,
+) {
     use tauri::Manager;
     let state = app.state::<AppState>();
     if pressed {
         // auto-repeat while the episode is live AND keys physically down.
         // (episode live but keys up = lost release: start a fresh tap.)
-        if state.panic_hold.load(Ordering::SeqCst) && panic_mods_down() {
+        if state.panic_hold.load(Ordering::SeqCst) && panic_mods_down(mods) {
             return;
         }
         state.panic_hold.store(true, Ordering::SeqCst);
@@ -456,12 +471,12 @@ fn panic_event(app: &tauri::AppHandle, pressed: bool) {
             std::thread::sleep(std::time::Duration::from_millis(PANIC_HOLD_MS));
             let st = app2.state::<AppState>();
             // Escalate only if this watcher is still the live episode AND
-            // the keys are verifiably still held. A newer tap bumps
-            // panic_gen, so a stale watcher (or a released-then-repressed
-            // hold that is not yet 3 s old) can never nuke by itself.
+            // the shortcut's modifiers are verifiably still held. A newer
+            // tap bumps panic_gen, so a stale watcher (or a released-then-
+            // repressed hold that is not yet 3 s old) can never nuke alone.
             if st.panic_gen.load(Ordering::SeqCst) == my_gen
                 && st.panic_hold.load(Ordering::SeqCst)
-                && panic_mods_down()
+                && panic_mods_down(mods)
             {
                 eprintln!("panic hold: crypto-erasing vault");
                 st.nuked.store(true, Ordering::SeqCst);
@@ -1704,11 +1719,11 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_handler(move |app, _shortcut, event| {
+                .with_handler(move |app, shortcut, event| {
                     let pressed =
                         event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed;
                     eprintln!("panic hotkey event: {:?}", event.state());
-                    panic_event(app, pressed);
+                    panic_event(app, pressed, shortcut.mods);
                 })
                 .build(),
         )
