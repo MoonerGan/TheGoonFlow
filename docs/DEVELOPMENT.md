@@ -66,6 +66,7 @@ apps/desktop/
       lib.rs        AppState, vault lifecycle commands, all tauri commands
       jobs.rs       job registry: progress, cancellation, one job per kind
       queue.rs      #15: per-site rate lanes shared by every network fetch
+      http.rs       #24: single reqwest client policy (vault proxy_url)
       launcher.rs   #18: engine-aware game-launch resolution + spawn
       video.rs      #16: opt-in vault video storage (cap, job, first-frame)
       videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler
@@ -192,6 +193,15 @@ tools/
     raw frames. Shell handlers are COM — `first_frame` CoInitializes per call
     and tears down only what it initialized. A video item's thumbnail must
     never overwrite an existing site cover tile (only set when thumb is absent).
+14. **Every networked path builds its client via `http::client_for(state, secs)`
+    (#24).** The vault `meta` key `proxy_url` (plain KV — no schema bump) is
+    read at client-build time, so a proxy change takes effect on the next
+    job/command without a restart. Schemes accepted: http/https/socks4/
+    socks5/socks5h (`set_proxy` validates before saving; the proxy travels
+    with the vault, not the machine). reqwest's `socks` feature is what makes
+    `socks5://127.0.0.1:9150` (Tor Browser) work. Never construct a bare
+    `reqwest::Client` in a command path — that silently bypasses the proxy.
+    `http::wiring_tests` proves the route with a local stub proxy (no network).
 
 ## 5. Testing
 

@@ -14,7 +14,6 @@ use goon_core::model::{Item, ItemKind, Status};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
-use std::time::Duration;
 
 pub const UA: &str = "TheGoonFlow/0.1 (personal library; user-initiated clip/import)";
 
@@ -871,11 +870,7 @@ pub async fn clip(state: &AppState, url: String) -> Result<ClipReport, String> {
 
     // Phase 2 (async): metadata where available. Never fatal — a failed
     // fetch still stores the link (bare entry beats lost bookmark).
-    let client = reqwest::Client::builder()
-        .user_agent(UA)
-        .timeout(Duration::from_secs(25))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http::client_for(state, 25)?;
     let ctx = FetchCtx { cookie: cookie.as_deref() };
     let mut meta = match fetch_meta(&client, &s, &url, &ctx).await {
         Ok(m) => m,
@@ -985,11 +980,7 @@ pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateRe
         m
     };
 
-    let client = reqwest::Client::builder()
-        .user_agent(UA)
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http::client_for(state, 15)?;
 
     let targets_len = targets.len();
     for (i, t) in targets.into_iter().enumerate() {
@@ -1128,11 +1119,7 @@ pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> 
         return Ok(report);
     }
 
-    let client = reqwest::Client::builder()
-        .user_agent(UA)
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http::client_for(state, 15)?;
 
     for (i, (site, url)) in sources.iter().enumerate() {
         if job.cancelled() {
@@ -1495,11 +1482,7 @@ pub async fn find_matches(
     if targets.is_empty() {
         return Ok(report);
     }
-    let client = reqwest::Client::builder()
-        .user_agent(UA)
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(crate::err)?;
+    let client = crate::http::client_for(state, 20)?;
     let total = targets.len();
     for (i, (id, title)) in targets.into_iter().enumerate() {
         if job.cancelled() {
@@ -1798,7 +1781,7 @@ mod tests {
     async fn match_live_search_smoke() {
         let client = reqwest::Client::builder()
             .user_agent(UA)
-            .timeout(Duration::from_secs(20))
+            .timeout(std::time::Duration::from_secs(20))
             .build()
             .unwrap();
         let hits = dlsite_search(&client, "karryn").await.expect("dlsite search");

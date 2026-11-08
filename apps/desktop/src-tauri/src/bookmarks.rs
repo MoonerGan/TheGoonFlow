@@ -18,7 +18,6 @@ use goon_core::model::{Item, Status};
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::fs;
-use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct Bookmark {
@@ -276,11 +275,7 @@ pub async fn import_bookmarks(
             }
         }
 
-        let client = reqwest::Client::builder()
-            .user_agent(ingest::UA)
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| e.to_string())?;
+        let client = crate::http::client_for(state, 15)?;
         let total = bookmarks.len() + ordered.len();
         let mut done = bookmarks.len();
         for p in ordered {

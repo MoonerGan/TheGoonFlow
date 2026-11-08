@@ -3,8 +3,10 @@
   // saving here never touches the grid views.
   import { onMount } from "svelte";
   import {
+    getProxy,
     getSiteSettings,
     knownSites,
+    setProxy,
     setSiteSetting,
     siteStats,
     type SiteCount,
@@ -18,6 +20,11 @@
   let counts = $state<SiteCount[]>([]);
   let note = $state<string | null>(null);
 
+  // proxy (#24)
+  let proxyUrl = $state<string | null>(null);
+  let proxyDraft = $state("");
+  let proxyMsg = $state<string | null>(null);
+
   onMount(async () => {
     try {
       siteInfos = await knownSites();
@@ -27,7 +34,29 @@
     } catch (e) {
       note = `sources settings unavailable: ${e}`;
     }
+    try {
+      proxyUrl = (await getProxy()).proxyUrl;
+    } catch {
+      // advisory; the save below will surface a real error
+    }
   });
+
+  async function saveProxy() {
+    proxyMsg = null;
+    try {
+      const r = await setProxy(proxyDraft.trim() || null);
+      proxyUrl = r.proxyUrl;
+      proxyDraft = "";
+      proxyMsg = r.proxyUrl ? `all traffic now routes through ${r.proxyUrl}` : "proxy cleared — direct connections";
+    } catch (e) {
+      proxyMsg = String(e);
+    }
+  }
+
+  async function clearProxy() {
+    proxyDraft = "";
+    await saveProxy();
+  }
 
   async function saveSite(site: string, patch: { enabled?: boolean; rateMs?: number; cookie?: string }) {
     note = null;
@@ -49,6 +78,32 @@
 
 {#if note}
   <p class="report-inline">{note}</p>
+{/if}
+
+<div class="field-label">
+  Proxy <span class="hint">— route every fetch through one address (stored in the vault, not this machine)</span>
+</div>
+<div class="row">
+  <input
+    type="text"
+    class="proxy-input"
+    placeholder={proxyUrl ?? "e.g. socks5://127.0.0.1:9150 (Tor Browser) or http://127.0.0.1:7890"}
+    bind:value={proxyDraft}
+    onkeydown={(e) => e.key === "Enter" && saveProxy()}
+  />
+  <button onclick={saveProxy}>{proxyUrl ? "Replace" : "Set proxy"}</button>
+  {#if proxyUrl}
+    <button class="ghost" onclick={clearProxy}>Clear</button>
+  {/if}
+</div>
+{#if proxyUrl}
+  <p class="hint">active: <code>{proxyUrl}</code> — clip, enrich, update checks, match search and video downloads all use it.</p>
+{:else}
+  <p class="hint">No proxy: connections go direct. With the Tor Browser running, <code>socks5://127.0.0.1:9150</code>
+    puts all enrichment traffic through Tor; nothing is ever sent anywhere except the sites you track.</p>
+{/if}
+{#if proxyMsg}
+  <p class="report-inline">{proxyMsg}</p>
 {/if}
 
 {#if counts.length > 0}

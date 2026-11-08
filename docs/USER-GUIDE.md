@@ -229,6 +229,15 @@ fetch.
 - **Sources** (tab): turn each site on or off, set how polite it should be (ms
   between requests), paste a **cookie** for sites that need a login (e-hentai,
   f95 threads), and see how many items each site currently accounts for.
+- **Proxy** (top of the Sources tab): route *every* outbound request — clip
+  fetches, enrich, update checks, match search, video downloads — through one
+  proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.
+  With the Tor Browser running, `socks5://127.0.0.1:9150` hides which
+  adult sites this machine visits; the setting is stored inside the encrypted
+  vault (so it follows the USB drive, never this PC) and is validated before
+  saving — a typo is refused, not silently trusted. **Clear** goes back to
+  direct connections. The app never talks to anything except the sites you
+  track; a proxy just changes *how* it reaches them.
   Repack mirrors are off by default — they are re-uploads of DLsite works, and
   their links fold into the original through *Possible dupes* rather than
   staying separate entries.

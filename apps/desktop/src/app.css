@@ -542,6 +542,11 @@ textarea:focus {
   min-width: 0;
 }
 
+.proxy-input {
+  flex: 1;
+  min-width: 0;
+}
+
 .update-row {
   justify-content: space-between;
 }

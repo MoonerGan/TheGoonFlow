@@ -274,6 +274,13 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   importer tries a first-frame tile for every `+ Video` import, editor has the
   opt-in Store/Remove block. `tools\smoke-release.ps1` now smoke-tests the
   release exe's companion handshake automatically.
+- **#24 (proxy / Tor) landed next (M5 pulled forward)** — all traffic now
+  builds through `http::client_for` (bookmarks, clip, enrich, updates, match
+  search, video download); vault `meta.proxy_url` (no schema bump) is read
+  per-build, `set_proxy` validates schemes (http/https/socks4/socks5/socks5h),
+  reqwest's `socks` feature makes `socks5://127.0.0.1:9150` work with Tor
+  Browser. Sources panel has the Proxy block. A wiring test with a local stub
+  proxy proves the route without needing network.
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

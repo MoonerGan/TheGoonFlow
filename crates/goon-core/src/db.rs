@@ -185,6 +185,26 @@ pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
     )
 }
 
+// ---------- generic vault meta KV (#24: proxy_url lives here) ----------
+
+pub fn get_meta(conn: &Connection, key: &str) -> Option<String> {
+    conn.query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| r.get(0))
+        .ok()
+        .filter(|v: &String| !v.is_empty())
+}
+
+pub fn set_meta(conn: &Connection, key: &str, value: Option<&str>) -> rusqlite::Result<()> {
+    match value {
+        Some(v) => conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, v],
+        )?,
+        None => conn.execute("DELETE FROM meta WHERE key = ?1", params![key])?,
+    };
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub struct StatusCount {
     pub status: &'static str,
@@ -1251,6 +1271,18 @@ mod tests {
         assert_eq!(sugg.len(), 1);
         // the games panel must not offer media pairs
         assert!(pairing_suggestions(&conn, Some("game")).unwrap().is_empty());
+    }
+
+    /// #24: the vault meta KV round-trips and stores "empty = absent".
+    #[test]
+    fn meta_kv_roundtrip() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        assert_eq!(get_meta(&conn, "proxy_url"), None);
+        set_meta(&conn, "proxy_url", Some("socks5://127.0.0.1:9150")).unwrap();
+        assert_eq!(get_meta(&conn, "proxy_url").as_deref(), Some("socks5://127.0.0.1:9150"));
+        set_meta(&conn, "proxy_url", None).unwrap();
+        assert_eq!(get_meta(&conn, "proxy_url"), None);
     }
 
     /// #14: suggestion rows survive re-inserts, delete individually, and

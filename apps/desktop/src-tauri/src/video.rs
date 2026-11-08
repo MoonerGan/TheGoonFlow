@@ -125,11 +125,7 @@ pub async fn store_video(
         if !state.queue.reserve(&site, rate, || job.cancelled()).await {
             return Err("stopped".into());
         }
-        let client = reqwest::Client::builder()
-            .user_agent(ingest::UA)
-            .timeout(std::time::Duration::from_secs(600))
-            .build()
-            .map_err(crate::err)?;
+        let client = crate::http::client_for(state, 600)?;
         let resp = client
             .get(&url)
             .header(reqwest::header::REFERER, format!("https://{site}"))

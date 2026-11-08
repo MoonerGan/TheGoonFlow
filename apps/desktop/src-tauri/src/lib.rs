@@ -2,6 +2,7 @@ mod bookmarks;
 mod companion;
 mod importer;
 mod ingest;
+mod http;
 mod jobs;
 mod launcher;
 mod queue;
@@ -659,6 +660,39 @@ fn remove_stored_video(state: tauri::State<'_, AppState>, item_id: String) -> Re
     video::remove_stored_video(&state, &item_id)
 }
 
+// ---------- proxy / Tor (#24) ----------
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProxySettings {
+    proxy_url: Option<String>,
+}
+
+#[tauri::command]
+fn get_proxy(state: tauri::State<'_, AppState>) -> Result<ProxySettings, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    Ok(ProxySettings {
+        proxy_url: goon_core::db::get_meta(&opened.conn, "proxy_url"),
+    })
+}
+
+/// Store (or clear with None) the proxy for every networked path.
+/// Validated before saving so a typo can't silently disable enrichment.
+#[tauri::command]
+fn set_proxy(state: tauri::State<'_, AppState>, url: Option<String>) -> Result<ProxySettings, String> {
+    let trimmed = url.map(|u| u.trim().to_string()).filter(|u| !u.is_empty());
+    if let Some(u) = &trimmed {
+        http::validate_proxy(u)?;
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    goon_core::db::set_meta(&opened.conn, "proxy_url", trimmed.as_deref()).map_err(err)?;
+    Ok(ProxySettings {
+        proxy_url: goon_core::db::get_meta(&opened.conn, "proxy_url"),
+    })
+}
+
 // ---------- import (D13) — every import runs as a job ----------
 // Async so Tauri runs them off the main thread: a 3000-link bookmark import
 // must never freeze the window or block other commands.
@@ -974,6 +1008,8 @@ pub fn run() {
             video_info,
             store_video,
             remove_stored_video,
+            get_proxy,
+            set_proxy,
             list_jobs,
             cancel_job
         ])

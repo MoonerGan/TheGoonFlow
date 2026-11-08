@@ -355,6 +355,12 @@ export const storeVideo = (itemId: string) => invoke<VideoStoreReport>("store_vi
 export const removeStoredVideo = (itemId: string) =>
   invoke<void>("remove_stored_video", { itemId });
 
+// ---------- proxy / Tor (#24) ----------
+export type ProxySettings = { proxyUrl: string | null };
+export const getProxy = () => invoke<ProxySettings>("get_proxy");
+export const setProxy = (url: string | null) =>
+  invoke<ProxySettings>("set_proxy", { url });
+
 // ---------- activity (jobs) ----------
 export const listJobs = () => invoke<JobInfo[]>("list_jobs");
 export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });
