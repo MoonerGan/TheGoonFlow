@@ -362,7 +362,14 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   *physical* Ctrl+Alt state (`GetAsyncKeyState`) at the 3 s mark — a
   dropped release event can never nuke by itself — and the repeat guard
   is physical-aware too, so a lost release can't wedge the tap path.
-  This closes the code side of #23;
+  Plus `panic_gen`: every hold episode bumps a generation counter and a
+  watcher escalates only if it still owns the *live* episode at its
+  deadline — otherwise a stale watcher from an old quick tap could erase
+  1 s into a fresh hold that straddles the old deadline. All three panic
+  paths now have committed live checks: `panic-tap-test.ps1`,
+  `panic-hold-test.ps1`, `panic-stale-test.ps1` (the last two refuse to
+  run if a vault is attached beside the exe). This closes the code side
+  of #23;
   the issue waits on your manual hotkey pass (tap, hold-on-drill-notes,
   custom key, scrub-on-lock) before Done.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built

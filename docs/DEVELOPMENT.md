@@ -245,7 +245,10 @@ tools/
     *re-verify the physical key state* at the deadline (`GetAsyncKeyState`
     on the modifiers): global-hotkey synthesizes Windows Release events
     from a poll thread, so a dropped Release must never nuke by itself.
-    `tools\panic-tap-test.ps1` proves the tap live against the release exe.
+    Every episode bumps `panic_gen` and a watcher escalates only while it
+    still owns the live generation — stale watchers cannot fire.
+    `tools\panic-tap-test.ps1` / `panic-hold-test.ps1` / `panic-stale-test.ps1`
+    prove the tap, hold and stale-watcher paths live against the release exe.
     The drill (`run_nuke_drill`) goes through `goon_vault::nuke` — the real
     path, not a mock — so a green drill means the real nuke works.
 
