@@ -38,12 +38,19 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
   running import, clip or update check is cancelled first — nothing keeps
   fetching or writing after you lock. Reopen with the passphrase.
 - **Panic key** (global hotkey, works from any other app): `Ctrl+Alt+L` by
-  default — one press does a Lock *and* hides the window entirely; press
-  again to bring the locked window back. Under *Sources* you can store a
-  custom key with the vault (it follows the drive, not the machine). The
-  same Sources block has a **crypto-erase drill**: builds a throwaway vault
-  and nukes it through the real nuke path, so you can verify the nuke
-  actually destroys everything without gambling your real vault.
+  default — a short press does a Lock *and* hides the window entirely; press
+  again to bring the locked window back. **Hold the key down for 3 seconds
+  and it escalates to a full crypto-erase** of the attached vault — exactly
+  what typing `NUKE` does, but with no confirmation possible, because in a
+  real panic there is no time to type. The window hides the moment the erase
+  starts. Learn the difference with the **crypto-erase drill** below, and
+  rehearse the tap — deliberately do this on the real vault only when you
+  mean it.
+- Under *Sources* you can store a custom panic key with the vault (it follows
+  the drive, not the machine). The same Sources block has the
+  **crypto-erase drill**: builds a throwaway vault and nukes it through the
+  real nuke path, so you can verify the nuke actually destroys everything
+  without gambling your real vault.
 - **Nuke** (bottom of the lock screen, and on the setup/reconnect screens):
   crypto-erase. Every running import/fetch is cancelled first, then the key is
   shredded, then every vault file is

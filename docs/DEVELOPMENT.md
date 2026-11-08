@@ -232,12 +232,16 @@ tools/
     recorded on the row, mid-run failures roll back, `revert` restores, and
     an applied row can't be deleted until reverted. It lives in the same
     `mods` table (v7 columns) — no forked state.
-18. **One lock path, armed before anything else (#23).** The panic hotkey
-    handler calls `lock_core` — the exact Lock-button path (cancel jobs →
-    clear lanes → drop conn+key → locked=true). The default key is
-    registered right after the app is built, before vault/network code can
-    fail; a stored custom key is added on unlock, validated by parsing
-    before it is ever saved, and the default always stays armed. The drill
+18. **One lock path, one nuke path, armed before anything else (#23).** The
+    panic hotkey handler calls `lock_core` — the exact Lock-button path
+    (cancel jobs → clear lanes → drop conn+key → locked=true). The default
+    key is registered right after the app is built, before vault/network code
+    can fail; a stored custom key is added on unlock, validated by parsing
+    before it is ever saved, and the default always stays armed. Hold ≥
+    `PANIC_HOLD_MS` escalates via `nuke_core` — the same function the typed
+    NUKE command uses, never a re-implementation — then scrubs and hides.
+    Tap vs hold is a press/release state machine (`panic_hold` + `nuked`
+    flags, OS auto-repeat must not fork a second episode). The drill
     (`run_nuke_drill`) goes through `goon_vault::nuke` — the real path, not
     a mock — so a green drill means the real nuke works.
 

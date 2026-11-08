@@ -348,6 +348,16 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   press run the scrub automatically. Sources panel gained the Scrubber
   block (run + toggle + honest report line). Test proves only the
   thumbcache files die (80 green).
+- **#23 increment 3 (hold-3s crypto-erase)** — the hotkey is now a
+  press/release state machine: a tap behaves as before (lock+hide /
+  reveal), but *holding* `PANIC_HOLD_MS` (3 s) fires `nuke_core` — the
+  exact function the typed-NUKE command shares — then scrubs and hides
+  the window mid-erase. OS auto-repeat can't fork a second episode
+  (`panic_hold` flag), and the matching release after an erase is inert
+  (`nuked` flag). UI + USER-GUIDE say the quiet part loudly: rehearse
+  taps, never hold on the real vault. This closes the code side of #23;
+  the issue waits on your manual hotkey pass (tap, hold-on-drill-notes,
+  custom key, scrub-on-lock) before Done.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built
   after #25) runs everything below; existing `C:\GoonFlow` vaults migrate
   v3→v7 on unlock (idempotent, in place). Manual checklist for the In-review

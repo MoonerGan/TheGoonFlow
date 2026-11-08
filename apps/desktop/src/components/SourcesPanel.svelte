@@ -211,7 +211,10 @@
 </div>
 <p class="hint">
   Right now: <strong>{panic?.hotkey ?? "CommandOrControl+Alt+L"}</strong> (works even when this window
-  isn't focused). Press again to bring back the <em>locked</em> window — your passphrase still guards it.
+  isn't focused). A short press locks the vault and hides the window — press again to bring the
+  <em>locked</em> window back, your passphrase still guards it.
+  <strong>Hold it down for 3+ seconds and the vault is crypto-erased</strong> — the same destruction as
+  typing NUKE, with no confirmation dialog. Rehearse taps; never hold on the real vault.
 </p>
 <div class="row">
   <input

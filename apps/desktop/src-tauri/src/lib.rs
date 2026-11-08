@@ -72,6 +72,11 @@ pub struct AppState {
     locked: Arc<AtomicBool>,
     /// #23: the panic hotkey hid the window (only the hotkey brings it back).
     hidden: Arc<AtomicBool>,
+    /// #23: true while the panic key is physically held down; a watcher
+    /// thread escalates to crypto-erase after PANIC_HOLD_MS.
+    panic_hold: Arc<AtomicBool>,
+    /// #23: set when a hold-erase fired, so the matching release does nothing
+    nuked: Arc<AtomicBool>,
 }
 
 impl std::ops::Deref for AppState {
@@ -308,12 +313,49 @@ fn set_scrub_on_lock(
 /// Registered at every launch; a vault may add its own key on unlock.
 pub const DEFAULT_PANIC_HOTKEY: &str = "CommandOrControl+Alt+L";
 
-/// Global hotkey handler: first press = panic (lock + hide the window),
-/// press again = show the (locked) window again. Nothing decrypts by
-/// itself — the unlock passphrase is still required.
-fn toggle_panic(app: &tauri::AppHandle) {
+/// Hold this long and the vault is crypto-erased (PLAN §4 escalation).
+pub const PANIC_HOLD_MS: u64 = 3000;
+
+/// Global hotkey state machine.
+/// - press (and the OS auto-repeat while held) starts/keeps one hold episode
+/// - release before 3 s = tap: Lock + hide (press again to reveal the
+///   locked window)
+/// - release after 3 s: the erase already ran; release does nothing
+fn panic_event(app: &tauri::AppHandle, pressed: bool) {
     use tauri::Manager;
     let state = app.state::<AppState>();
+    if pressed {
+        if state.panic_hold.load(Ordering::SeqCst) {
+            return; // auto-repeat while held: keep the original episode
+        }
+        state.panic_hold.store(true, Ordering::SeqCst);
+        let app2 = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(PANIC_HOLD_MS));
+            let st = app2.state::<AppState>();
+            if st.panic_hold.load(Ordering::SeqCst) {
+                st.nuked.store(true, Ordering::SeqCst);
+                // hold 3 s = crypto-erase, exactly the typed-NUKE path,
+                // then scrub and hide like every panic does
+                let _ = nuke_core(&st, None);
+                do_scrub(&app2);
+                if let Some(w) = app2.get_webview_window("main") {
+                    let _ = w.hide();
+                }
+                st.hidden.store(true, Ordering::SeqCst);
+            }
+        });
+        return;
+    }
+
+    // release
+    if state.nuked.swap(false, Ordering::SeqCst) {
+        state.panic_hold.store(false, Ordering::SeqCst);
+        return; // already erased mid-hold; nothing left to do
+    }
+    state.panic_hold.store(false, Ordering::SeqCst);
+
+    // tap behavior
     let win = app.get_webview_window("main");
     if state.hidden.load(Ordering::SeqCst) {
         if let Some(w) = win {
@@ -454,6 +496,12 @@ fn nuke_vault(
     if confirm != "NUKE" {
         return Err("type NUKE exactly to confirm".into());
     }
+    nuke_core(&state, dir)
+}
+
+/// The irreversibility lives exactly once here — the typed-NUKE flow and the
+/// hold-3-seconds panic flow share it, so both really destroy everything.
+fn nuke_core(state: &AppState, dir: Option<String>) -> Result<(), String> {
     // Stop every job first: nothing should be fetching or writing while the
     // files are being shredded, and no loop may re-open anything afterwards.
     state.jobs.cancel_all();
@@ -1513,6 +1561,8 @@ pub fn run() {
         companion,
         locked,
         hidden: Arc::new(AtomicBool::new(false)),
+        panic_hold: Arc::new(AtomicBool::new(false)),
+        nuked: Arc::new(AtomicBool::new(false)),
     };
 
     let app = tauri::Builder::default()
@@ -1520,9 +1570,9 @@ pub fn run() {
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, _shortcut, event| {
-                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        toggle_panic(app);
-                    }
+                    let pressed =
+                        event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed;
+                    panic_event(app, pressed);
                 })
                 .build(),
         )
@@ -1669,6 +1719,8 @@ mod integration_tests {
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
             hidden: Arc::new(AtomicBool::new(false)),
+            panic_hold: Arc::new(AtomicBool::new(false)),
+            nuked: Arc::new(AtomicBool::new(false)),
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();
