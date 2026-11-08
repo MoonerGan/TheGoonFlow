@@ -213,15 +213,29 @@ scanning by hand. Imported items stick even if their online art failed to
 fetch.
 
 ### Browser extension (GoonFlow Clip)
-Clip without leaving the page. In Chrome/Edge open `chrome://extensions` →
-**Developer mode** → **Load unpacked** → pick the `extensions/goonflow-clip`
-folder that ships with the app (Firefox: `about:debugging` → *Load Temporary
-Add-on* → that `manifest.json`).
+Clip without leaving the page. Two builds ship with the app, because Chrome and
+Firefox are not the same animal here:
 
-Then **pair once per app launch**: the app listens on a random local port with
-a fresh token each start, so open **Sources → Browser pairing**, *Copy port*
-and *Copy token*, and paste both into the extension's options page (right-click
-its icon → *Extension options*) and press **Test connection**.
+- **Chrome / Edge** (`extensions/goonflow-clip`): `chrome://extensions` →
+  **Developer mode** → **Load unpacked** → pick that folder.
+- **Firefox** (`extensions/goonflow-clip-firefox`): **use this one, not the
+  Chrome folder.** MV3 extensions run their background from a *service worker*,
+  and Firefox disables service workers by default on hardened profiles
+  (`dom.serviceWorkers.enabled=false`), which kills the Chrome build before it
+  starts — and it does that for **every** install, temporarily loaded or
+  permanently signed. `about:add-ons` → gear icon (top right) → **Load Temporary
+  Add-on…** → pick that folder's `manifest.json`. Temporary add-ons are dropped
+  when Firefox restarts, so re-load after each restart (or have the add-on
+  signed for a permanent install). If you edit the extension's files, *remove*
+  it and load it again — Firefox does not reload a manifest on the fly.
+
+**Click the toolbar icon** — that's the whole UI: it shows whether the app is
+reachable and whether the vault is locked, and **Clip this page** is one button.
+**Pairing / options** in that popup opens the pairing form. Pair once per app
+launch: the app listens on a random local port with a fresh token each start, so
+open **Sources → Browser pairing**, *Copy port* and *Copy token*, paste both in,
+and press **Test connection**. The popup then tells you what it found instead of
+you guessing.
 
 Right-click any **link, image, page, or selected URL** → *Clip … to GoonFlow*.
 It travels the exact same pipeline as *+ Clip URL*: classified, politely
@@ -238,14 +252,21 @@ app reaches the content sites (and through your proxy if you set one).
 - **Media viewer**: the real image from the encrypted vault (full-res when it
   was stored), not a re-download. Navigate with **← / →** through the current
   grid (including filters), **zoom** with `+`/`-`/`0` or the buttons, hit
-  **space** for a **slideshow** (4s per item, wraps), `i` opens the item's
+  **space** for a **slideshow** (4s per item, wraps), `f` (or the ⛶ button) for
+  **fullscreen** — the image fills the window, chrome hidden, `Esc` or `f` back
+  out — `i` opens the item's
   editor, **Esc** closes. Stored videos play inline (very large ones show the
   poster instead); link-only videos show their first-frame poster with a hint.
+  The picture you are looking at stays put while the next one loads in the
+  background; importing something else never re-flickers the current frame.
 - **Search box** (both views): matches title/circle as you type — the quick
   way to confirm something actually landed.
 - **Select… mode** (both views): click cards to tick them, *Select all* /
   *Done* in the toolbar, then **Delete selected** removes the whole batch in
-  one confirmed step. Great after a messy import.
+  one confirmed step, or **Re-fetch metadata** re-visits every source of every
+  selected item as one cancellable job (progress + current item in the activity
+  strip, Stop works, locking the vault stops it too). Great after a messy
+  import.
 - **Editor (games):** title, circle/developer, version, pipeline **status**
   (`seen / tracking / wishlist / downloaded / played`), and the **✓ Complete**
   personal marker (green chip — it means *"I finished this"*, independent of
@@ -262,11 +283,21 @@ app reaches the content sites (and through your proxy if you set one).
   game at any folder already on disk. The game keeps running if you close the
   app.
 - **Mods & tools (game editor):** register the helper tools you already use —
-  **MTool** (started with the game's exe passed to it, exactly today's
-  inject flow), **Cheat Engine** (started; you attach inside it), or any
-  patcher with saved arguments (`{game}` expands to the game's exe). Each row
-  gets a ▶ button. These are *launch recipes only*: the app never injects,
-  wraps or patches anything itself.
+  **MTool**, **Cheat Engine** (started; you attach inside it), or any patcher
+  with saved arguments (`{game}` expands to the game's exe). Each row gets a ▶
+  button. These are *launch recipes only*: the app never injects, wraps or
+  patches anything itself, and it never writes into another tool's own files.
+  - **MTool builds differ**, and the recipe follows the build rather than
+    pretending otherwise. Older native builds take the game's exe as an
+    argument, so that's what they get. The current **NW.js MToolClient** builds
+    (0.6x: `nw.dll` + `package.json` next to `MTool.exe`) have **no
+    command-line target at all** — their game list is drag-and-drop — so
+    passing an argument would just do nothing. For those the app (1) uses the
+    **game's own MTool launcher** if the repack ships one (`StartWithTool.bat`,
+    `MTool_Game.exe`, `launchGameWithMTool…`), which is the flow that actually
+    starts the game under the tool; otherwise (2) it opens MTool and puts the
+    game's exe path **on your clipboard** so you can drop it in, and says so in
+    the message under the mod list.
   - **DLL / patch mods** go one step further: add a mod kind of *DLL / patch
     mod* pointing at its **zip, single .dll, or an unpacked folder**, then
     **Apply** deploys the files into the game folder — every file it replaces
@@ -294,6 +325,12 @@ app reaches the content sites (and through your proxy if you set one).
   to unfilter.
 - **From site** (Media sidebar): filter by where the item came from — booru,
   e-hentai, `local` for your own files — with live counts.
+- **Sources** (sidebar, both views): the *fix-my-metadata* queues, with counts —
+  **Local only** (a folder/file and no online link yet: add the DLsite/f95 page
+  or the post link, then Re-fetch), **No local file** (games whose folder is
+  gone or was never linked) and **No tags** (bare imports and unresolved file
+  links). Click one to filter the grid to exactly that queue; it stacks with
+  search, tag and site filters, and **Everything** / *clear* drops it again.
 - **Updates** (Games view): re-visits the DLsite pages and f95 threads of games
   you track and records version changes. A game marked Complete still surfaces
   here — completion is a tag, not a full stop.
@@ -302,6 +339,12 @@ app reaches the content sites (and through your proxy if you set one).
   the **exact same image bytes** (reposted across boorus, imported twice) show
   up here. Nothing merges itself; you pick which entry to keep and the other's
   sources/tags/art are folded into it.
+  - Each row labels the two entries **1** and **2** and prints that entry's own
+    **sites and source links/paths** underneath, so a folder import and a web
+    link with the same title are tellable apart.
+  - **Keep 1 / Keep 2** merge. **Keep both** means *"not a dupe — stop showing
+    me this pair"*: the dismissal is stored in the vault and survives restarts
+    and re-imports (nothing is deleted, both entries stay exactly as they are).
 - **Online matches** (Games view): games you imported from a folder are matched
   *by title* against DLsite's and f95zone's own search (version/engine brackets
   like `[v0.12] [renpy]` are stripped first). Only confident hits (≥60%) are
@@ -309,9 +352,23 @@ app reaches the content sites (and through your proxy if you set one).
   that page as a source and pulls its cover/title/version; **Dismiss** throws
   the proposal away. Nothing ever links itself. f95 search runs only with your
   saved f95 cookie (Sources tab); without it, DLsite matching still works.
-- **Sources** (tab): turn each site on or off, set how polite it should be (ms
-  between requests), paste a **cookie** for sites that need a login (e-hentai,
-  f95 threads), and see how many items each site currently accounts for.
+- **Sources** (tab): grouped, top to bottom — *Network* (proxy), *Panic &
+  privacy* (panic key, crypto-erase drill, scrubber, decoy title), *Game sites*,
+  *Repack mirrors*, *Imageboards and galleries*, *Local files*, *Browser
+  pairing*, and a *Getting a cookie* how-to. Per site: turn it on or off, set how
+  polite it should be (ms between requests), paste a **cookie** for sites that
+  need a login, and see how many items each site currently accounts for. The
+  rate box starts at that site's own default (e-hentai's ~10 s, boorus' 1–2 s),
+  and enabling a site for the first time keeps that default instead of resetting
+  it to one shared number.
+  - **Getting a cookie** (f95 threads, E-hentai/Exhentai): log in in your
+    browser, press **F12** → **Network** → reload → click the first request →
+    under *Request Headers* copy everything after `Cookie:` (one long line, no
+    quotes) and paste it into that site's box. The app keeps it inside the
+    encrypted vault, never in a plain config file, and it never reads your
+    browser's own cookie store — this is a copy you chose to hand over. When a
+    session goes stale the fetch says so out loud (e.g. *"f95 wants a login —
+    set its cookie under Sources"*) rather than importing nothing quietly.
 - **Proxy** (top of the Sources tab): route *every* outbound request — clip
   fetches, enrich, update checks, match search, video downloads — through one
   proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.
@@ -355,5 +412,9 @@ app reaches the content sites (and through your proxy if you set one).
 | Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
 | Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |
 | Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. Direct file links like `wimg.rule34.xxx/images/….jpeg?12345` now resolve through the site's API — old items imported before that fix can be repaired with **Re-fetch metadata** in the item editor. |
+| Clip stored the picture but no tags/source | The link pointed straight at a file with **no post id anywhere in it** (`img3.gelbooru.com/images/2b/34/….jpg`). The image is stored anyway and the item says *"no post could be identified"*. Where the site can look a file up by hash, the app matches it back to its post — but only when the post's md5 **and** file size both match the bytes it downloaded, so it never guesses a wrong post. Fix the rest by hand: open the item, paste the real post page into **Sources**, then **Re-fetch metadata**. Find these in bulk under **Sources → No tags** in the sidebar. |
+| ▶ next to MTool started the tool but the game did not open | Recent MTool builds (NW.js `MToolClient`) accept **no** game on the command line — their list is drag-and-drop, so nothing was ever going to start. The app now uses the game's own `StartWithTool.bat` / `MTool_Game.exe` when the repack ships one, otherwise it opens MTool and puts the game's exe path **on your clipboard** for you to drop in (the message under the mod list says which happened and shows the path). |
+| Extension icon does nothing / only *Pin · Manage* | Out of date load: remove the add-on and load it again (temporary Firefox add-ons never pick up manifest changes on their own). The Chrome folder also cannot work in Firefox — use `extensions/goonflow-clip-firefox`. The popup says what it sees: *Nothing on port N* = the app isn't running or its port changed (re-copy port + token), *vault is LOCKED* = unlock it first. |
+| A *Possible dupes* pair is not actually a dupe | **Keep both**. It records a dismissal in the vault (both entries stay untouched) and that pair never comes back. |
 | An old item shows site "i" or "wimg" | Fixed automatically: on the next unlock, a schema (v3) migration renames those mislabeled sources to their real site (`4chan`, `rule34`, …). |
 | White/blank window at launch | WebView2 runtime missing — install "Microsoft Edge WebView2 Runtime". |

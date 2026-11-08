@@ -27,6 +27,16 @@ cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
 stderr progress into `NativeCommandError` records — cargo works, but the log
 capture gets noisy/abort-prone without the redirection wrapper.
 
+**Never round-trip source files through PowerShell 5 text cmdlets.** The system
+ANSI codepage here is Shift_JIS, so `Get-Content -Raw` (no `-Encoding`) decodes
+BOM-less UTF-8 as Shift_JIS and `Set-Content`/`WriteAllText` writes the mojibake
+back — `—` becomes `窶・`, an em dash at end of line even swallows the newline.
+Source edits go through the editor; if a scripted rewrite is unavoidable, use
+`[System.IO.File]::ReadAllText($f, [Text.Encoding]::UTF8)`. Damage is repaired
+with `node tools/restore-nonascii.js <path>` (aligns each damaged line to its
+HEAD version and takes HEAD's exact bytes), and `node tools/char-audit.js
+<path>...` reports any remaining unexpected code points.
+
 First full build compiles vendored OpenSSL + SQLCipher amalgamation + Tauri —
 expect several minutes. Incremental afterwards is fast.
 
@@ -257,6 +267,21 @@ tools/
     read while locked (dressing the *locked* window is the point), so it must
     never gain anything but a display title. Renaming the exe/folder must
     keep working: everything resolves relative to `exe_dir`.
+20. **A launch recipe may only use an interface the tool really has (#33).**
+    Probe, don't assume: NW.js `MToolClient` builds ship `nw.dll` +
+    `package.json` next to `MTool.exe` and have no `argv` handling, so passing
+    the game as an argument is a promise that cannot be kept. The recipe layer
+    is therefore *game-side launcher → (NW.js) open tool + clipboard hand-off →
+    native builds get the argument*, and the note says which branch ran. The
+    app never writes into a third-party tool's own state (`gameLib/*.gljson`)
+    to fake a capability: reverse-engineered side files break on the tool's
+    next update and hide the real workflow from the user.
+21. **Never resolve identity from a hash you cannot verify (#39).** A
+    file-link → post upgrade is accepted only when the site's answer carries
+    the same md5 *and* the same byte size as what was downloaded. Anything
+    less stays "stored as-is, no post could be identified", which the user can
+    see and fix — a confidently wrong source link is worse than an admitted
+    empty one.
 
 ## 5. Testing
 
