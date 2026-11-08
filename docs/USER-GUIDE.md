@@ -37,6 +37,13 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 - **Lock** (top-bar) closes the database and wipes the key from memory. Any
   running import, clip or update check is cancelled first — nothing keeps
   fetching or writing after you lock. Reopen with the passphrase.
+- **Panic key** (global hotkey, works from any other app): `Ctrl+Alt+L` by
+  default — one press does a Lock *and* hides the window entirely; press
+  again to bring the locked window back. Under *Sources* you can store a
+  custom key with the vault (it follows the drive, not the machine). The
+  same Sources block has a **crypto-erase drill**: builds a throwaway vault
+  and nukes it through the real nuke path, so you can verify the nuke
+  actually destroys everything without gambling your real vault.
 - **Nuke** (bottom of the lock screen, and on the setup/reconnect screens):
   crypto-erase. Every running import/fetch is cancelled first, then the key is
   shredded, then every vault file is

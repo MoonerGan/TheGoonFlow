@@ -70,6 +70,8 @@ pub struct AppState {
     exe_dir: PathBuf,
     companion: Option<companion::CompanionInfo>,
     locked: Arc<AtomicBool>,
+    /// #23: the panic hotkey hid the window (only the hotkey brings it back).
+    hidden: Arc<AtomicBool>,
 }
 
 impl std::ops::Deref for AppState {
@@ -174,24 +176,173 @@ fn attach_vault(state: tauri::State<'_, AppState>, dir: String) -> Result<(), St
 }
 
 #[tauri::command]
-fn unlock(state: tauri::State<'_, AppState>, passphrase: String) -> Result<(), String> {
+fn unlock(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    passphrase: String,
+) -> Result<(), String> {
     let mut inner = state.inner.lock().unwrap();
     let root = inner.vault_root.clone().ok_or("no vault folder attached")?;
     let key = goon_vault::open_keyfile(&root, &passphrase).map_err(err)?;
     let conn = goon_vault::open_db(&root, &key).map_err(err)?;
     goon_core::db::init_schema(&conn).map_err(err)?;
+    // #23: this vault may carry its own panic key next to the default.
+    let stored = goon_core::db::get_meta(&conn, "panic_hotkey");
     inner.opened = Some(OpenedVault { conn, _key: key });
     state.locked.store(false, Ordering::SeqCst);
+    drop(inner);
+    register_panic_keys(&app, stored.as_deref());
     Ok(())
 }
 
 #[tauri::command]
 fn lock(state: tauri::State<'_, AppState>) {
-    state.jobs.cancel_all(); // imports/fetches must stop, not just hide
-    state.queue.clear();     // drop lane timing history too
-    let mut inner = state.inner.lock().unwrap();
+    lock_core(&state.core, &state.locked);
+}
+
+/// The lock half of #23 lives here so the panic hotkey and the Lock button
+/// do exactly the same thing: every job stops, the vault closes, the data
+/// key is zeroized.
+fn lock_core(core: &Core, locked: &AtomicBool) {
+    core.jobs.cancel_all(); // imports/fetches must stop, not just hide
+    core.queue.clear();     // drop lane timing history too
+    let mut inner = core.inner.lock().unwrap();
     inner.opened = None; // drops conn (checkpoint) + zeroizes data key
-    state.locked.store(true, Ordering::SeqCst);
+    locked.store(true, Ordering::SeqCst);
+}
+
+// ---------- panic hotkey (#23) ----------
+
+/// Registered at every launch; a vault may add its own key on unlock.
+pub const DEFAULT_PANIC_HOTKEY: &str = "CommandOrControl+Alt+L";
+
+/// Global hotkey handler: first press = panic (lock + hide the window),
+/// press again = show the (locked) window again. Nothing decrypts by
+/// itself — the unlock passphrase is still required.
+fn toggle_panic(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    let state = app.state::<AppState>();
+    let win = app.get_webview_window("main");
+    if state.hidden.load(Ordering::SeqCst) {
+        if let Some(w) = win {
+            let _ = w.show();
+            let _ = w.set_focus();
+        }
+        state.hidden.store(false, Ordering::SeqCst);
+    } else {
+        lock_core(&state.core, &state.locked);
+        if let Some(w) = win {
+            let _ = w.hide();
+        }
+        state.hidden.store(true, Ordering::SeqCst);
+    }
+}
+
+fn register_panic_keys(app: &tauri::AppHandle, extra: Option<&str>) {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    let _ = app.global_shortcut().unregister_all();
+    if let Err(e) = app.global_shortcut().register(DEFAULT_PANIC_HOTKEY) {
+        eprintln!("panic hotkey {DEFAULT_PANIC_HOTKEY} unavailable: {e}");
+    }
+    if let Some(hk) = extra.filter(|h| *h != DEFAULT_PANIC_HOTKEY) {
+        if let Err(e) = app.global_shortcut().register(hk) {
+            eprintln!("stored panic hotkey {hk} unavailable: {e}");
+        }
+    }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PanicInfo {
+    /// the key that works right now (stored one, else the default)
+    hotkey: String,
+    /// what the vault has stored (None = using the default)
+    stored: Option<String>,
+    /// when the last successful crypto-erase drill ran
+    last_drill: Option<String>,
+}
+
+#[tauri::command]
+fn panic_info(state: tauri::State<'_, AppState>) -> Result<PanicInfo, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let stored = goon_core::db::get_meta(&opened.conn, "panic_hotkey");
+    Ok(PanicInfo {
+        hotkey: stored.clone().unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
+        stored,
+        last_drill: goon_core::db::get_meta(&opened.conn, "nuke_last_drill"),
+    })
+}
+
+/// Store a custom panic key in the vault (None = back to the default) and
+/// re-register. Validated by parsing first — a typo must not silently
+/// unarm the panic path.
+#[tauri::command]
+fn set_panic_hotkey(
+    state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
+    hotkey: Option<String>,
+) -> Result<PanicInfo, String> {
+    let hk = hotkey
+        .map(|h| h.trim().to_string())
+        .filter(|h| !h.is_empty() && h != DEFAULT_PANIC_HOTKEY);
+    if let Some(cand) = &hk {
+        cand.parse::<tauri_plugin_global_shortcut::Shortcut>()
+            .map_err(|_| format!("\"{cand}\" is not a hotkey — try e.g. CommandOrControl+Alt+K"))?;
+    }
+    {
+        let mut inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+        goon_core::db::set_meta(&opened.conn, "panic_hotkey", hk.as_deref()).map_err(err)?;
+    }
+    register_panic_keys(&app, hk.as_deref());
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    Ok(PanicInfo {
+        hotkey: hk.clone().unwrap_or_else(|| DEFAULT_PANIC_HOTKEY.into()),
+        stored: hk,
+        last_drill: goon_core::db::get_meta(&opened.conn, "nuke_last_drill"),
+    })
+}
+
+/// Crypto-erase drill: build a throwaway vault, nuke it with the real nuke
+/// path, and verify nothing survives. This is how you *know* the nuke still
+/// works without gambling the real vault.
+fn run_nuke_drill() -> Result<String, String> {
+    let dir = std::env::temp_dir().join(format!("goonflow-drill-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let key = goon_vault::create_keyfile(&dir, "drill").map_err(err)?;
+    {
+        let conn = goon_vault::open_db(&dir, &key).map_err(err)?;
+        goon_core::db::init_schema(&conn).map_err(err)?;
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('drill','game','throwaway','0','0')",
+            [],
+        )
+        .map_err(err)?;
+        // drop conn + key BEFORE shredding (Windows file locks), like nuke_vault
+    }
+    goon_vault::nuke(&dir).map_err(err)?;
+    if dir.exists() {
+        let left: Vec<String> = std::fs::read_dir(&dir)
+            .map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into()).collect())
+            .unwrap_or_default();
+        if !left.is_empty() {
+            return Err(format!("drill FAILED: something survived: {left:?}"));
+        }
+        // empty husk is fine — no bytes to recover; tidy up anyway
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+    Ok("throwaway vault created, then crypto-erased through the real nuke path: key shredded first, DB+WAL overwritten and deleted".into())
+}
+
+#[tauri::command]
+fn nuke_drill(state: tauri::State<'_, AppState>) -> Result<String, String> {
+    let report = run_nuke_drill()?;
+    let mut inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_mut().ok_or("vault is locked")?;
+    goon_core::db::set_meta(&opened.conn, "nuke_last_drill", Some(&crate::now_epoch())).map_err(err)?;
+    Ok(report)
 }
 
 /// Crypto-erase: keyfile shredded first, then every vault file overwritten
@@ -1265,10 +1416,20 @@ pub fn run() {
         exe_dir,
         companion,
         locked,
+        hidden: Arc::new(AtomicBool::new(false)),
     };
 
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(move |app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        toggle_panic(app);
+                    }
+                })
+                .build(),
+        )
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             app_status,
@@ -1332,16 +1493,33 @@ pub fn run() {
             revert_mod,
             get_proxy,
             set_proxy,
+            panic_info,
+            set_panic_hotkey,
+            nuke_drill,
             list_jobs,
             cancel_job
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running The Goon Flow");
+        .build(tauri::generate_context!())
+        .expect("error while building The Goon Flow");
+
+    // Arm the panic key before anything else can go wrong — it must always
+    // be pressable, even if the vault is locked or a source is down.
+    register_panic_keys(&app.handle(), None);
+
+    app.run(|_app, _event| {});
 }
 
 #[cfg(test)]
 mod integration_tests {
     use super::*;
+
+    /// #23: the crypto-erase drill proves the real nuke path on a throwaway
+    /// vault — build it, nuke it, nothing may survive.
+    #[test]
+    fn nuke_drill_leaves_nothing_behind() {
+        let r = run_nuke_drill();
+        assert!(r.is_ok(), "drill failed: {}", r.unwrap_err());
+    }
 
     /// Regression for the M0 field report: nested game folders + the
     /// list_items binding bug made imports look like they stored nothing.
@@ -1373,6 +1551,7 @@ mod integration_tests {
             exe_dir: tmp.clone(),
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
+            hidden: Arc::new(AtomicBool::new(false)),
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();

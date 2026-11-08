@@ -4,13 +4,17 @@
   import { onMount } from "svelte";
   import {
     getProxy,
+    getPanicInfo,
     getStatus,
     getSiteSettings,
     knownSites,
+    nukeDrill,
+    setPanicHotkey,
     setProxy,
     setSiteSetting,
     siteStats,
     type CompanionStatus,
+    type PanicInfo,
     type SiteCount,
     type SiteInfo,
     type SiteSetting,
@@ -31,6 +35,12 @@
   let companion = $state<CompanionStatus | null>(null);
   let copied = $state<string | null>(null);
 
+  // panic hotkey + nuke drill (#23)
+  let panic = $state<PanicInfo | null>(null);
+  let panicDraft = $state("");
+  let panicMsg = $state<string | null>(null);
+  let drilling = $state(false);
+
   onMount(async () => {
     try {
       siteInfos = await knownSites();
@@ -50,7 +60,40 @@
     } catch {
       // advisory
     }
+    try {
+      panic = await getPanicInfo();
+    } catch {
+      // advisory (vault locked → the unlock screen has the panic defaults)
+    }
   });
+
+  async function savePanic() {
+    panicMsg = null;
+    try {
+      panic = await setPanicHotkey(panicDraft.trim() || null);
+      panicDraft = "";
+      panicMsg = panic.stored
+        ? `panic key now ${panic.hotkey} — the default Ctrl+Alt+L works too`
+        : "back to the default panic key";
+    } catch (e) {
+      panicMsg = String(e);
+    }
+  }
+
+  async function doDrill() {
+    if (drilling) return;
+    drilling = true;
+    panicMsg = null;
+    try {
+      const r = await nukeDrill();
+      panic = await getPanicInfo();
+      panicMsg = `drill ok — ${r}`;
+    } catch (e) {
+      panicMsg = `drill failed: ${e}`;
+    } finally {
+      drilling = false;
+    }
+  }
 
   async function copy(label: string, value: string) {
     try {
@@ -125,6 +168,40 @@
 {/if}
 {#if proxyMsg}
   <p class="report-inline">{proxyMsg}</p>
+{/if}
+
+<div class="field-label" style="margin-top:1.2rem">
+  Panic key <span class="hint">— global hotkey: locks the vault and hides the window</span>
+</div>
+<p class="hint">
+  Right now: <strong>{panic?.hotkey ?? "CommandOrControl+Alt+L"}</strong> (works even when this window
+  isn't focused). Press again to bring back the <em>locked</em> window — your passphrase still guards it.
+</p>
+<div class="row">
+  <input
+    type="text"
+    class="proxy-input"
+    placeholder={panic?.stored ? "replace stored key" : "custom key, e.g. CommandOrControl+Alt+K (empty = default)"}
+    bind:value={panicDraft}
+    onkeydown={(e) => e.key === "Enter" && savePanic()}
+  />
+  <button onclick={savePanic}>Set</button>
+  {#if panic?.stored}
+    <button class="ghost" onclick={() => { panicDraft = ""; void setPanicHotkey(null).then((p) => (panic = p)).catch((e) => (panicMsg = String(e))); }}>Default</button>
+  {/if}
+</div>
+<div class="row">
+  <button disabled={drilling} onclick={doDrill}>{drilling ? "Drilling…" : "Run crypto-erase drill"}</button>
+  <span class="hint">
+    {#if panic?.lastDrill}
+      last drill {new Date(Number(panic.lastDrill) * 1000).toLocaleString()}
+    {:else}
+      never run — proves the nuke really destroys a throwaway vault
+    {/if}
+  </span>
+</div>
+{#if panicMsg}
+  <p class="report-inline">{panicMsg}</p>
 {/if}
 
 {#if counts.length > 0}

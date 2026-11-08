@@ -328,6 +328,17 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   applied mod is refused until reverted. `list_updates` now carries
   `has_mods`, and the updates panel shows *⚠ mods on this game* — the
   update-clobber warning. 4 more mods tests + status round-trip (78 green).
+- **#23 started (increment 1: panic hotkey + crypto-erase drill)** — global
+  hotkey (default `Ctrl+Alt+L`, always registered; a vault can store its own
+  in `meta.panic_hotkey` and unlock adds it) → one press = `lock_core`
+  (cancel every job, close DB, zeroize key — the same path as the Lock
+  button) + hide the window; press again = show the locked window. Stored
+  keys are parsed before saving so a typo can't unarm the panic path.
+  *Run crypto-erase drill* builds a throwaway vault, nukes it through the
+  real nuke path and verifies nothing survives; the timestamp is kept in
+  the vault meta. Sources panel gained the Panic key block + drill button.
+  New drill test (79 green). Still open in #23: hold-3s variant for
+  crypto-erase-by-hotkey (needs a hold-detect loop) and the scrubber.
 - Field-test resume point: the current `target\release\GoonFlow.exe` (built
   after #25) runs everything below; existing `C:\GoonFlow` vaults migrate
   v3→v7 on unlock (idempotent, in place). Manual checklist for the In-review

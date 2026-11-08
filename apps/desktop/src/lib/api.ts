@@ -372,6 +372,17 @@ export const getProxy = () => invoke<ProxySettings>("get_proxy");
 export const setProxy = (url: string | null) =>
   invoke<ProxySettings>("set_proxy", { url });
 
+// ---------- panic hotkey + nuke drill (#23) ----------
+export type PanicInfo = {
+  hotkey: string;
+  stored: string | null;
+  lastDrill: string | null;
+};
+export const getPanicInfo = () => invoke<PanicInfo>("panic_info");
+export const setPanicHotkey = (hotkey: string | null) =>
+  invoke<PanicInfo>("set_panic_hotkey", { hotkey });
+export const nukeDrill = () => invoke<string>("nuke_drill");
+
 // ---------- archive extraction (#17) ----------
 export type ExtractPlan = {
   zip: string;
