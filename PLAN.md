@@ -328,6 +328,23 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   applied mod is refused until reverted. `list_updates` now carries
   `has_mods`, and the updates panel shows *⚠ mods on this game* — the
   update-clobber warning. 4 more mods tests + status round-trip (78 green).
-- Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
-  migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
-  rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.
+- Field-test resume point: the current `target\release\GoonFlow.exe` (built
+  after #25) runs everything below; existing `C:\GoonFlow` vaults migrate
+  v3→v7 on unlock (idempotent, in place). Manual checklist for the In-review
+  issues, in the order that surfaces problems fastest:
+  1. Unlock the real vault → schema lands at v7, old items intact.
+  2. Viewer (#21): click media cards — ←/→ through the grid, +/−/0 zoom,
+     space slideshow, big stored video → poster fallback, `i` → editor.
+  3. Extension (#19): chrome://extensions → Load unpacked →
+     `extensions/goonflow-clip`; paste port+token from Sources → Browser
+     pairing; right-click-clip a rule34/gelbooru post → lands + notifies.
+  4. Extract (#17): game tracked by a loose zip → Extract zip… → folder
+     linked → ▶ Launch works.
+  5. Mods (#25): register MTool (mtool kind) → ▶ starts it with the game
+     exe as arg; add a real f95 zip mod as dll kind → Apply → .flowbak
+     originals + deployed chip → Revert → game pristine again; check the
+     ⚠ chip on an update row for a modded game.
+  6. Proxy (#24): set `socks5://127.0.0.1:9150` with Tor Browser running →
+     Re-fetch metadata still succeeds (traffic through Tor); Clear → direct.
+  Earlier notes still hold: re-clipping old rule34/wimg bare links (or
+  Re-fetch metadata on them) now pulls art (v3 migration fixed labels).
