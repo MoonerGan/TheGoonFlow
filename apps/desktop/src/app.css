@@ -547,6 +547,13 @@ textarea:focus {
   min-width: 0;
 }
 
+.token-chip {
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .update-row {
   justify-content: space-between;
 }

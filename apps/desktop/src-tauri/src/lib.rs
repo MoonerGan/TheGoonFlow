@@ -49,17 +49,33 @@ struct Inner {
     opened: Option<OpenedVault>,
 }
 
+/// The shareable half of the app state — everything that touches the vault or
+/// the network. Commands reach it through `AppState` (Deref), and the
+/// companion HTTP API (#19) holds its own clone so browser clips run through
+/// the exact same lock, job ledger and rate lanes as the UI.
+#[derive(Clone)]
+pub struct Core {
+    pub(crate) inner: Arc<Mutex<Inner>>,
+    /// Long-running work (imports, update checks) runs as jobs: observable,
+    /// stoppable, and cancelled by Lock/Nuke.
+    pub(crate) jobs: Arc<Jobs>,
+    /// #15: shared per-site rate lanes for every network fetch — one
+    /// politeness ledger for all jobs, not one per work-loop.
+    pub(crate) queue: Arc<queue::SiteQueue>,
+}
+
 pub struct AppState {
-    inner: Mutex<Inner>,
+    core: Core,
     exe_dir: PathBuf,
     companion: Option<companion::CompanionInfo>,
     locked: Arc<AtomicBool>,
-    /// Long-running work (imports, update checks) runs as jobs: observable,
-    /// stoppable, and cancelled by Lock/Nuke.
-    jobs: Arc<Jobs>,
-    /// #15: shared per-site rate lanes for every network fetch — one
-    /// politeness ledger for all jobs, not one per work-loop.
-    queue: Arc<queue::SiteQueue>,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = Core;
+    fn deref(&self) -> &Self::Target {
+        &self.core
+    }
 }
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -981,13 +997,6 @@ pub fn run() {
         .unwrap_or_else(|| PathBuf::from("."));
 
     let locked = Arc::new(AtomicBool::new(true));
-    let companion = match companion::start(locked.clone()) {
-        Ok(info) => Some(info),
-        Err(e) => {
-            eprintln!("companion API disabled: {e}");
-            None
-        }
-    };
 
     // Resolve vault at startup: pointer → volume label/path; fallback to a
     // default folder beside the exe (handy for dev and single-folder use).
@@ -999,13 +1008,24 @@ pub fn run() {
         }
     }
 
+    let core = Core {
+        inner: Arc::new(Mutex::new(Inner { vault_root, opened: None })),
+        jobs: Arc::new(Jobs::default()),
+        queue: Arc::new(queue::SiteQueue::default()),
+    };
+    let companion = match companion::start(locked.clone(), core.clone()) {
+        Ok(info) => Some(info),
+        Err(e) => {
+            eprintln!("companion API disabled: {e}");
+            None
+        }
+    };
+
     let state = AppState {
-        inner: Mutex::new(Inner { vault_root, opened: None }),
+        core,
         exe_dir,
         companion,
         locked,
-        jobs: Arc::new(Jobs::default()),
-        queue: Arc::new(queue::SiteQueue::default()),
     };
 
     tauri::Builder::default()
@@ -1095,15 +1115,17 @@ mod integration_tests {
         goon_core::db::init_schema(&conn).unwrap();
 
         let state = AppState {
-            inner: Mutex::new(Inner {
-                vault_root: Some(vault.clone()),
-                opened: Some(OpenedVault { conn, _key: key }),
-            }),
+            core: Core {
+                inner: Arc::new(Mutex::new(Inner {
+                    vault_root: Some(vault.clone()),
+                    opened: Some(OpenedVault { conn, _key: key }),
+                })),
+                jobs: Arc::new(Jobs::default()),
+                queue: Arc::new(queue::SiteQueue::default()),
+            },
             exe_dir: tmp.clone(),
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
-            jobs: Arc::new(Jobs::default()),
-            queue: Arc::new(queue::SiteQueue::default()),
         };
 
         let job = state.jobs.start("games", "games folder").unwrap();

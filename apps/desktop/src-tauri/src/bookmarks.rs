@@ -11,7 +11,7 @@
 
 use crate::ingest::{self, Mode, SiteRef};
 use crate::jobs::JobHandle;
-use crate::{new_id, now_epoch, AppState};
+use crate::{new_id, now_epoch, Core};
 use goon_core::db;
 use goon_core::media;
 use goon_core::model::{Item, Status};
@@ -138,7 +138,7 @@ enum Stored {
 }
 
 pub async fn import_bookmarks(
-    state: &AppState,
+    state: &Core,
     file_path: String,
     fetch_online: bool,
     job: &JobHandle,
@@ -350,7 +350,7 @@ pub async fn import_bookmarks(
     Ok(report)
 }
 
-fn rate_of(state: &AppState, site: &str) -> i64 {
+fn rate_of(state: &Core, site: &str) -> i64 {
     let inner = state.inner.lock().unwrap();
     match inner.opened.as_ref() {
         Some(o) => db::site_rate_ms(&o.conn, site, ingest::default_rate_ms(site)),
@@ -398,7 +398,6 @@ mod tests {
     use crate::jobs::Jobs;
     use goon_core::model::ItemKind;
     use std::io::Write;
-    use std::sync::atomic::AtomicBool;
     use std::sync::{Arc, Mutex};
 
     fn netscape(body: &str) -> String {
@@ -410,7 +409,7 @@ mod tests {
         s
     }
 
-    fn test_state(tag: &str) -> (AppState, std::path::PathBuf) {
+    fn test_state(tag: &str) -> (crate::Core, std::path::PathBuf) {
         let tmp = std::env::temp_dir().join(format!("goonflow-bm-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -418,14 +417,11 @@ mod tests {
         let key = goon_vault::create_keyfile(&vault, "hunter2").unwrap();
         let conn = goon_vault::open_db(&vault, &key).unwrap();
         goon_core::db::init_schema(&conn).unwrap();
-        let state = AppState {
-            inner: Mutex::new(crate::Inner {
+        let state = crate::Core {
+            inner: Arc::new(Mutex::new(crate::Inner {
                 vault_root: Some(vault),
                 opened: Some(crate::OpenedVault { conn, _key: key }),
-            }),
-            exe_dir: tmp.clone(),
-            companion: None,
-            locked: Arc::new(AtomicBool::new(false)),
+            })),
             jobs: Arc::new(Jobs::default()),
             queue: Arc::new(crate::queue::SiteQueue::default()),
         };

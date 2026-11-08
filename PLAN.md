@@ -290,6 +290,15 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
   *Link folder…* attaches an existing folder directly.
   Still open in #17: DLsite library sync, booru full-res downloads, seed-host
   mirror picker.
+- **#19 (MV3 browser extension) landed** — `companion.rs` `/api/clip` is now
+  real: it runs `ingest::clip` through a shared `Core` (vault lock + job
+  ledger + rate lanes identical to the `+ Clip URL` button), returns the clip
+  report or a friendly error, and shows up in the activity strip. New
+  `extensions/goonflow-clip` (MV3: context menus, port/token options, local
+  handshake test, localhost-only host permissions). Sources panel gained a
+  *Browser pairing* block (copy port/token). Refactor: `AppState` Deref-exposes
+  a cloneable `Core`, so UI and companion never fork state. Companion auth +
+  clip ladder covered by two new `#[tokio::test]`s (68 green).
 - Field-test resume point: open the existing `C:\GoonFlow` vault — the v3
   migration fixes the mislabeled `i` rows on unlock, and re-clipping the old
   rule34/wimg links (or pressing Re-fetch metadata on them) now pulls art.

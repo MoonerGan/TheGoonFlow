@@ -5,11 +5,11 @@
 
 use std::time::Duration;
 
-use crate::AppState;
+use crate::Core;
 
 /// Build the reqwest client honoring the vault's `proxy_url` meta key.
 /// Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:9150` (Tor Browser).
-pub fn client_for(state: &AppState, timeout_secs: u64) -> Result<reqwest::Client, String> {
+pub fn client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, String> {
     let proxy = {
         let inner = state.inner.lock().unwrap();
         match inner.opened.as_ref() {
@@ -100,14 +100,11 @@ mod wiring_tests {
         goon_core::db::init_schema(&conn).unwrap();
         goon_core::db::set_meta(&conn, "proxy_url", Some(&format!("http://{addr}"))).unwrap();
 
-        let state = AppState {
-            inner: Mutex::new(Inner {
+        let state = Core {
+            inner: Arc::new(Mutex::new(Inner {
                 vault_root: Some(vault),
                 opened: Some(OpenedVault { conn, _key: key }),
-            }),
-            exe_dir: tmp.clone(),
-            companion: None,
-            locked: Arc::new(AtomicBool::new(false)),
+            })),
             jobs: Arc::new(Jobs::default()),
             queue: Arc::new(crate::queue::SiteQueue::default()),
         };

@@ -8,7 +8,7 @@
 //! Everything lands as a normal item the user can then correct.
 
 use crate::jobs::JobHandle;
-use crate::{new_id, now_epoch, AppState};
+use crate::{new_id, now_epoch, Core};
 use goon_core::db;
 use goon_core::media;
 use goon_core::model::{Item, ItemKind, Status};
@@ -173,7 +173,7 @@ fn describe_empty_scan(root: &Path, notes: &ScanNotes) -> String {
 }
 
 pub fn import_game_folder(
-    state: &AppState,
+    state: &Core,
     root: String,
     job: &JobHandle,
 ) -> Result<GameImportReport, String> {
@@ -205,7 +205,7 @@ pub fn import_game_folder(
 /// User pointed straight at a game's .exe — import its containing folder as
 /// one game (an exe at top level always fingerprints as pc-game).
 pub fn import_game_exe(
-    state: &AppState,
+    state: &Core,
     exe: String,
     job: &JobHandle,
 ) -> Result<GameImportReport, String> {
@@ -226,7 +226,7 @@ pub fn import_game_exe(
 /// extract title + cover art from the zip itself. The zip stays where it is;
 /// the vault stores a pointer to it.
 pub fn import_game_zip(
-    state: &AppState,
+    state: &Core,
     zip_path: String,
     job: &JobHandle,
 ) -> Result<GameImportReport, String> {
@@ -301,7 +301,7 @@ pub fn import_game_zip(
 /// Locks the vault once per folder: a big library scan+import never freezes the
 /// rest of the app, and the user can stop it between items.
 fn import_game_dirs(
-    state: &AppState,
+    state: &Core,
     dirs: &[PathBuf],
     report: &mut GameImportReport,
     job: &JobHandle,
@@ -381,7 +381,7 @@ fn import_game_dirs(
 }
 
 pub fn import_image_files(
-    state: &AppState,
+    state: &Core,
     paths: Vec<String>,
     job: &JobHandle,
 ) -> Result<ImageImportReport, String> {
@@ -479,7 +479,7 @@ pub struct VideoImportReport {
 /// each (kind=post), tracked by their `file:///` path — nothing is copied into
 /// the vault (vault-stored video is the M3 issue). Re-runs skip known paths.
 pub fn import_video_files(
-    state: &AppState,
+    state: &Core,
     paths: Vec<String>,
     job: &JobHandle,
 ) -> Result<VideoImportReport, String> {

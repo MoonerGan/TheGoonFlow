@@ -7,7 +7,7 @@
 //! link is worse than a bare entry.
 
 use crate::jobs::JobHandle;
-use crate::{new_id, now_epoch, AppState};
+use crate::{new_id, now_epoch, Core};
 use goon_core::db;
 use goon_core::media;
 use goon_core::model::{Item, ItemKind, Status};
@@ -839,7 +839,7 @@ pub struct ClipReport {
     pub note: Option<String>,
 }
 
-pub async fn clip(state: &AppState, url: String) -> Result<ClipReport, String> {
+pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     let url = url.trim().to_string();
     if url.is_empty() {
         return Err("no url".into());
@@ -951,7 +951,7 @@ pub struct UpdateReport {
     pub updated_titles: Vec<String>,
 }
 
-pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateReport, String> {
+pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport, String> {
     let targets = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
@@ -1093,7 +1093,7 @@ pub struct EnrichReport {
 /// classify → fetch_meta → apply_meta pipeline that clip/bookmark-enrich use.
 /// Local sources are re-read from disk (fixes covers that failed the first
 /// time); remote sources honour their site rate and cookie.
-pub async fn reenrich_item(state: &AppState, item_id: &str, job: &JobHandle) -> Result<EnrichReport, String> {
+pub async fn reenrich_item(state: &Core, item_id: &str, job: &JobHandle) -> Result<EnrichReport, String> {
     let sources = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
@@ -1435,7 +1435,7 @@ pub struct MatchReport {
 /// Keep the top few hits above the confidence floor and store them.
 /// Returns how many rows were written.
 fn store_hits(
-    state: &crate::AppState,
+    state: &crate::Core,
     item_id: &str,
     site: &str,
     title: &str,
@@ -1470,7 +1470,7 @@ fn store_hits(
 /// Scan every game that is tracked only by a local source and store up to
 /// three confident DLsite/f95 matches per game as suggestions.
 pub async fn find_matches(
-    state: &crate::AppState,
+    state: &crate::Core,
     job: &JobHandle,
 ) -> Result<MatchReport, String> {
     let targets = {

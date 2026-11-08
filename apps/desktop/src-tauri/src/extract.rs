@@ -20,7 +20,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 
 use crate::jobs::JobHandle;
-use crate::AppState;
+use crate::Core;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -93,14 +93,14 @@ fn safe_join(dest: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[derive(Debug)]
-struct Extracted {
+pub(crate) struct Extracted {
     entries: usize,
     bytes: u64,
 }
 
 /// Pull `zip` into `dest`. `tick(i, total, name)` feeds progress; returning
 /// true from `cancel` stops and removes the partial folder.
-pub fn extract_zip(
+pub(crate) fn extract_zip(
     zip: &Path,
     dest: &Path,
     cancel: &dyn Fn() -> bool,
@@ -172,7 +172,7 @@ pub fn extract_zip(
 /// Job-facing wrapper: extract (or adopt an existing folder) and attach the
 /// folder as a local source so the launcher can run it.
 pub fn extract_for_item(
-    state: &AppState,
+    state: &Core,
     item_id: &str,
     job: &JobHandle,
 ) -> Result<ExtractReport, String> {

@@ -163,7 +163,7 @@ repack pages, and title/version/engine tags for f95 threads. e-hentai and
 login-gated sites import title+URL unless you saved a cookie for them under
 *Sources*. Unchecked = pure offline import (local files are still read and
 thumbnailed — they need no network). This only decorates what you import — it
-is **not** the browser integration (that's the companion extension in M4).
+is **not** the browser integration — that's the *GoonFlow Clip* extension, below.
 
 > Note: "enrich online" contacts those sites directly from this machine — same
 > as browsing them. If that matters to you, uncheck it or run behind your
@@ -175,6 +175,24 @@ thumbnails fetched, duplicates). **Anything that fails now says so under a
 status, network error, unrecognized site), so a failure never means silently
 scanning by hand. Imported items stick even if their online art failed to
 fetch.
+
+### Browser extension (GoonFlow Clip)
+Clip without leaving the page. In Chrome/Edge open `chrome://extensions` →
+**Developer mode** → **Load unpacked** → pick the `extensions/goonflow-clip`
+folder that ships with the app (Firefox: `about:debugging` → *Load Temporary
+Add-on* → that `manifest.json`).
+
+Then **pair once per app launch**: the app listens on a random local port with
+a fresh token each start, so open **Sources → Browser pairing**, *Copy port*
+and *Copy token*, and paste both into the extension's options page (right-click
+its icon → *Extension options*) and press **Test connection**.
+
+Right-click any **link, image, page, or selected URL** → *Clip … to GoonFlow*.
+It travels the exact same pipeline as *+ Clip URL*: classified, politely
+enriched, stored in the vault, and it appears in the activity strip. A desktop
+notification tells you it landed (or why it didn't). The extension can only
+talk to `127.0.0.1`/`localhost` — it has no internet access at all; only the
+app reaches the content sites (and through your proxy if you set one).
 
 ## 4. The library
 

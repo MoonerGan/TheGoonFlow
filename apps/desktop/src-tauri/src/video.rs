@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use crate::ingest;
 use crate::jobs::JobHandle;
-use crate::AppState;
+use crate::Core;
 
 /// Hard cap per stored video (SQLite BLOB comfort + vault portability).
 pub const STORE_CAP: u64 = 512 * 1024 * 1024;
@@ -56,7 +56,7 @@ fn human_mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
 }
 
-pub fn video_info(state: &AppState, item_id: &str) -> Result<VideoInfo, String> {
+pub fn video_info(state: &Core, item_id: &str) -> Result<VideoInfo, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     let Some(d) = goon_core::db::get_item(&opened.conn, item_id).map_err(crate::err)? else {
@@ -86,7 +86,7 @@ pub fn video_info(state: &AppState, item_id: &str) -> Result<VideoInfo, String> 
 /// Copy the item's video into the vault and try to extract a first-frame
 /// thumbnail. Runs as a job (large files, remote downloads).
 pub async fn store_video(
-    state: &AppState,
+    state: &Core,
     item_id: &str,
     job: &JobHandle,
 ) -> Result<VideoStoreReport, String> {
@@ -165,7 +165,7 @@ pub async fn store_video(
 }
 
 fn finish_store(
-    state: &AppState,
+    state: &Core,
     item_id: &str,
     bytes: &[u8],
     origin: &str,
@@ -219,7 +219,7 @@ fn finish_store(
 /// Locate a playable file for first-frame extraction: reuse the local source,
 /// else spill the vault bytes to a temp file (the Shell handler needs a path).
 fn first_frame_for(
-    state: &AppState,
+    state: &Core,
     item_id: &str,
     bytes: &[u8],
     origin: &str,
@@ -252,7 +252,7 @@ fn first_frame_for(
     media::make_thumbnail_from_rgba(&f.rgba, f.width, f.height)
 }
 
-pub fn remove_stored_video(state: &AppState, item_id: &str) -> Result<(), String> {
+pub fn remove_stored_video(state: &Core, item_id: &str) -> Result<(), String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     media::delete_video(&opened.conn, item_id);

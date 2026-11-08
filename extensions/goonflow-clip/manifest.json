@@ -1,0 +1,18 @@
+{
+  "manifest_version": 3,
+  "name": "GoonFlow Clip",
+  "version": "0.1.0",
+  "description": "Clip links and images from your browser straight into The Goon Flow vault. Talks only to the local app.",
+  "permissions": ["contextMenus", "storage", "notifications"],
+  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "icons": {
+    "48": "icon48.png"
+  }
+}

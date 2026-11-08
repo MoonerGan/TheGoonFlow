@@ -4,11 +4,13 @@
   import { onMount } from "svelte";
   import {
     getProxy,
+    getStatus,
     getSiteSettings,
     knownSites,
     setProxy,
     setSiteSetting,
     siteStats,
+    type CompanionStatus,
     type SiteCount,
     type SiteInfo,
     type SiteSetting,
@@ -25,6 +27,10 @@
   let proxyDraft = $state("");
   let proxyMsg = $state<string | null>(null);
 
+  // browser pairing (#19)
+  let companion = $state<CompanionStatus | null>(null);
+  let copied = $state<string | null>(null);
+
   onMount(async () => {
     try {
       siteInfos = await knownSites();
@@ -39,7 +45,22 @@
     } catch {
       // advisory; the save below will surface a real error
     }
+    try {
+      companion = (await getStatus()).companion;
+    } catch {
+      // advisory
+    }
   });
+
+  async function copy(label: string, value: string) {
+    try {
+      await navigator.clipboard.writeText(value);
+      copied = `${label} copied`;
+    } catch {
+      copied = `copy failed — select and copy manually`;
+    }
+    setTimeout(() => (copied = null), 2000);
+  }
 
   async function saveProxy() {
     proxyMsg = null;
@@ -152,3 +173,23 @@
     </div>
   </div>
 {/each}
+
+<div class="field-label" style="margin-top:1.2rem">
+  Browser pairing <span class="hint">— for the GoonFlow Clip extension</span>
+</div>
+{#if companion}
+  <p class="hint">Load <code>extensions/goonflow-clip</code> as an unpacked extension (chrome://extensions →
+    developer mode → Load unpacked), then paste these into its options page. The token is fresh every app start —
+    traffic never leaves this machine.</p>
+  <div class="row">
+    <span class="chip">port <strong>{companion.port}</strong></span>
+    <button class="ghost" onclick={() => copy("port", String(companion?.port ?? ""))}>Copy port</button>
+    <span class="chip token-chip">token <strong>{companion.token}</strong></span>
+    <button class="ghost" onclick={() => copy("token", companion?.token ?? "")}>Copy token</button>
+  </div>
+  {#if copied}
+    <p class="report-inline">{copied}</p>
+  {/if}
+{:else}
+  <p class="hint">The companion API is disabled on this run (port bind failed) — browser clipping is unavailable.</p>
+{/if}

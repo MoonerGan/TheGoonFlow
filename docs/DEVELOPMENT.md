@@ -71,11 +71,13 @@ apps/desktop/
       launcher.rs   #18: engine-aware game-launch resolution + spawn
       video.rs      #16: opt-in vault video storage (cap, job, first-frame)
       videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler
-      companion.rs  127.0.0.1 axum API (handshake/ping/clip stub)
+      companion.rs  127.0.0.1 axum API: handshake + ping + real /api/clip (#19)
       ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
       bookmarks.rs  D13: Netscape bookmark parse + polite per-site enrichment
     capabilities/   Tauri 2 permission sets (core + dialog)
+extensions/
+  goonflow-clip/    #19 MV3 browser extension (manifest, background, options)
 tools/
   dev-env.ps1       MSVC/toolchain env import
   smoke-release.ps1 launches target\release\GoonFlow.exe, checks the companion
@@ -203,6 +205,20 @@ tools/
     `socks5://127.0.0.1:9150` (Tor Browser) work. Never construct a bare
     `reqwest::Client` in a command path — that silently bypasses the proxy.
     `http::wiring_tests` proves the route with a local stub proxy (no network).
+15. **Extraction (#17) writes only inside the destination folder.** Entry
+    names are pre-screened (`safe_join`: no `..`, no root, no drive prefix)
+    *before* any byte is written, cancel/partial runs delete the folder they
+    created, and the archive itself is never modified. The extracted folder
+    is attached as a `local` source; `local_source_path` prefers a
+    folder/exe over a loose zip so the launcher sees the playable copy.
+16. **One vault, one job ledger, one politeness ledger (#19).** The shareable
+    `Core { inner, jobs, queue }` (Deref'd by `AppState`) is handed to both
+    the tauri commands and the companion HTTP API, so a browser clip runs
+    through the *exact* same `ingest::clip` path, the same single-vault lock,
+    and the same site rate lanes as the `+ Clip URL` button. Never spin a
+    second vault/job/queue inside a companion handler — take the shared `Core`
+    clone. The companion token is per-run (rotates each launch); the
+    extension's host_permissions are `127.0.0.1`/`localhost` only.
 
 ## 5. Testing
 
