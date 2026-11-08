@@ -481,12 +481,12 @@ mod tests {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
         let media_items =
-            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, None).unwrap();
+            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, None, None).unwrap();
         assert_eq!(media_items.len(), 4, "all four are media items");
         let titles: Vec<&str> = media_items.iter().map(|i| i.title.as_str()).collect();
         assert!(titles.iter().any(|t| t.contains("clip")), "video stem used as title: {titles:?}");
         let local_only =
-            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, Some("local")).unwrap();
+            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, Some("local"), None).unwrap();
         assert_eq!(local_only.len(), 2);
         drop(inner);
 
@@ -558,9 +558,10 @@ mod tests {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
         assert!(!db::site_enabled(conn, "kimochi", false));
-        db::set_site_setting(conn, "kimochi", Some(true), None, None).unwrap();
+        db::set_site_setting(conn, "kimochi", Some(true), None, None, 1200).unwrap();
         assert!(db::site_enabled(conn, "kimochi", false));
-        assert_eq!(db::site_rate_ms(conn, "kimochi", 1200), 700);
+        // #28: enabling a site seeds *its* rate, not a blanket 700
+        assert_eq!(db::site_rate_ms(conn, "kimochi", 1200), 1200);
         assert_eq!(db::site_rate_ms(conn, "e621", 1200), 1200);
         drop(inner);
         let _ = std::fs::remove_dir_all(&tmp);

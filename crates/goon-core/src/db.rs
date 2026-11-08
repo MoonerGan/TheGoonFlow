@@ -117,6 +117,13 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         );
         CREATE INDEX IF NOT EXISTS idx_mods_item ON mods(item_id);
 
+        CREATE TABLE IF NOT EXISTS pair_dismissals (
+            a_id         TEXT NOT NULL,
+            b_id         TEXT NOT NULL,
+            dismissed_at TEXT NOT NULL,
+            PRIMARY KEY (a_id, b_id)
+        );
+
         COMMIT;"
         ,
     )?;
@@ -214,6 +221,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
                  ALTER TABLE mods ADD COLUMN manifest TEXT;"
             }
         ))?;
+    }
+    if v < 8 {
+        // #31: "keep both" for duplicate suggestions. The table lives in the
+        // base batch so existing vaults gain it in place; dismissed pairs never
+        // resurface. (ids stored canonically: a_id < b_id.)
+        conn.execute_batch(
+            "BEGIN;
+            UPDATE meta SET value = '8' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
     }
     Ok(())
 }
@@ -363,9 +380,10 @@ pub fn list_items(
     kind: Option<&str>,
     tag: Option<&str>,
     site: Option<&str>,
+    source: Option<&str>,
 ) -> rusqlite::Result<Vec<ItemSummary>> {
     let like = search.map(|s| format!("%{}%", s.trim()));
-    // Placeholders are always ?1..?6 — binding with params! fills positions
+    // Placeholders are always ?1..?7 — binding with params! fills positions
     // in order, so skipping ?1 while using ?2 would bind offset to ?2.
     let sql = "SELECT id, kind, title, status, version,
                     EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
@@ -380,11 +398,19 @@ pub fn list_items(
                      WHERE it.item_id = items.id AND t.name = ?5))
                AND (?6 IS NULL OR EXISTS (
                      SELECT 1 FROM sources ss WHERE ss.item_id = items.id AND ss.site = ?6))
+               AND (?7 IS NULL
+                    OR (?7 = 'local_only' AND
+                        EXISTS (SELECT 1 FROM sources sl WHERE sl.item_id = items.id AND sl.site = 'local')
+                        AND NOT EXISTS (SELECT 1 FROM sources so WHERE so.item_id = items.id AND so.site <> 'local'))
+                    OR (?7 = 'no_local' AND
+                        NOT EXISTS (SELECT 1 FROM sources sn WHERE sn.item_id = items.id AND sn.site = 'local'))
+                    OR (?7 = 'no_tags' AND
+                        NOT EXISTS (SELECT 1 FROM item_tags tn WHERE tn.item_id = items.id)))
              ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3";
     let mut stmt = conn.prepare(sql)?;
     let mut out = Vec::new();
     let mapped = stmt.query_map(
-        params![like, limit, offset, kind, tag, site],
+        params![like, limit, offset, kind, tag, site, source],
         map_item_summary,
     )?;
     for row in mapped {
@@ -403,6 +429,41 @@ fn map_item_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
         version: r.get(4)?,
         has_thumb: r.get(5)?,
         updated_at: r.get(6)?,
+    })
+}
+
+/// Sidebar badges for the source-state filters: "local only" (no online link — /// the fix-my-metadata queue), "no local file" (folder lost / never linked),
+/// "no tags" (bare imports and unresolved direct-file clips).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceStats {
+    pub local_only: i64,
+    pub no_local: i64,
+    pub no_tags: i64,
+}
+
+pub fn source_stats(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<SourceStats> {
+    let kind_sql = match kind {
+        Some("game") => "AND kind = 'game'",
+        Some("media") => "AND kind IN ('gallery','post')",
+        _ => "",
+    };
+    let count = |extra: &str| -> rusqlite::Result<i64> {
+        conn.query_row(
+            &format!("SELECT COUNT(*) FROM items WHERE 1=1 {kind_sql} {extra}"),
+            [],
+            |r| r.get(0),
+        )
+    };
+    Ok(SourceStats {
+        local_only: count(
+            "AND EXISTS (SELECT 1 FROM sources sl WHERE sl.item_id = items.id AND sl.site = 'local')
+             AND NOT EXISTS (SELECT 1 FROM sources so WHERE so.item_id = items.id AND so.site <> 'local')",
+        )?,
+        no_local: count(
+            "AND NOT EXISTS (SELECT 1 FROM sources sn WHERE sn.item_id = items.id AND sn.site = 'local')",
+        )?,
+        no_tags: count("AND NOT EXISTS (SELECT 1 FROM item_tags tn WHERE tn.item_id = items.id)")?,
     })
 }
 
@@ -951,15 +1012,20 @@ pub fn set_site_setting(
     enabled: Option<bool>,
     cookie: Option<&str>,
     rate_ms: Option<i64>,
+    default_rate_ms: i64,
 ) -> rusqlite::Result<()> {
+    // #28: the *insert* branch (first touch of a site, e.g. just enabling it)
+    // must seed the site's real default — hardcoding 700 clobbered e-hentai's
+    // 10500, danbooru's 1200, etc. The update branch still keeps whatever is
+    // stored when a field is absent from this call.
     conn.execute(
         "INSERT INTO site_settings (site, enabled, cookie, rate_ms)
-         VALUES (?1, IFNULL(?2,1), IFNULL(?3,''), IFNULL(?4,700))
+         VALUES (?1, IFNULL(?2,1), IFNULL(?3,''), IFNULL(?4,?5))
          ON CONFLICT(site) DO UPDATE SET
            enabled  = IFNULL(?2, enabled),
            cookie   = IFNULL(?3, cookie),
            rate_ms  = IFNULL(?4, rate_ms)",
-        params![site, enabled.map(|e| e as i64), cookie, rate_ms],
+        params![site, enabled.map(|e| e as i64), cookie, rate_ms, default_rate_ms],
     )?;
     Ok(())
 }
@@ -1089,9 +1155,13 @@ pub struct PairSuggestion {
     pub a_id: String,
     pub a_title: String,
     pub a_sites: String,
+    /// what this entry actually is: its source links (path/URL) — the UI needs
+    /// them to tell two same-titled entries apart (#31)
+    pub a_src: String,
     pub b_id: String,
     pub b_title: String,
     pub b_sites: String,
+    pub b_src: String,
 }
 
 /// Comparison key for pairing: drops bracketed/parenthesised tokens (versions,
@@ -1126,7 +1196,8 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
     if want_games {
         let mut stmt = conn.prepare(
             "SELECT id, title,
-                    (SELECT group_concat(DISTINCT site) FROM sources s WHERE s.item_id = items.id)
+                    (SELECT group_concat(DISTINCT site) FROM sources s WHERE s.item_id = items.id),
+                    (SELECT group_concat(url, ' | ') FROM sources s WHERE s.item_id = items.id)
              FROM items WHERE kind = 'game' ORDER BY title",
         )?;
         let rows = stmt
@@ -1135,17 +1206,18 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(3)?.unwrap_or_default(),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
-        for (id, title, sites) in rows {
+        let mut groups: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
+        for (id, title, sites, src) in rows {
             let key = pairing_key(&title);
             if key.is_empty() {
                 continue;
             }
-            groups.entry(key).or_default().push((id, title, sites));
+            groups.entry(key).or_default().push((id, title, sites, src));
         }
 
         for mut g in groups.into_values() {
@@ -1155,13 +1227,18 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
             g.sort_by(|a, b| a.0.cmp(&b.0));
             for i in 0..g.len() {
                 for j in (i + 1)..g.len() {
+                    if pair_dismissed(conn, &g[i].0, &g[j].0)? {
+                        continue; // user said "keep both" (#31)
+                    }
                     out.push(PairSuggestion {
                         a_id: g[i].0.clone(),
                         a_title: g[i].1.clone(),
                         a_sites: g[i].2.clone(),
+                        a_src: g[i].3.clone(),
                         b_id: g[j].0.clone(),
                         b_title: g[j].1.clone(),
                         b_sites: g[j].2.clone(),
+                        b_src: g[j].3.clone(),
                     });
                 }
             }
@@ -1172,7 +1249,8 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
         // Two items sharing one stored image/video hash are the same media.
         let mut stmt = conn.prepare(
             "SELECT m.hash, m.item_id, i.title,
-                    (SELECT group_concat(DISTINCT s.site) FROM sources s WHERE s.item_id = m.item_id)
+                    (SELECT group_concat(DISTINCT s.site) FROM sources s WHERE s.item_id = m.item_id),
+                    (SELECT group_concat(s.url, ' | ') FROM sources s WHERE s.item_id = m.item_id)
              FROM media m JOIN items i ON i.id = m.item_id
              WHERE i.kind IN ('gallery','post')
              GROUP BY m.hash, m.item_id",
@@ -1184,13 +1262,14 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
                     r.get::<_, String>(1)?,
                     r.get::<_, String>(2)?,
                     r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    r.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let mut groups: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
-        for (_hash, id, title, sites) in rows {
-            groups.entry(_hash).or_default().push((id, title, sites));
+        let mut groups: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
+        for (_hash, id, title, sites, src) in rows {
+            groups.entry(_hash).or_default().push((id, title, sites, src));
         }
         for mut g in groups.into_values() {
             // distinct items only (same item can store thumb + full with the
@@ -1202,13 +1281,18 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
             }
             for i in 0..g.len() {
                 for j in (i + 1)..g.len() {
+                    if pair_dismissed(conn, &g[i].0, &g[j].0)? {
+                        continue; // user said "keep both" (#31)
+                    }
                     out.push(PairSuggestion {
                         a_id: g[i].0.clone(),
                         a_title: g[i].1.clone(),
                         a_sites: g[i].2.clone(),
+                        a_src: g[i].3.clone(),
                         b_id: g[j].0.clone(),
                         b_title: g[j].1.clone(),
                         b_sites: g[j].2.clone(),
+                        b_src: g[j].3.clone(),
                     });
                 }
             }
@@ -1217,6 +1301,32 @@ pub fn pairing_suggestions(conn: &Connection, kind: Option<&str>) -> rusqlite::R
 
     out.truncate(40);
     Ok(out)
+}
+
+/// Canonical (a < b) lookup of a "keep both" dismissal.
+fn pair_dismissed(conn: &Connection, a: &str, b: &str) -> rusqlite::Result<bool> {
+    let (a, b) = if a < b { (a, b) } else { (b, a) };
+    conn.query_row(
+        "SELECT 1 FROM pair_dismissals WHERE a_id = ?1 AND b_id = ?2",
+        params![a, b],
+        |_| Ok(true),
+    )
+    .or_else(|e| match e {
+        rusqlite::Error::QueryReturnedNoRows => Ok(false),
+        other => Err(other),
+    })
+}
+
+/// "Keep both": the pair never resurfaces as a duplicate suggestion. Stored
+/// canonically so the check is one indexed lookup either way.
+pub fn dismiss_pair(conn: &Connection, a: &str, b: &str) -> rusqlite::Result<()> {
+    let (a, b) = if a < b { (a, b) } else { (b, a) };
+    conn.execute(
+        "INSERT OR IGNORE INTO pair_dismissals (a_id, b_id, dismissed_at)
+         VALUES (?1, ?2, datetime('now'))",
+        params![a, b],
+    )?;
+    Ok(())
 }
 
 /// Merge `drop_id` into `keep_id`: sources, tags, media, updates all move,
@@ -1291,14 +1401,84 @@ mod tests {
             )
             .unwrap();
         }
-        let all = list_items(&conn, 300, 0, None, None, None, None).unwrap();
+        let all = list_items(&conn, 300, 0, None, None, None, None, None).unwrap();
         assert_eq!(all.len(), 3);
-        let games = list_items(&conn, 300, 0, None, Some("game"), None, None).unwrap();
+        let games = list_items(&conn, 300, 0, None, Some("game"), None, None, None).unwrap();
         assert_eq!(games.len(), 2);
-        let search = list_items(&conn, 300, 0, Some("gamma"), None, None, None).unwrap();
+        let search = list_items(&conn, 300, 0, Some("gamma"), None, None, None, None).unwrap();
         assert_eq!(search.len(), 1);
         let counts = counts_by_status(&conn, Some("game")).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 2);
+    }
+
+    /// #40: sidebar source-state filters + their badge counts.
+    #[test]
+    fn source_state_filters_and_badges() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, kind, title) in [
+            ("g_local", "game", "Local Only Game"),
+            ("g_both", "game", "Linked Game"),
+            ("g_web", "game", "Link Only Game"),
+            ("m_local", "post", "Local Only Image"),
+        ] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,?2,?3,'0','1')",
+                params![id, kind, title],
+            )
+            .unwrap();
+        }
+        insert_source(&conn, "g_local", "local", "C:/games/local only/game.exe", None, None).unwrap();
+        insert_source(&conn, "g_both", "local", "C:/games/linked/game.exe", None, None).unwrap();
+        insert_source(&conn, "g_both", "f95", "https://f95zone.to/threads/x.1/", Some("1"), None).unwrap();
+        insert_source(&conn, "g_web", "f95", "https://f95zone.to/threads/y.2/", Some("2"), None).unwrap();
+        insert_source(&conn, "m_local", "local", "file:///D:/img.png", None, None).unwrap();
+        add_item_tag(&conn, "g_both", "renpy", TYPE_CONTENT).unwrap();
+
+        let ids = |source: &str, kind: &str| -> Vec<String> {
+            let mut v: Vec<String> = list_items(&conn, 300, 0, None, Some(kind), None, None, Some(source))
+                .unwrap()
+                .into_iter()
+                .map(|i| i.id)
+                .collect();
+            v.sort();
+            v
+        };
+        assert_eq!(ids("local_only", "game"), ["g_local"]);
+        assert_eq!(ids("no_local", "game"), ["g_web"]);
+        assert_eq!(ids("no_tags", "game"), ["g_local", "g_web"]);
+        assert_eq!(ids("local_only", "media"), ["m_local"]);
+
+        let g = source_stats(&conn, Some("game")).unwrap();
+        assert_eq!((g.local_only, g.no_local, g.no_tags), (1, 1, 2));
+        let m = source_stats(&conn, Some("media")).unwrap();
+        assert_eq!((m.local_only, m.no_local, m.no_tags), (1, 0, 1));
+    }
+
+    /// #31: "Keep both" has to stick. A dismissed pair leaves the library
+    /// untouched but never comes back as a suggestion.
+    #[test]
+    fn dismissed_pairs_stop_being_suggested() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for (id, title) in [("p1", "Same Game Title"), ("p2", "Same Game Title")] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'game',?2,'0','1')",
+                params![id, title],
+            )
+            .unwrap();
+        }
+        let sugg = pairing_suggestions(&conn, Some("game")).unwrap();
+        assert_eq!(sugg.len(), 1);
+        // the UI labels its rows from these — they must be the real sources
+        assert_eq!((sugg[0].a_id.as_str(), sugg[0].b_id.as_str()), ("p1", "p2"));
+        dismiss_pair(&conn, "p1", "p2").unwrap();
+        assert!(pairing_suggestions(&conn, Some("game")).unwrap().is_empty());
+        // dismissal is symmetric and keeps both rows alive
+        dismiss_pair(&conn, "p2", "p1").unwrap();
+        assert!(pairing_suggestions(&conn, None).unwrap().is_empty());
+        assert!(get_item(&conn, "p1").unwrap().is_some());
+        assert!(get_item(&conn, "p2").unwrap().is_some());
     }
 
     #[test]
@@ -1323,16 +1503,16 @@ mod tests {
         // Tag write path + tag filter + top tags.
         add_item_tag(&conn, "g1", "renpy", TYPE_CONTENT).unwrap();
         add_item_tag(&conn, "g2", "renpy", TYPE_CONTENT).unwrap();
-        let tagged = list_items(&conn, 300, 0, None, None, Some("renpy"), None).unwrap();
+        let tagged = list_items(&conn, 300, 0, None, None, Some("renpy"), None, None).unwrap();
         assert_eq!(tagged.len(), 2);
         let tops = top_tags(&conn, 10, None).unwrap();
         assert_eq!(tops[0].name, "renpy");
         assert_eq!(tops[0].count, 2);
         remove_item_tag(&conn, "g2", tops[0].id).unwrap();
-        assert_eq!(list_items(&conn, 300, 0, None, None, Some("renpy"), None).unwrap().len(), 1);
+        assert_eq!(list_items(&conn, 300, 0, None, None, Some("renpy"), None, None).unwrap().len(), 1);
 
         // Site filter + per-site counts (Media view filters).
-        let from_dlsite = list_items(&conn, 300, 0, None, None, None, Some("dlsite")).unwrap();
+        let from_dlsite = list_items(&conn, 300, 0, None, None, None, Some("dlsite"), None).unwrap();
         assert_eq!(from_dlsite.len(), 1);
         let sites = counts_by_site(&conn, Some("game")).unwrap();
         assert_eq!(sites.len(), 2);
@@ -1340,15 +1520,18 @@ mod tests {
         assert!(counts_by_site(&conn, Some("media")).unwrap().is_empty());
         assert!(top_tags(&conn, 10, Some("media")).unwrap().is_empty());
 
-        // Site settings upsert semantics.
-        set_site_setting(&conn, "ehentai", None, None, None).unwrap();
+        // Site settings upsert semantics. #28: the first touch of a site (here,
+        // just enabling it) must seed that site's real rate, not a shared 700.
+        set_site_setting(&conn, "ehentai", None, None, None, 10_500).unwrap();
         assert!(site_enabled(&conn, "ehentai", true));
-        set_site_setting(&conn, "ehentai", Some(false), Some("ipb_member_id=1"), None).unwrap();
+        assert_eq!(site_rate_ms(&conn, "ehentai", 1), 10_500);
+        set_site_setting(&conn, "ehentai", Some(false), Some("ipb_member_id=1"), None, 700).unwrap();
         assert!(!site_enabled(&conn, "ehentai", true));
         assert_eq!(site_cookie(&conn, "ehentai").as_deref(), Some("ipb_member_id=1"));
-        set_site_setting(&conn, "ehentai", Some(true), None, None).unwrap();
+        set_site_setting(&conn, "ehentai", Some(true), None, None, 700).unwrap();
         assert_eq!(site_cookie(&conn, "ehentai").as_deref(), Some("ipb_member_id=1"));
-        assert_eq!(site_rate_ms(&conn, "ehentai", 10_500), 700);
+        // later calls must not clobber the rate that was seeded on insert
+        assert_eq!(site_rate_ms(&conn, "ehentai", 10_500), 10_500);
         assert_eq!(site_rate_ms(&conn, "exhentai", 10_500), 10_500);
         assert_eq!(source_item_id(&conn, "dlsite", "https://www.dlsite.com/maniax/work/=/product_id/RJ123456.html").as_deref(), Some("g1"));
         assert!(source_item_id(&conn, "dlsite", "https://www.dlsite.com/nope.html").is_none());
