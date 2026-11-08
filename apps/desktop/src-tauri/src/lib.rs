@@ -718,6 +718,7 @@ fn list_items(
     kind: Option<String>,
     tag: Option<String>,
     site: Option<String>,
+    source: Option<String>,
 ) -> Result<Vec<goon_core::db::ItemSummary>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
@@ -729,8 +730,19 @@ fn list_items(
         kind.as_deref(),
         tag.as_deref(),
         site.as_deref(),
+        source.as_deref(),
     )
     .map_err(err)
+}
+
+#[tauri::command]
+fn source_stats(
+    state: tauri::State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<goon_core::db::SourceStats, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::source_stats(&opened.conn, kind.as_deref()).map_err(err)
 }
 
 #[tauri::command]
@@ -972,6 +984,7 @@ fn set_site_setting(
         enabled,
         cookie.as_deref().map(str::trim),
         rate_ms.map(|r| r.clamp(0, 600_000)),
+        ingest::default_rate_ms(&site),
     )
     .map_err(err)
 }
@@ -1017,6 +1030,18 @@ fn pairing_suggestions(
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     goon_core::db::pairing_suggestions(&opened.conn, kind.as_deref()).map_err(err)
+}
+
+/// #31: "keep both" — this pair is not a duplicate, stop suggesting it.
+#[tauri::command]
+fn dismiss_pair(
+    state: tauri::State<'_, AppState>,
+    a_id: String,
+    b_id: String,
+) -> Result<(), String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::dismiss_pair(&opened.conn, &a_id, &b_id).map_err(err)
 }
 
 #[tauri::command]
@@ -1601,6 +1626,68 @@ async fn re_enrich_item(
     report
 }
 
+/// #36: batch re-fetch ("Re-fetch metadata" in select mode). One observable
+/// job (progress, current item, Stop — D15) over the same code path the
+/// per-item button uses; nothing else is blocked while it runs.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RefetchSummary {
+    items: usize,
+    enriched: usize,
+    sources: usize,
+    failed: usize,
+    stopped: bool,
+}
+
+#[tauri::command]
+async fn re_enrich_items(
+    state: tauri::State<'_, AppState>,
+    item_ids: Vec<String>,
+) -> Result<RefetchSummary, String> {
+    let n = item_ids.len();
+    if n == 0 {
+        return Err("nothing selected".into());
+    }
+    let job = state
+        .jobs
+        .start("enrich", &format!("{n} items"))
+        .ok_or("an enrichment is already running — see the activity strip")?;
+    let mut sum = RefetchSummary { items: n, enriched: 0, sources: 0, failed: 0, stopped: false };
+    for (i, id) in item_ids.iter().enumerate() {
+        if job.cancelled() {
+            sum.stopped = true;
+            sum.items = i;
+            break;
+        }
+        job.set_progress(i, n, id);
+        match ingest::reenrich_item(&state, id, &job).await {
+            Ok(r) => {
+                sum.enriched += r.enriched;
+                sum.sources += r.sources;
+            }
+            Err(_) => sum.failed += 1,
+        }
+    }
+    let failed_note = if sum.failed > 0 {
+        format!(" · {} item(s) failed", sum.failed)
+    } else {
+        String::new()
+    };
+    job.finish(&format!(
+        "{} of {} items done · {} of {} sources gave something{}",
+        sum.items,
+        n,
+        sum.enriched,
+        sum.sources,
+        if sum.stopped {
+            " (stopped)"
+        } else {
+            failed_note.as_str()
+        }
+    ));
+    Ok(sum)
+}
+
 #[tauri::command]
 fn add_source(
     state: tauri::State<'_, AppState>,
@@ -1742,6 +1829,7 @@ pub fn run() {
             kind_stats,
             site_stats,
             list_items,
+            source_stats,
             get_thumbs,
             media_view,
             update_item,
@@ -1758,6 +1846,7 @@ pub fn run() {
             check_updates,
             list_updates,
             pairing_suggestions,
+            dismiss_pair,
             merge_items,
             import_game_folder,
             import_game_exe,
@@ -1766,6 +1855,7 @@ pub fn run() {
             import_bookmarks,
             import_video_files,
             re_enrich_item,
+            re_enrich_items,
             add_source,
             remove_source,
             delete_items,
@@ -1919,11 +2009,11 @@ mod integration_tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let items = goon_core::db::list_items(conn, 300, 0, None, None, None, None).unwrap();
+        let items = goon_core::db::list_items(conn, 300, 0, None, None, None, None, None).unwrap();
         assert_eq!(items.len(), 1, "imported but list showed nothing");
         assert_eq!(items[0].title, "Game X");
         assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None).unwrap();
+        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None, None).unwrap();
         assert_eq!(games_only.len(), 1);
         drop(inner);
 
