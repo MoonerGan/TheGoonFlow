@@ -6,6 +6,7 @@
 //! always stores the URL even when the metadata fetch fails — losing the
 //! link is worse than a bare entry.
 
+use crate::jobs::JobHandle;
 use crate::{new_id, now_epoch, AppState};
 use goon_core::db;
 use goon_core::media;
@@ -858,10 +859,11 @@ pub struct UpdateReport {
     pub checked: usize,
     pub updated: usize,
     pub failures: usize,
+    pub stopped: bool,
     pub updated_titles: Vec<String>,
 }
 
-pub async fn check_updates(state: &AppState) -> Result<UpdateReport, String> {
+pub async fn check_updates(state: &AppState, job: &JobHandle) -> Result<UpdateReport, String> {
     let targets = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
@@ -869,7 +871,13 @@ pub async fn check_updates(state: &AppState) -> Result<UpdateReport, String> {
     }
     .map_err(|e| e.to_string())?;
 
-    let mut report = UpdateReport { checked: 0, updated: 0, failures: 0, updated_titles: Vec::new() };
+    let mut report = UpdateReport {
+        checked: 0,
+        updated: 0,
+        failures: 0,
+        stopped: false,
+        updated_titles: Vec::new(),
+    };
     if targets.is_empty() {
         return Ok(report);
     }
@@ -887,12 +895,18 @@ pub async fn check_updates(state: &AppState) -> Result<UpdateReport, String> {
 
     let client = reqwest::Client::builder()
         .user_agent(UA)
-        .timeout(Duration::from_secs(25))
+        .timeout(Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
 
+    let targets_len = targets.len();
     let mut last: Option<(String, std::time::Instant)> = None;
-    for t in targets {
+    for (i, t) in targets.into_iter().enumerate() {
+        if job.cancelled() {
+            report.stopped = true;
+            break;
+        }
+        job.set_progress(i, targets_len, &format!("{} ({})", t.title, t.site));
         let (cookie, rate) = site_ctx.get(&t.site).cloned().unwrap_or((None, default_rate_ms(&t.site)));
         if let Some((prev_site, when)) = &last {
             if prev_site == &t.site {

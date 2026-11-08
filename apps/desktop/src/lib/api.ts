@@ -95,6 +95,7 @@ export type GameImportReport = {
   imported: number;
   skipped: number;
   withThumb: number;
+  stopped: boolean;
   titles: string[];
   failures: string[];
 };
@@ -104,6 +105,20 @@ export type ImageImportReport = {
   title: string;
   imagesStored: number;
   failed: number;
+  stopped: boolean;
+};
+
+export type JobInfo = {
+  id: number;
+  kind: string;
+  label: string;
+  done: number;
+  total: number;
+  current: string;
+  note: string;
+  finished: boolean;
+  cancelled: boolean;
+  startedAt: number;
 };
 
 export type FailureDetail = { url: string; reason: string };
@@ -117,6 +132,7 @@ export type BookmarkReport = {
   thumbnailed: number;
   tagsAdded: number;
   fetchFailures: number;
+  stopped: boolean;
   bySite: Record<string, number>;
   failures: FailureDetail[];
   unrecognizedSample: string[];
@@ -160,7 +176,13 @@ export type UpdateReport = {
   checked: number;
   updated: number;
   failures: number;
+  stopped: boolean;
   updatedTitles: string[];
+};
+
+export type SiteCount = {
+  site: string;
+  count: number;
 };
 
 export type PairSuggestion = {
@@ -178,6 +200,7 @@ export const listItems = (
   search?: string,
   kind?: string,
   tag?: string,
+  site?: string,
 ) =>
   invoke<ItemSummary[]>("list_items", {
     limit,
@@ -185,7 +208,10 @@ export const listItems = (
     search: search ?? null,
     kind: kind ?? null,
     tag: tag ?? null,
+    site: site ?? null,
   });
+export const siteStats = (kind?: string) =>
+  invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
 export const updateItem = (
@@ -212,7 +238,8 @@ export const importBookmarks = (path: string, fetchOnline: boolean) =>
 // ---------- M1: clip + tags ----------
 export const clipUrl = (url: string) => invoke<ClipReport>("clip_url", { url });
 export const getItem = (id: string) => invoke<ItemDetail | null>("get_item", { id });
-export const topTags = (limit = 40) => invoke<TagCount[]>("top_tags", { limit });
+export const topTags = (limit = 40, kind?: "game" | "media") =>
+  invoke<TagCount[]>("top_tags", { limit, kind: kind ?? null });
 export const addItemTag = (id: string, name: string, kind?: "content" | "site" | "status") =>
   invoke<void>("add_item_tag", { id, name, kind: kind ?? null });
 export const removeItemTag = (id: string, tagId: number) =>
@@ -239,3 +266,7 @@ export const pairingSuggestions = () =>
   invoke<PairSuggestion[]>("pairing_suggestions");
 export const mergeItems = (keepId: string, dropId: string) =>
   invoke<void>("merge_items", { keepId, dropId });
+
+// ---------- activity (jobs) ----------
+export const listJobs = () => invoke<JobInfo[]>("list_jobs");
+export const cancelJob = (id: number) => invoke<void>("cancel_job", { id });

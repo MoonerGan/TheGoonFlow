@@ -170,6 +170,28 @@ pub fn counts_by_kind(conn: &Connection) -> rusqlite::Result<Vec<(&'static str, 
         .collect())
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SiteCount {
+    pub site: String,
+    pub count: i64,
+}
+
+/// Which sites the library actually came from — drives the Media view's
+/// "where is it from" filter.
+pub fn counts_by_site(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<Vec<SiteCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT s.site, count(DISTINCT s.item_id) FROM sources s JOIN items i ON i.id = s.item_id
+         WHERE (?1 IS NULL
+                OR (?1 = 'game' AND i.kind = 'game')
+                OR (?1 = 'media' AND i.kind IN ('gallery','post')))
+         GROUP BY s.site
+         ORDER BY count(DISTINCT s.item_id) DESC, s.site",
+    )?;
+    let rows = stmt.query_map(params![kind], |r| Ok(SiteCount { site: r.get(0)?, count: r.get(1)? }))?;
+    rows.collect()
+}
+
 pub fn insert_item(
     conn: &Connection,
     item: &Item,
@@ -215,9 +237,10 @@ pub fn list_items(
     search: Option<&str>,
     kind: Option<&str>,
     tag: Option<&str>,
+    site: Option<&str>,
 ) -> rusqlite::Result<Vec<ItemSummary>> {
     let like = search.map(|s| format!("%{}%", s.trim()));
-    // Placeholders are always ?1..?5 — binding with params! fills positions
+    // Placeholders are always ?1..?6 — binding with params! fills positions
     // in order, so skipping ?1 while using ?2 would bind offset to ?2.
     let sql = "SELECT id, kind, title, status, version,
                     EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
@@ -230,11 +253,13 @@ pub fn list_items(
                AND (?5 IS NULL OR EXISTS (
                      SELECT 1 FROM item_tags it JOIN tags t ON t.id = it.tag_id
                      WHERE it.item_id = items.id AND t.name = ?5))
+               AND (?6 IS NULL OR EXISTS (
+                     SELECT 1 FROM sources ss WHERE ss.item_id = items.id AND ss.site = ?6))
              ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3";
     let mut stmt = conn.prepare(sql)?;
     let mut out = Vec::new();
     let mapped = stmt.query_map(
-        params![like, limit, offset, kind, tag],
+        params![like, limit, offset, kind, tag, site],
         map_item_summary,
     )?;
     for row in mapped {
@@ -414,14 +439,20 @@ pub struct TagCount {
     pub count: i64,
 }
 
-pub fn top_tags(conn: &Connection, limit: i64) -> rusqlite::Result<Vec<TagCount>> {
+/// Tag cloud for a view. `kind` is 'game' | 'media' | None so the Media view
+/// shows media tags and the Games view shows game tags.
+pub fn top_tags(conn: &Connection, limit: i64, kind: Option<&str>) -> rusqlite::Result<Vec<TagCount>> {
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, tt.key, count(*) AS c FROM item_tags it
          JOIN tags t ON t.id = it.tag_id
          JOIN tag_types tt ON tt.id = t.type_id
+         JOIN items i ON i.id = it.item_id
+         WHERE (?2 IS NULL
+                OR (?2 = 'game' AND i.kind = 'game')
+                OR (?2 = 'media' AND i.kind IN ('gallery','post')))
          GROUP BY t.id ORDER BY c DESC, t.name LIMIT ?1",
     )?;
-    let rows = stmt.query_map(params![limit], |r| {
+    let rows = stmt.query_map(params![limit, kind], |r| {
         Ok(TagCount { id: r.get(0)?, name: r.get(1)?, type_key: r.get(2)?, count: r.get(3)? })
     })?;
     rows.collect()
@@ -840,11 +871,11 @@ mod tests {
             )
             .unwrap();
         }
-        let all = list_items(&conn, 300, 0, None, None, None).unwrap();
+        let all = list_items(&conn, 300, 0, None, None, None, None).unwrap();
         assert_eq!(all.len(), 3);
-        let games = list_items(&conn, 300, 0, None, Some("game"), None).unwrap();
+        let games = list_items(&conn, 300, 0, None, Some("game"), None, None).unwrap();
         assert_eq!(games.len(), 2);
-        let search = list_items(&conn, 300, 0, Some("gamma"), None, None).unwrap();
+        let search = list_items(&conn, 300, 0, Some("gamma"), None, None, None).unwrap();
         assert_eq!(search.len(), 1);
         let counts = counts_by_status(&conn, Some("game")).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 2);
@@ -872,13 +903,22 @@ mod tests {
         // Tag write path + tag filter + top tags.
         add_item_tag(&conn, "g1", "renpy", TYPE_CONTENT).unwrap();
         add_item_tag(&conn, "g2", "renpy", TYPE_CONTENT).unwrap();
-        let tagged = list_items(&conn, 300, 0, None, None, Some("renpy")).unwrap();
+        let tagged = list_items(&conn, 300, 0, None, None, Some("renpy"), None).unwrap();
         assert_eq!(tagged.len(), 2);
-        let tops = top_tags(&conn, 10).unwrap();
+        let tops = top_tags(&conn, 10, None).unwrap();
         assert_eq!(tops[0].name, "renpy");
         assert_eq!(tops[0].count, 2);
         remove_item_tag(&conn, "g2", tops[0].id).unwrap();
-        assert_eq!(list_items(&conn, 300, 0, None, None, Some("renpy")).unwrap().len(), 1);
+        assert_eq!(list_items(&conn, 300, 0, None, None, Some("renpy"), None).unwrap().len(), 1);
+
+        // Site filter + per-site counts (Media view filters).
+        let from_dlsite = list_items(&conn, 300, 0, None, None, None, Some("dlsite")).unwrap();
+        assert_eq!(from_dlsite.len(), 1);
+        let sites = counts_by_site(&conn, Some("game")).unwrap();
+        assert_eq!(sites.len(), 2);
+        assert!(sites.iter().any(|s| s.site == "f95" && s.count == 1));
+        assert!(counts_by_site(&conn, Some("media")).unwrap().is_empty());
+        assert!(top_tags(&conn, 10, Some("media")).unwrap().is_empty());
 
         // Site settings upsert semantics.
         set_site_setting(&conn, "ehentai", None, None, None).unwrap();

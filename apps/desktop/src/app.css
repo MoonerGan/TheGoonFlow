@@ -552,3 +552,116 @@ textarea:focus {
     flex-wrap: wrap;
   }
 }
+
+/* view tabs (Games / Media / Sources) */
+.topbar {
+  flex-wrap: wrap;
+}
+
+.tabs {
+  display: flex;
+  gap: 0.25rem;
+  margin-left: 0.5rem;
+}
+
+.tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 0.4rem 0.9rem;
+  color: var(--muted);
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  background: var(--panel-2);
+  color: var(--text);
+  border-color: var(--border);
+}
+
+.tab .count {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin-left: 0.3rem;
+}
+
+/* per-view action bar — game buttons only live on the Games view, etc. */
+.view-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel);
+}
+
+/* live activity strip (jobs) */
+.activity {
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-2);
+  padding: 0.45rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.activity-live {
+  border-left: 3px solid var(--accent);
+}
+
+.activity-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.activity-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.activity-label {
+  white-space: nowrap;
+}
+
+.activity-current {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 120px;
+}
+
+.bar {
+  width: 160px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--bg);
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.bar-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+}
+
+.activity-done .hint {
+  font-size: 0.78rem;
+}
+
+.sources-page {
+  max-width: 980px;
+}

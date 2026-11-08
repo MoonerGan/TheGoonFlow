@@ -3,9 +3,10 @@
 A private, encrypted library for the adult games and imageboard content you
 already browse and own. Everything stays on your machine. Nothing phones home.
 
-**Current state: M0** — encrypted vault, portable folder, importers, library
-grid with editing, nuke. URL clipping, update tracking, and downloads are on
-the roadmap (see [PLAN.md](../PLAN.md)).
+**Current state: M1/M2** — encrypted vault, portable folder, importers, separate
+Games and Media library views, URL clipping, tags, update tracking, live import
+progress with Stop. Downloads and the browser extension are on the roadmap (see
+[PLAN.md](../PLAN.md)).
 
 ---
 
@@ -33,10 +34,12 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 
 ## 2. Lock, unlock, and the nuke
 
-- **Lock** (top-bar) closes the database and wipes the key from memory.
-  Reopen with the passphrase.
+- **Lock** (top-bar) closes the database and wipes the key from memory. Any
+  running import, clip or update check is cancelled first — nothing keeps
+  fetching or writing after you lock. Reopen with the passphrase.
 - **Nuke** (bottom of the lock screen, and on the setup/reconnect screens):
-  crypto-erase. The key is shredded first, then every vault file is
+  crypto-erase. Every running import/fetch is cancelled first, then the key is
+  shredded, then every vault file is
   overwritten with random bytes and deleted. Type `NUKE` to confirm — it is
   **irreversible**. Use it if you forgot the passphrase or want a clean start.
 - **Forget pointer** (reconnect screen): deletes only the app's `flow.cfg`
@@ -47,9 +50,33 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 
 ## 3. Getting things in
 
-Six buttons in the top bar. Everything you add becomes a normal library entry —
-click any card to correct it. The sidebar splits the library into **Games** and
-**Media** (galleries/posts) views, filterable by status and by tag.
+Three tabs across the top — **Games**, **Media**, **Sources** — and each view
+carries only its own actions:
+
+- **Games** view: *+ Game folder / + Game zip / + Game .exe*, pipeline filters
+  (seen / tracking / wishlist / downloaded / played), Updates, Possible dupes.
+- **Media** view: *+ Clip URL / + Images / + Bookmarks*, filters by **source
+  site** and **tag**. No pipeline filters — a booru post has no "wishlist"
+  state, so you will never be offered one.
+- **Sources**: site on/off, politeness rates, login cookies.
+
+Everything you add becomes a normal library entry — click any card to correct it.
+
+### Nothing blocks the app (and you can watch/stop it)
+
+Imports run in the background as **jobs**. While one runs:
+
+- every other button stays usable — import bookmarks and edit a game at the
+  same time;
+- the **activity strip** under the tabs shows what is happening: item counts
+  (`bookmarks 134/812`), a progress bar, and the exact URL/folder it is on
+  right now — so a slow enrich phase is visible, not a frozen window;
+- **Stop** on the strip halts a job at the current item; everything already
+  imported is kept;
+- items appear in the grid **as they are imported**, not all at the end.
+
+Only a *second job of the same kind* is refused (two simultaneous bookmark
+imports of one file would just race each other) — the button says why.
 
 ### + Clip URL (the everyday one)
 Paste a single link and it is identified, stored, and decorated where possible:
@@ -137,29 +164,35 @@ fetch.
 ## 4. The library
 
 - Grid of cards (thumbnail + title + kind/version/status). Click for the
-  editor.
-- **Editor:** fix the title, set circle/developer, version, pipeline
-  **status** (`seen / tracking / wishlist / downloaded / played`), and the
-  **✓ Complete** personal marker (green chip — it means *"I finished this"*,
-  independent of status, and it survives game updates). Add or remove **tags**
-  (booru tags arrive on their own when you clip/enrich; add your own, e.g.
-  `renpy`, `dnf`). The editor also lists every **source** link an item has.
-- **Tagged** (sidebar): the most used tags in your vault; click one to filter,
-  click again (or *clear*) to unfilter.
-- **Updates**: re-visits the DLsite pages and f95 threads of games you track
-  and records version changes. A game marked Complete still surfaces here —
-  completion is a tag, not a full stop.
-- **Possible dupes**: the same title from DLsite + f95 + a local folder is
-  almost certainly one work. Nothing merges itself; you pick which entry to
-  keep and the other's sources/tags/art are folded into it.
-- **Sources**: turn each site on or off, set how polite it should be (ms
-  between requests), and paste a **cookie** for sites that need a login
-  (e-hentai, f95 threads). Repack mirrors are off by default — they are
-  re-uploads of DLsite works, and their links fold into the original through
-  *Possible dupes* rather than staying separate entries.
+  editor. Cards arrive live during imports.
+- **Editor (games):** title, circle/developer, version, pipeline **status**
+  (`seen / tracking / wishlist / downloaded / played`), and the **✓ Complete**
+  personal marker (green chip — it means *"I finished this"*, independent of
+  status, and it survives game updates).
+- **Editor (media):** title and tags only — no status/version/circle fields,
+  because none of that applies to a post or gallery.
+- Both editors: add or remove **tags** (booru tags arrive on their own when you
+  clip/enrich; add your own, e.g. `renpy`, `dnf`) and see every **source** link
+  an item has.
+- **Tagged** (sidebar): the most used tags *in the current view* (game tags
+  and media tags are kept apart); click one to filter, click again (or *clear*)
+  to unfilter.
+- **From site** (Media sidebar): filter by where the item came from — booru,
+  e-hentai, `local` for your own files — with live counts.
+- **Updates** (Games view): re-visits the DLsite pages and f95 threads of games
+  you track and records version changes. A game marked Complete still surfaces
+  here — completion is a tag, not a full stop.
+- **Possible dupes** (Games view): the same title from DLsite + f95 + a local
+  folder is almost certainly one work. Nothing merges itself; you pick which
+  entry to keep and the other's sources/tags/art are folded into it.
+- **Sources** (tab): turn each site on or off, set how polite it should be (ms
+  between requests), paste a **cookie** for sites that need a login (e-hentai,
+  f95 threads), and see how many items each site currently accounts for.
+  Repack mirrors are off by default — they are re-uploads of DLsite works, and
+  their links fold into the original through *Possible dupes* rather than
+  staying separate entries.
 - **Remove from vault:** deletes the entry (and vault-stored images) — your
   game folders on disk are never touched.
-- Sidebar filters by status; counts are live.
 - The `:port` pill shows the companion API port (used by the future browser
   extension; it listens on 127.0.0.1 only).
 
@@ -181,6 +214,7 @@ fetch.
 | "that folder is not a goonflow vault" | You picked the wrong folder (e.g. the parent). Pick the one containing `vault.marker`. |
 | Wrong passphrase loop | No recovery — that's crypto, not a bug. Restore from a backup or nuke & restart. |
 | Import found 0 games | The scan goes 4 levels deep; the game folder itself must contain the engine files. If the game is inside a .zip, use *+ Game zip*. Selecting the game's folder directly always works. |
+| Bookmark import feels slow | It's probably the *enrich online* fetch, which is deliberately polite (one request per site, several seconds apart for some sites). The activity strip shows exactly which link it's on. Hit **Stop** any time — everything imported so far is kept — and re-run with enrich off (or import again later with just the new bookmarks); duplicates are skipped automatically. |
 | Clip says "…is disabled — enable it under Sources" | That site is switched off (repack mirrors ship off). Turn it on in *Sources* and clip again. |
 | Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
 | Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |

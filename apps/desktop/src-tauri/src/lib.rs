@@ -2,10 +2,12 @@ mod bookmarks;
 mod companion;
 mod importer;
 mod ingest;
+mod jobs;
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use goon_core::model::Status;
+use jobs::Jobs;
 use rand::rngs::OsRng;
 use rand::RngCore;
 use rusqlite::Connection;
@@ -46,6 +48,9 @@ pub struct AppState {
     exe_dir: PathBuf,
     companion: Option<companion::CompanionInfo>,
     locked: Arc<AtomicBool>,
+    /// Long-running work (imports, update checks) runs as jobs: observable,
+    /// stoppable, and cancelled by Lock/Nuke.
+    jobs: Arc<Jobs>,
 }
 
 fn err<E: std::fmt::Display>(e: E) -> String {
@@ -156,6 +161,7 @@ fn unlock(state: tauri::State<'_, AppState>, passphrase: String) -> Result<(), S
 
 #[tauri::command]
 fn lock(state: tauri::State<'_, AppState>) {
+    state.jobs.cancel_all(); // imports/fetches must stop, not just hide
     let mut inner = state.inner.lock().unwrap();
     inner.opened = None; // drops conn (checkpoint) + zeroizes data key
     state.locked.store(true, Ordering::SeqCst);
@@ -174,6 +180,9 @@ fn nuke_vault(
     if confirm != "NUKE" {
         return Err("type NUKE exactly to confirm".into());
     }
+    // Stop every job first: nothing should be fetching or writing while the
+    // files are being shredded, and no loop may re-open anything afterwards.
+    state.jobs.cancel_all();
     let root = {
         let mut inner = state.inner.lock().unwrap();
         let root = inner
@@ -191,6 +200,8 @@ fn nuke_vault(
         goon_vault::nuke(&root).map_err(err)?;
         let _ = std::fs::remove_dir_all(&root);
     }
+    // Job history holds URLs and paths — wipe it along with the vault.
+    state.jobs.clear();
     Ok(())
 }
 
@@ -198,6 +209,7 @@ fn nuke_vault(
 /// Escape hatch when the pointer is stale/wrong and you want a clean start.
 #[tauri::command]
 fn reset_pointer(state: tauri::State<'_, AppState>) {
+    state.jobs.cancel_all();
     goon_locator::clear(&state.exe_dir);
     let mut inner = state.inner.lock().unwrap();
     inner.vault_root = None;
@@ -232,6 +244,7 @@ fn list_items(
     search: Option<String>,
     kind: Option<String>,
     tag: Option<String>,
+    site: Option<String>,
 ) -> Result<Vec<goon_core::db::ItemSummary>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
@@ -242,8 +255,19 @@ fn list_items(
         search.as_deref(),
         kind.as_deref(),
         tag.as_deref(),
+        site.as_deref(),
     )
     .map_err(err)
+}
+
+#[tauri::command]
+fn site_stats(
+    state: tauri::State<'_, AppState>,
+    kind: Option<String>,
+) -> Result<Vec<goon_core::db::SiteCount>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::counts_by_site(&opened.conn, kind.as_deref()).map_err(err)
 }
 
 #[derive(Serialize)]
@@ -337,10 +361,11 @@ fn get_item(
 fn top_tags(
     state: tauri::State<'_, AppState>,
     limit: Option<i64>,
+    kind: Option<String>,
 ) -> Result<Vec<goon_core::db::TagCount>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::top_tags(&opened.conn, limit.unwrap_or(40)).map_err(err)
+    goon_core::db::top_tags(&opened.conn, limit.unwrap_or(40), kind.as_deref()).map_err(err)
 }
 
 #[tauri::command]
@@ -437,7 +462,21 @@ fn set_site_setting(
 
 #[tauri::command]
 async fn check_updates(state: tauri::State<'_, AppState>) -> Result<ingest::UpdateReport, String> {
-    ingest::check_updates(&state).await
+    let job = state
+        .jobs
+        .start("updates", "tracked games")
+        .ok_or("an update check is already running")?;
+    let report = ingest::check_updates(&state, &job).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} checked, {} updated{}",
+            r.checked,
+            r.updated,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]
@@ -472,38 +511,85 @@ fn merge_items(
     goon_core::db::merge_items(conn, &keep_id, &drop_id).map_err(err)
 }
 
-// ---------- import (D13) ----------
+// ---------- import (D13) — every import runs as a job ----------
+// Async so Tauri runs them off the main thread: a 3000-link bookmark import
+// must never freeze the window or block other commands.
 
 #[tauri::command]
-fn import_game_folder(
+async fn import_game_folder(
     state: tauri::State<'_, AppState>,
     dir: String,
 ) -> Result<importer::GameImportReport, String> {
-    importer::import_game_folder(&state, dir)
+    let job = state
+        .jobs
+        .start("games", &dir)
+        .ok_or("a game import is already running — see the activity strip")?;
+    let report = importer::import_game_folder(&state, dir, &job);
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} imported, {} skipped{}",
+            r.imported,
+            r.skipped,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]
-fn import_game_exe(
+async fn import_game_exe(
     state: tauri::State<'_, AppState>,
     exe: String,
 ) -> Result<importer::GameImportReport, String> {
-    importer::import_game_exe(&state, exe)
+    let job = state
+        .jobs
+        .start("games", &exe)
+        .ok_or("a game import is already running — see the activity strip")?;
+    let report = importer::import_game_exe(&state, exe, &job);
+    match &report {
+        Ok(r) => job.finish(&format!("{} imported", r.imported)),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]
-fn import_game_zip(
+async fn import_game_zip(
     state: tauri::State<'_, AppState>,
     zip_path: String,
 ) -> Result<importer::GameImportReport, String> {
-    importer::import_game_zip(&state, zip_path)
+    let job = state
+        .jobs
+        .start("games", &zip_path)
+        .ok_or("a game import is already running — see the activity strip")?;
+    let report = importer::import_game_zip(&state, zip_path, &job);
+    match &report {
+        Ok(r) => job.finish(&format!("{} imported", r.imported)),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]
-fn import_image_files(
+async fn import_image_files(
     state: tauri::State<'_, AppState>,
     paths: Vec<String>,
 ) -> Result<importer::ImageImportReport, String> {
-    importer::import_image_files(&state, paths)
+    let job = state
+        .jobs
+        .start("images", &format!("{} images", paths.len()))
+        .ok_or("an image import is already running — see the activity strip")?;
+    let report = importer::import_image_files(&state, paths, &job);
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} stored{}",
+            r.images_stored,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]
@@ -512,7 +598,38 @@ async fn import_bookmarks(
     path: String,
     fetch_online: bool,
 ) -> Result<bookmarks::BookmarkReport, String> {
-    bookmarks::import_bookmarks(&state, path, fetch_online).await
+    let job = state
+        .jobs
+        .start("bookmarks", &path)
+        .ok_or("a bookmark import is already running — see the activity strip")?;
+    job.set_note(if fetch_online {
+        "storing links, then fetching art politely"
+    } else {
+        "storing links (no network)"
+    });
+    let report = bookmarks::import_bookmarks(&state, path, fetch_online, &job).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} imported, {} unrecognized{}",
+            r.imported,
+            r.unrecognized,
+            if r.stopped { " (stopped)" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("failed: {e}")),
+    }
+    report
+}
+
+// ---------- activity (jobs) ----------
+
+#[tauri::command]
+fn list_jobs(state: tauri::State<'_, AppState>) -> Vec<jobs::JobInfo> {
+    state.jobs.snapshot()
+}
+
+#[tauri::command]
+fn cancel_job(state: tauri::State<'_, AppState>, id: u64) {
+    state.jobs.cancel(id);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -546,6 +663,7 @@ pub fn run() {
         exe_dir,
         companion,
         locked,
+        jobs: Arc::new(Jobs::default()),
     };
 
     tauri::Builder::default()
@@ -563,6 +681,7 @@ pub fn run() {
             reset_pointer,
             vault_stats,
             kind_stats,
+            site_stats,
             list_items,
             get_thumbs,
             update_item,
@@ -584,7 +703,9 @@ pub fn run() {
             import_game_exe,
             import_game_zip,
             import_image_files,
-            import_bookmarks
+            import_bookmarks,
+            list_jobs,
+            cancel_job
         ])
         .run(tauri::generate_context!())
         .expect("error while running The Goon Flow");
@@ -620,18 +741,24 @@ mod integration_tests {
             exe_dir: tmp.clone(),
             companion: None,
             locked: Arc::new(AtomicBool::new(false)),
+            jobs: Arc::new(Jobs::default()),
         };
 
-        let report = importer::import_game_folder(&state, games.display().to_string()).unwrap();
+        let job = state.jobs.start("games", "games folder").unwrap();
+        let report = importer::import_game_folder(&state, games.display().to_string(), &job).unwrap();
+        job.finish("done");
         assert_eq!(report.imported, 1, "titles = {:?}", report.titles);
+
+        let snap = state.jobs.snapshot();
+        assert!(snap.iter().any(|j| j.kind == "games" && j.finished));
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let items = goon_core::db::list_items(conn, 300, 0, None, None, None).unwrap();
+        let items = goon_core::db::list_items(conn, 300, 0, None, None, None, None).unwrap();
         assert_eq!(items.len(), 1, "imported but list showed nothing");
         assert_eq!(items[0].title, "Game X");
         assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None).unwrap();
+        let games_only = goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None).unwrap();
         assert_eq!(games_only.len(), 1);
         drop(inner);
 

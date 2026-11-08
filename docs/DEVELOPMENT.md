@@ -57,9 +57,13 @@ crates/
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
+    views/      LibraryView (tab shell) + GamesView / MediaView (separate views)
+    components/ TileGrid, ItemEditor, ActivityBar, ClipDialog, SourcesPanel
+    lib/        api.ts (command bindings), activity.svelte.ts (job polling store)
   src-tauri/
     src/
       lib.rs        AppState, vault lifecycle commands, all tauri commands
+      jobs.rs       job registry: progress, cancellation, one job per kind
       companion.rs  127.0.0.1 axum API (handshake/ping/clip stub)
       ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
@@ -117,6 +121,23 @@ tools/
    `src/lib/api.ts` in sync with command structs.
 7. Importers are **best-effort, user-correctable**: never overwrite user edits
    on re-import; re-imports key off `source_exists(site, url)`.
+8. **Jobs, not modal blocking**: anything that can outlive a click (bookmark /
+   game / image import, update check) runs as a job (`jobs.rs`) — the command
+   grabs a `JobHandle` via `Jobs::start(kind, label)` (refuses a second job of
+   the same kind), the work loop calls `set_progress(done, total, current)` and
+   checks `job.cancelled()` **per item**, and the command calls `job.finish()`.
+   Long loops take the vault `Mutex` **per item, never for the whole batch**, so
+   the grid keeps answering while an import is mid-flight, and re-check
+   `inner.opened` each iteration — Lock/Nuke closes the vault underneath a
+   running job and the loop must stop, not panic. Lock / Nuke / forget-pointer
+   call `jobs.cancel_all()` **before** touching the vault; Nuke also
+   `jobs.clear()` because job history contains URLs and paths.
+9. **Views stay separate**: GamesView and MediaView share only components where
+   it genuinely helps (`TileGrid`, `ItemEditor`, which hides the pipeline fields
+   for media). Pipeline filters (seen/tracking/…) and the update/dupe panels
+   exist only in the Games view; site filters only in the Media view; the
+   backend helpers take `kind` (`list_items(…, kind, site)`, `top_tags(…, kind)`,
+   `counts_by_site(…)`) so each view's sidebar counts are always scoped.
 
 ## 5. Testing
 
@@ -139,6 +160,10 @@ cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
   CDN links, `file:///C:/…`, UNC, mirrors), `local_path` Windows path handling,
   and the HTML parsers (e-hentai gate vs gallery, DLsite og:*, f95 og:title →
   title + version + engine tags). All parse-only: no network in tests.
+- `jobs` — one job per kind, progress visible in the snapshot, `cancel` /
+  `cancel_all` reach the work loop, finished list bounded.
+- `bookmarks` (job path) — a pre-cancelled import stops early and reports
+  `stopped: true`; the finished job's snapshot shows the full total.
 
 When M3 site-packs land: save HTML/JSON **fixtures** per site and test
 parsers against them (site redesigns must become failing tests, not silent
@@ -166,6 +191,18 @@ manually.
   report, never a silent skip.
 - **Async commands + DB**: do all DB writes in sync scopes before/after the
   network phase (see `bookmarks::import_bookmarks` two-phase flow).
+- **Long-running commands**: mark the tauri command `async fn` (runs off the
+  main thread), start a job, pass `&JobHandle` into the importer, and
+  `job.finish(note)` on both paths. Reports carry `stopped: bool` so the UI can
+  say "stopped early — what came in is kept".
+- **Progress: polling, not events**: the frontend (`lib/activity.svelte.ts`)
+  polls `list_jobs()` — 800 ms while a job is live, ~4 s idle — instead of
+  receiving tauri events. Fewer moving parts, and a late-loading webview still
+  sees what happened. Job *state changes* fan out through `onActivityChange()`,
+  which is what makes the grid re-read while items are still arriving.
+  Buttons consult `jobState(kind)`: only a second job **of the same kind** is
+  disabled — a running bookmark import must never grey out Lock, clip, or the
+  game importers.
 - **Thumbnails**: always through `goon_core::media::put_thumbnail` (hash,
   dedup, size cap in one place).
 

@@ -14,10 +14,10 @@
       {
         "label": "main",
         "title": "Flow",
-        "width": 1240,
-        "height": 800,
-        "minWidth": 940,
-        "minHeight": 620,
+        "width": 1380,
+        "height": 860,
+        "minWidth": 1100,
+        "minHeight": 640,
         "center": true,
         "resizable": true
       }

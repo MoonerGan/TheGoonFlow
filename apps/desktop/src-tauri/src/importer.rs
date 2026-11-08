@@ -7,6 +7,7 @@
 //! name tokens. Cover art is opportunistically extracted for thumbnails.
 //! Everything lands as a normal item the user can then correct.
 
+use crate::jobs::JobHandle;
 use crate::{new_id, now_epoch, AppState};
 use goon_core::db;
 use goon_core::media;
@@ -16,12 +17,14 @@ use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GameImportReport {
     pub imported: usize,
     pub skipped: usize,
     pub with_thumb: usize,
+    /// True when the user stopped it (or the vault was locked) part-way.
+    pub stopped: bool,
     pub titles: Vec<String>,
     pub failures: Vec<String>,
 }
@@ -33,6 +36,7 @@ pub struct ImageImportReport {
     pub title: String,
     pub images_stored: usize,
     pub failed: usize,
+    pub stopped: bool,
 }
 
 /// How deep under the picked folder we look for games (library organizers
@@ -94,33 +98,35 @@ fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
     }
 }
 
-pub fn import_game_folder(state: &AppState, root: String) -> Result<GameImportReport, String> {
+pub fn import_game_folder(
+    state: &AppState,
+    root: String,
+    job: &JobHandle,
+) -> Result<GameImportReport, String> {
     let root = PathBuf::from(root);
     if !root.is_dir() {
         return Err("folder does not exist".into());
     }
-    let mut inner = state.inner.lock().unwrap();
-    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
 
+    job.set_progress(0, 0, "scanning for game folders…");
     let mut candidates = Vec::new();
     find_game_dirs(&root, MAX_SCAN_DEPTH, &mut candidates);
     candidates.sort();
     candidates.dedup();
+    job.set_note(&format!("{} game-shaped folders found", candidates.len()));
 
-    let mut report = GameImportReport {
-        imported: 0,
-        skipped: 0,
-        with_thumb: 0,
-        titles: Vec::new(),
-        failures: Vec::new(),
-    };
-    import_game_dirs(conn, &candidates, &mut report);
+    let mut report = GameImportReport::default();
+    import_game_dirs(state, &candidates, &mut report, job);
     Ok(report)
 }
 
 /// User pointed straight at a game's .exe — import its containing folder as
 /// one game (an exe at top level always fingerprints as pc-game).
-pub fn import_game_exe(state: &AppState, exe: String) -> Result<GameImportReport, String> {
+pub fn import_game_exe(
+    state: &AppState,
+    exe: String,
+    job: &JobHandle,
+) -> Result<GameImportReport, String> {
     let path = PathBuf::from(&exe);
     if !path.is_file() {
         return Err("file does not exist".into());
@@ -129,39 +135,34 @@ pub fn import_game_exe(state: &AppState, exe: String) -> Result<GameImportReport
         .parent()
         .ok_or("cannot determine game folder from that exe")?
         .to_path_buf();
-    let mut inner = state.inner.lock().unwrap();
-    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
-    let mut report = GameImportReport {
-        imported: 0,
-        skipped: 0,
-        with_thumb: 0,
-        titles: Vec::new(),
-        failures: Vec::new(),
-    };
-    import_game_dirs(conn, &[dir], &mut report);
+    let mut report = GameImportReport::default();
+    import_game_dirs(state, &[dir], &mut report, job);
     Ok(report)
 }
 
 /// Import a zipped game: fingerprint engine files inside the archive,
 /// extract title + cover art from the zip itself. The zip stays where it is;
 /// the vault stores a pointer to it.
-pub fn import_game_zip(state: &AppState, zip_path: String) -> Result<GameImportReport, String> {
+pub fn import_game_zip(
+    state: &AppState,
+    zip_path: String,
+    job: &JobHandle,
+) -> Result<GameImportReport, String> {
     let path = PathBuf::from(&zip_path);
     if !path.is_file() {
         return Err("zip file does not exist".into());
     }
-    let mut inner = state.inner.lock().unwrap();
-    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    job.set_progress(0, 1, &zip_path);
+    job.set_note("inspecting archive…");
 
-    let mut report = GameImportReport {
-        imported: 0,
-        skipped: 0,
-        with_thumb: 0,
-        titles: Vec::new(),
-        failures: Vec::new(),
-    };
-
+    let mut report = GameImportReport::default();
     let url = format!("file:///{}", path.to_string_lossy().replace('\\', "/"));
+
+    let mut inner = state.inner.lock().unwrap();
+    let Some(opened) = inner.opened.as_mut() else {
+        return Err("vault is locked".into());
+    };
+    let conn = &mut opened.conn;
     if db::source_exists(conn, "local", &url) {
         report.skipped += 1;
         return Ok(report);
@@ -215,24 +216,46 @@ pub fn import_game_zip(state: &AppState, zip_path: String) -> Result<GameImportR
     Ok(report)
 }
 
-fn import_game_dirs(conn: &rusqlite::Connection, dirs: &[PathBuf], report: &mut GameImportReport) {
+/// Locks the vault once per folder: a big library scan+import never freezes the
+/// rest of the app, and the user can stop it between items.
+fn import_game_dirs(
+    state: &AppState,
+    dirs: &[PathBuf],
+    report: &mut GameImportReport,
+    job: &JobHandle,
+) {
     let now = now_epoch();
-    for dir in dirs {
-        let url = format!("file:///{}", dir.to_string_lossy().replace('\\', "/"));
-        if db::source_exists(conn, "local", &url) {
-            report.skipped += 1;
-            continue;
+    for (i, dir) in dirs.iter().enumerate() {
+        if job.cancelled() {
+            report.stopped = true;
+            break;
         }
+        job.set_progress(i, dirs.len(), &dir.display().to_string());
+
+        let url = format!("file:///{}", dir.to_string_lossy().replace('\\', "/"));
         let raw_name = dir
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "Untitled".into());
-        let (clean_title, version) = clean_name(&raw_name);
+        // Disk work (engine sniffing + cover read) stays outside the lock.
         let engine = detect_engine(dir);
+        let (clean_title, version) = clean_name(&raw_name);
         let title = engine
             .title
             .filter(|t| !t.trim().is_empty())
             .unwrap_or(clean_title);
+        let cover = engine.cover_path.as_ref().and_then(|p| fs::read(p).ok());
+
+        let mut inner = state.inner.lock().unwrap();
+        let Some(opened) = inner.opened.as_mut() else {
+            report.stopped = true; // vault locked/nuke'd underneath us
+            break;
+        };
+        let conn = &mut opened.conn;
+        if db::source_exists(conn, "local", &url) {
+            report.skipped += 1;
+            continue;
+        }
 
         let id = new_id("g");
         let item = Item {
@@ -264,7 +287,7 @@ fn import_game_dirs(conn: &rusqlite::Connection, dirs: &[PathBuf], report: &mut 
                 let _ = db::link_item_tag(conn, &id, tag_id);
             }
         }
-        if let Some(Ok(cover)) = engine.cover_path.as_ref().map(fs::read) {
+        if let Some(cover) = cover {
             if media::put_thumbnail(conn, &id, &cover) {
                 report.with_thumb += 1;
             }
@@ -272,54 +295,83 @@ fn import_game_dirs(conn: &rusqlite::Connection, dirs: &[PathBuf], report: &mut 
         report.imported += 1;
         report.titles.push(title);
     }
+    job.set_progress(dirs.len(), dirs.len(), "");
 }
 
-pub fn import_image_files(state: &AppState, paths: Vec<String>) -> Result<ImageImportReport, String> {
+pub fn import_image_files(
+    state: &AppState,
+    paths: Vec<String>,
+    job: &JobHandle,
+) -> Result<ImageImportReport, String> {
     if paths.is_empty() {
         return Err("no files selected".into());
     }
-    let mut inner = state.inner.lock().unwrap();
-    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
 
     let title = batch_title(&paths);
-    let now = now_epoch();
-    let id = new_id("i");
-    let item = Item {
-        id: id.clone(),
-        kind: ItemKind::Gallery,
-        title: title.clone(),
-        original_title: None,
-        circle: None,
-        status: Status::Downloaded,
-        dnf: false,
-        rating: None,
-        notes: String::new(),
-        version: None,
-        created_at: now.clone(),
-        updated_at: now.clone(),
+    let id = {
+        let mut inner = state.inner.lock().unwrap();
+        let conn = &mut inner.opened.as_mut().ok_or("vault is locked")?.conn;
+        let now = now_epoch();
+        let id = new_id("i");
+        let item = Item {
+            id: id.clone(),
+            kind: ItemKind::Gallery,
+            title: title.clone(),
+            original_title: None,
+            circle: None,
+            status: Status::Downloaded,
+            dnf: false,
+            rating: None,
+            notes: String::new(),
+            version: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+        };
+        db::insert_item(conn, &item).map_err(|e| e.to_string())?;
+        id
     };
-    db::insert_item(conn, &item).map_err(|e| e.to_string())?;
 
+    // Read from disk outside the lock, write inside — a 500-image batch stays
+    // stoppable and the rest of the app stays responsive.
     let mut stored = 0usize;
     let mut failed = 0usize;
+    let mut stopped = false;
     let mut thumb_done = false;
-    for p in paths {
-        match fs::read(&p) {
-            Ok(bytes) => {
-                if media::put_full_image(conn, &id, &bytes) {
-                    stored += 1;
-                    if !thumb_done {
-                        thumb_done = media::put_thumbnail(conn, &id, &bytes);
-                    }
-                } else {
-                    failed += 1;
-                }
+    for (i, p) in paths.iter().enumerate() {
+        if job.cancelled() {
+            stopped = true;
+            break;
+        }
+        job.set_progress(i, paths.len(), p);
+        let bytes = match fs::read(p) {
+            Ok(b) => b,
+            Err(_) => {
+                failed += 1;
+                continue;
             }
-            Err(_) => failed += 1,
+        };
+        let mut inner = state.inner.lock().unwrap();
+        let Some(opened) = inner.opened.as_mut() else {
+            stopped = true; // vault locked/nuke'd mid-import
+            break;
+        };
+        let conn = &mut opened.conn;
+        if media::put_full_image(conn, &id, &bytes) {
+            stored += 1;
+            if !thumb_done {
+                thumb_done = media::put_thumbnail(conn, &id, &bytes);
+            }
+        } else {
+            failed += 1;
         }
     }
+    job.set_progress(paths.len(), paths.len(), "");
+
     if stored == 0 {
-        let _ = db::delete_item(conn, &id);
+        let inner = state.inner.lock().unwrap();
+        if let Some(opened) = inner.opened.as_ref() {
+            let _ = db::delete_item(&opened.conn, &id);
+        }
         return Err("no importable images among the selection".into());
     }
     Ok(ImageImportReport {
@@ -327,6 +379,7 @@ pub fn import_image_files(state: &AppState, paths: Vec<String>) -> Result<ImageI
         title,
         images_stored: stored,
         failed,
+        stopped,
     })
 }
 

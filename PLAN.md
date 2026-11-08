@@ -40,6 +40,8 @@ Closest pieces worth stealing ideas from (see §3). Build custom.
 | D11 | Game appdata writes | **Never intercept; experimental "artifact radar"** | Enumeration only: engine-aware artifact discovery, save backup into vault, nuke-wizard checklist. Opt-in, per-game opt-out. Feature deferred down the line (§8). |
 | D12 | Plugin strategy | **No dynamic plugin DLLs** | In-repo Rust modules + site-pack configs (TOML) generate both app extractors and extension content scripts. |
 | D13 | Import existing media | **Part of M0** | (a) Games: pick a folder → per-engine fingerprinting (RPGM `System.json`/`Game.ini`, Unity `*_Data`/`boot.config`, NW `package.json`, Ren'Py layout, GameMaker `data.win`), version parsed from `[v1.23]`-style folder names, cover art extracted, local sources tracked as `site='local'`. (b) Images: batch file import → one Gallery item, originals as encrypted `full` BLOBs + thumbnail. (c) Bookmarks: Netscape HTML (browser export) parsed, host-classified, items+sources created; optional online enrichment fetches thumbnails+tags for gelbooru/rule34/e621 JSON APIs and DLsite `og:image` (rate-limited, user-initiated). All best-effort; every field correctable in the item editor. |
+| D14 | View separation | **Games and Media are separate views; share only what fits** | Field report: "what sense does it make that I can filter by seen/tracking/wishlist for an image?" Games own the pipeline (status filters, version, updates, dupes); Media owns provenance (source-site + tag filters). Shared components strictly as-needed: `TileGrid`, `ItemEditor` (hides pipeline fields for media), Clip/source/nuke logic. |
+| D15 | Long work | **Jobs, never modal blocking** | Field report: a slow bookmark import greyed out every unrelated button. Imports/update checks run as observable jobs (progress, current item, Stop); vault lock taken per item so the grid fills live; Lock/Nuke cancels all jobs first. UI polls `list_jobs()` rather than tauri events (fewer moving parts, late webview still sees history). |
 
 ---
 
@@ -179,6 +181,7 @@ Ships behind an experimental flag; never auto-deletes. Target: post-M5.
 | **M0** ✅ | Tauri 2 + Svelte 5 + Cargo scaffold; portable vault root + `flow.cfg` pointer + volume-label resolution; SQLCipher vault + unlock screen; companion API skeleton; **importers (D13): game-folder scan w/ engine fingerprinting, image batch import, bookmark HTML import w/ optional online enrichment; library grid with thumbnail display + item editor** | App runs from USB, encrypted shell works, existing media lands in the flow |
 | **M1** ✅ | Booru ingestors (gelbooru, rule34, e621) + URL clip + thumbnail BLOB cache + tag grid + tag types w/ Complete chip. Also landed here: one shared ingest path (`ingest.rs`) covering `file:///…` and direct media URLs, so bookmarks to local media resolve as media (field report) | Usable daily |
 | **M2** ✅ | DLsite + f95zone ingest; cross-site pairing (suggest, never auto-merge) + merge UI; versions/update feed + "check updates"; repack mirrors (off default) + per-site enable/cookie/rate under *Sources*; e-hentai gate pass-through. **Not in this pass:** e-hentai cookie-gated *enrichment* is wired but untested against the live site, and `/api/clip` still returns 501 (needs `Arc<AppState>` in the companion — M4) | Game half works |
+| **M2.5** ✅ | Field-test follow-up (D14/D15): separate **Games** and **Media** views (pipeline filters gone from media; site/tag filters gone from games), shared `TileGrid`/`ItemEditor` only; **job queue** — imports/updates run background, observable (per-item progress + current URL + Stop), per-item vault locking so the grid fills live and Lock/Nuke cleanly cancels everything; bigger default window | Nothing blocks anything; imports are watchable |
 | **M3** | Downloader: DLsite library sync + downloads, booru full-res, seed-host mirror picker, archive extract, local game folder linking + launch; container-encryption perf decision | Full pipeline |
 | **M4** | MV3 extension (Chrome+Firefox) w/ per-site clip extractors from site-packs; embedded WebView2 tabs + clip bar + metadata-only mode; token pairing | The "wrapper" feel |
 | **M5** | Nuke + panic hotkey + crypto-erase; scrubber; deniability (renaming, decoy chrome); proxy/Tor; mods/MTool/CE layer; settings polish; portable packaging | Hardened 1.0 |
@@ -223,3 +226,13 @@ Build order note: M4 extension codegen depends on site-packs (§6), which land i
 - Deliberate gaps left for M3/M4: companion `/api/clip` (needs the shared state
   refactor), downloads, selector site-packs + raw HTML snapshots for rot recovery,
   and a fixture suite for the HTML parsers (currently string-literal fixtures).
+- M2.5 landed (D14/D15): `jobs.rs` job registry (`list_jobs`/`cancel_job`
+  commands, polled by `src/lib/activity.svelte.ts`); LibraryView is now a tab
+  shell over `GamesView` / `MediaView` / `SourcesPanel` with `ActivityBar`
+  (progress + Stop) and shared `TileGrid`/`ItemEditor`/`ClipDialog`; import
+  commands are async and take the vault lock per item; Lock/Nuke/forget-pointer
+  cancel every job first, Nuke also wipes job history. Window default raised to
+  1380×860 (min 1100×640). 35 workspace tests green.
+- Field-test resume point: re-run the bookmark import that was mid-flight —
+  progress is now visible in the activity strip and Stop/Lock interrupt it
+  cleanly; partial imports are kept, re-runs dedupe by (site, url).
