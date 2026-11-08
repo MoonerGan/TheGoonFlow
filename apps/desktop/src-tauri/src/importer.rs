@@ -41,7 +41,11 @@ pub struct ImageImportReport {
 
 /// How deep under the picked folder we look for games (library organizers
 /// nest by genre/language/circle: `root/renpy/Summer Game [v1]/`).
-const MAX_SCAN_DEPTH: usize = 4;
+const MAX_SCAN_DEPTH: usize = 5;
+
+/// Archive extensions: seeing these during a scan means the game is probably
+/// still packed — folders, not archives, get fingerprinted.
+const ARCHIVE_EXTS: &[&str] = &["zip", "7z", "rar", "001", "z01", "gz", "tar"];
 
 /// Folder names that are engine internals, never library branches — don't
 /// descend into these when hunting for game folders.
@@ -66,36 +70,106 @@ fn is_internal_dir(name: &str) -> bool {
     name.starts_with('.') || INTERNAL.iter().any(|i| name == *i) || name.starts_with("python")
 }
 
+/// What a scan noticed along the way — so a scan that finds *nothing* can
+/// explain why instead of silently reporting 0/0/0 (field report: importing
+/// `Summer Witch [renpy] [English]` said nothing at all about why).
+#[derive(Default)]
+struct ScanNotes {
+    dirs_seen: usize,
+    /// entry names at the picked folder's top level (for the "what's inside" line)
+    root_top: Vec<String>,
+    /// how many archive files were seen at any depth
+    archives: usize,
+    /// engine-internal dirs we refused to descend into
+    skipped_internal: Vec<String>,
+    /// folders that hold a `game/` subfolder but still didn't fingerprint
+    near_misses: Vec<String>,
+}
+
 /// Recursively find game folders under `dir`. A folder that fingerprints as
 /// a game is a candidate and we never descend into it (its engine internals
 /// would produce false positives).
-fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>) {
+fn find_game_dirs(dir: &Path, depth: usize, out: &mut Vec<PathBuf>, notes: &mut ScanNotes) {
+    notes.dirs_seen += 1;
     if detect_engine(dir).engine.is_some() {
         out.push(dir.to_path_buf());
         return;
     }
-    if depth == 0 {
-        return;
-    }
+    let is_root = notes.root_top.is_empty() && depth == MAX_SCAN_DEPTH;
     let Ok(rd) = fs::read_dir(dir) else {
         return;
     };
-    let mut sub: Vec<PathBuf> = rd
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter(|p| {
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            !is_internal_dir(&name) && !name.ends_with("_data")
-        })
-        .collect();
+    let entries: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
+    let mut sub: Vec<PathBuf> = Vec::new();
+    for p in entries {
+        let name = p.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let is_dir = p.is_dir();
+        if is_root && notes.root_top.len() < 10 {
+            notes.root_top.push(p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default());
+        }
+        if is_dir {
+            if is_internal_dir(&name) || name.ends_with("_data") {
+                if notes.skipped_internal.len() < 6 {
+                    notes.skipped_internal.push(
+                        p.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+                    );
+                }
+                continue;
+            }
+            if name == "game" && notes.near_misses.len() < 4 {
+                notes.near_misses.push(dir.display().to_string());
+            }
+            sub.push(p);
+        } else if p.extension().is_some_and(|x| {
+            ARCHIVE_EXTS.iter().any(|a| x.to_string_lossy().eq_ignore_ascii_case(a))
+        }) {
+            notes.archives += 1;
+        }
+    }
+    if depth == 0 {
+        return;
+    }
     sub.sort();
     for p in sub {
-        find_game_dirs(&p, depth - 1, out);
+        find_game_dirs(&p, depth - 1, out, notes);
     }
+}
+
+/// Turn an empty scan into a sentence the user can act on.
+fn describe_empty_scan(root: &Path, notes: &ScanNotes) -> String {
+    let mut msg = format!(
+        "no game folder recognized under {} (checked {} folder{} up to {} levels deep)",
+        root.display(),
+        notes.dirs_seen,
+        if notes.dirs_seen == 1 { "" } else { "s" },
+        MAX_SCAN_DEPTH + 1,
+    );
+    if notes.archives > 0 {
+        msg.push_str(&format!(
+            "; {archives} archive file{ext} seen — games inside 7z/rar archives must be extracted first (a .zip game can be added with + Game zip)",
+            archives = notes.archives,
+            ext = if notes.archives == 1 { "" } else { "s" },
+        ));
+    }
+    if !notes.near_misses.is_empty() {
+        msg.push_str(&format!(
+            "; folders holding a `game/` subfolder that still didn't fingerprint: {}",
+            notes.near_misses.join(", ")
+        ));
+    }
+    if !notes.skipped_internal.is_empty() {
+        msg.push_str(&format!(
+            "; skipped engine-internal folders: {}",
+            notes.skipped_internal.join(", ")
+        ));
+    }
+    if !notes.root_top.is_empty() {
+        msg.push_str(&format!("; top level of the picked folder contains: {}", notes.root_top.join(", ")));
+    }
+    msg.push_str(
+        ". A folder counts as a game when it directly contains: game/ with Ren'Py files, Game.exe + Game.ini, *.rmvproject/*.rmmzproject, a <Name>_Data folder (Unity), data.win (GameMaker), package.json + index.html (NW.js), or a game .exe at its top level.",
+    );
+    msg
 }
 
 pub fn import_game_folder(
@@ -110,10 +184,18 @@ pub fn import_game_folder(
 
     job.set_progress(0, 0, "scanning for game folders…");
     let mut candidates = Vec::new();
-    find_game_dirs(&root, MAX_SCAN_DEPTH, &mut candidates);
+    let mut notes = ScanNotes::default();
+    find_game_dirs(&root, MAX_SCAN_DEPTH, &mut candidates, &mut notes);
     candidates.sort();
     candidates.dedup();
     job.set_note(&format!("{} game-shaped folders found", candidates.len()));
+
+    if candidates.is_empty() {
+        // Never a silent zero: say exactly what was looked at and why nothing
+        // matched (field report: 0 imported / 0 failed / 0 unrecognized said
+        // nothing at all).
+        return Err(describe_empty_scan(&root, &notes));
+    }
 
     let mut report = GameImportReport::default();
     import_game_dirs(state, &candidates, &mut report, job);
@@ -533,8 +615,17 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
             });
         return Ok(ZipEngineInfo { tag: Some("rpg-maker"), title, cover_bytes });
     }
-    // Ren'Py
-    if find(&|n| (n.starts_with("game/") && n.ends_with(".rpy")) || n.starts_with("renpy/")).is_some() {
+    // Ren'Py — releases ship *compiled* scripts: `game/script-xxxx.rpa`
+    // archives, often with no `.rpy` sources and no `renpy/` folder (same
+    // blind spot the folder import had — one fingerprint, both paths).
+    if find(&|n| {
+        (n.starts_with("game/")
+            && (n.ends_with(".rpy") || n.ends_with(".rpa") || n.ends_with(".rpyc")))
+            || n.starts_with("renpy/")
+            || n.starts_with("renpydata/")
+    })
+    .is_some()
+    {
         return Ok(ZipEngineInfo { tag: Some("renpy"), title: None, cover_bytes });
     }
     // Unity: a top-level `X_Data/` folder.
@@ -578,8 +669,7 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
     if find(&|n| !n.contains('/') && n.ends_with(".exe")).is_some() {
         return Ok(ZipEngineInfo { tag: Some("pc-game"), title: None, cover_bytes });
     }
-    Err("no recognizable game files inside the zip (exe, engine project files, ...)"
-        .to_string())
+    Err("no recognizable game files inside the zip (exe at root, game/ Ren'Py files, engine project files, ...)\nif the game came from a 7z or rar archive, extract it first and use + Game folder".to_string())
 }
 
 fn zip_read(za: &mut zip::ZipArchive<fs::File>, names: &[String], idx: usize, limit: u64) -> Option<Vec<u8>> {
@@ -633,9 +723,19 @@ pub fn detect_engine(dir: &Path) -> EngineInfo {
             cover_path: cover,
         };
     }
-    // Ren'Py
+    // Ren'Py. Released games ship *compiled* scripts: `game/script-xxxx.rpa`
+    // archives and often no `renpy/` folder at all — matching only `.rpy`
+    // (source layout) missed real downloads (field report: a Ren'Py folder
+    // imported as 0 games). Some packers also use `renpydata/`.
     let game_dir = dir.join("game");
-    if game_dir.is_dir() && (dir.join("renpy").is_dir() || has_ext(&game_dir, "rpy")) {
+    if game_dir.is_dir()
+        && (dir.join("renpy").is_dir()
+            || dir.join("renpydata").is_dir()
+            || has_ext(&game_dir, "rpy")
+            || has_ext(&game_dir, "rpa")
+            || has_ext(&game_dir, "rpyc")
+            || game_dir_has_contents(&game_dir))
+    {
         let cover = [
             game_dir.join("gui").join("window_icon.png"),
             game_dir.join("images").join("ui").join("window_icon.png"),
@@ -707,6 +807,41 @@ fn has_ext(dir: &Path, ext: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+/// Last-resort Ren'Py check: a `game/` folder that holds real content anywhere
+/// within two levels (ignoring its own cache/save dirs). A folder that ships
+/// `game/` with content is a Ren'Py/RPG-style game in practice; the engine
+/// marker files were just unusual.
+fn game_dir_has_contents(game_dir: &Path) -> bool {
+    let skip = |name: &str| {
+        matches!(name, "cache" | "saves" | "save" | "samples") || name.starts_with('.')
+    };
+    let Ok(rd) = fs::read_dir(game_dir) else {
+        return false;
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_lowercase();
+        if skip(&name) {
+            continue;
+        }
+        if p.is_file() {
+            return true;
+        }
+        if p.is_dir() {
+            // one more level down
+            if let Ok(rd2) = fs::read_dir(&p) {
+                if rd2.flatten().any(|e2| {
+                    let n = e2.file_name().to_string_lossy().to_lowercase();
+                    !skip(&n) && e2.path().is_file()
+                }) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn sub_dirs_ending(dir: &Path, suffix: &str) -> Option<PathBuf> {
@@ -919,7 +1054,8 @@ mod tests {
         fs::write(base.join("misc").join("txtfiles").join("readme.txt"), "x").unwrap();
 
         let mut out = Vec::new();
-        find_game_dirs(&base, MAX_SCAN_DEPTH, &mut out);
+        let mut notes = ScanNotes::default();
+        find_game_dirs(&base, MAX_SCAN_DEPTH, &mut out, &mut notes);
         assert_eq!(out.len(), 2, "found: {out:?}");
         let names: Vec<String> = out
             .iter()
@@ -928,6 +1064,48 @@ mod tests {
         assert!(names.iter().any(|n| n == "Game A [v1.0]"), "names = {names:?}");
         assert!(names.iter().any(|n| n == "Game B"), "names = {names:?}");
 
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Field report: a real *compiled* Ren'Py download — `game/` holding only
+    /// `.rpa` archives, no `.rpy` sources, no `renpy/` folder — imported as
+    /// 0 games because the fingerprint only knew the source layout.
+    #[test]
+    fn detects_compiled_renpy_release_layout() {
+        let base = std::env::temp_dir().join("goon-renpy-release-test");
+        let _ = fs::remove_dir_all(&base);
+        let g = base.join("Summer Witch [renpy] [English]");
+        fs::create_dir_all(g.join("game").join("gui")).unwrap();
+        fs::write(g.join("game").join("script-0a3f2c8b.rpa"), "rpa").unwrap();
+        fs::write(g.join("game").join("gui").join("window_icon.png"), "png").unwrap();
+        let info = detect_engine(&g);
+        assert_eq!(info.engine, Some("renpy"));
+        assert_eq!(
+            info.cover_path,
+            Some(g.join("game").join("gui").join("window_icon.png"))
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// Field report: "0 imported, 0 failed, 0 unrecognized — makes no sense".
+    /// A scan that finds nothing must say what it saw instead.
+    #[test]
+    fn empty_scan_reports_what_it_saw() {
+        let base = std::env::temp_dir().join("goon-empty-scan-test");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        fs::write(base.join("Summer Witch.7z.001"), "packed").unwrap();
+        fs::write(base.join("readme.txt"), "extract me").unwrap();
+        fs::create_dir_all(base.join("English Patch").join("game")).unwrap();
+
+        let mut out = Vec::new();
+        let mut notes = ScanNotes::default();
+        find_game_dirs(&base, MAX_SCAN_DEPTH, &mut out, &mut notes);
+        assert!(out.is_empty(), "found: {out:?}");
+        let msg = describe_empty_scan(&base, &notes);
+        assert!(msg.contains("archive"), "{msg}");
+        assert!(msg.contains("Summer Witch.7z.001"), "{msg}");
+        assert!(msg.contains("English Patch"), "{msg}");
         let _ = fs::remove_dir_all(&base);
     }
 
@@ -949,6 +1127,26 @@ mod tests {
         let info = zip_engine_info(&path).unwrap();
         assert_eq!(info.tag, Some("rpg-maker"));
         assert_eq!(info.title.as_deref(), Some("Pumpkin Days"));
+        let _ = fs::remove_file(&path);
+    }
+
+    /// Zips share the Ren'Py fingerprint — compiled `.rpa` layouts must work
+    /// there too, not just in folder scans.
+    #[test]
+    fn zip_detects_compiled_renpy_rpa_layout() {
+        use std::io::Write;
+        let path = std::env::temp_dir().join("goon-zip-renpy-test.zip");
+        {
+            let f = fs::File::create(&path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Deflated);
+            w.start_file("Summer Witch/game/script-0a3f2c8b.rpa", opts).unwrap();
+            w.write_all(b"rpa").unwrap();
+            w.finish().unwrap();
+        }
+        let info = zip_engine_info(&path).unwrap();
+        assert_eq!(info.tag, Some("renpy"));
         let _ = fs::remove_file(&path);
     }
 }
