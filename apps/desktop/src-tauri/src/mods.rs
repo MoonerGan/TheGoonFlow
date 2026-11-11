@@ -6,12 +6,12 @@
 //! The app never injects, wraps or patches anything.
 //!
 //! Recipe kinds:
-//! - `mtool`  → start the tool with the *game's* resolved exe as its argument
-//!              (MTool's "pass the game to inject" flow).
-//! - `cheat`  → start Cheat Engine; attaching stays inside CE (its CLI is
-//!              unreliable, so we don't pretend otherwise).
-//! - `other`  → start the tool with the stored args; `{game}` inside an arg
-//!              is replaced by the game's exe path.
+//! - `mtool`: start the tool with the *game's* resolved exe as its argument
+//!   (MTool's "pass the game to inject" flow).
+//! - `cheat`: start Cheat Engine; attaching stays inside CE (its CLI is
+//!   unreliable, so we don't pretend otherwise).
+//! - `other`: start the tool with the stored args; `{game}` inside an arg is
+//!   replaced by the game's exe path.
 //!
 //! DLL mod apply/revert (flowbak backups + manifests) is the next increment
 //! and will grow this table, not fork it.

@@ -139,7 +139,7 @@ mod win {
         }
 
         let mut rgba = buf;
-        for p in rgba.chunks_exact_mut(4) {
+        for p in rgba.as_chunks_mut::<4>().0 {
             p.swap(0, 2); // BGR → RGB
             p[3] = 255; // video frames carry no alpha
         }

@@ -10,6 +10,8 @@ goonflow-vault/
 
 # scratch build logs (tools/)
 tools/*.log
+# machine-local evidence written by tools/run-test.ps1 + run-release.ps1
+tools/last-*.txt
 
 # editors / os
 .DS_Store
