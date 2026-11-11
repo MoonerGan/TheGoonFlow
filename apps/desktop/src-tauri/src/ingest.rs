@@ -2692,4 +2692,72 @@ mod tests {
             r.err().unwrap_or_else(|| "hits without a cookie?!".into())
         );
     }
+
+    /// The #46 probe, kept runnable instead of re-invented: this bug was
+    /// invisible offline, because a guest page parses perfectly and simply has
+    /// no art. The cookie comes from the environment; nothing here is committed
+    /// as a fixture and no cookie is ever stored in the repo.
+    ///
+    ///   $env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw)
+    ///   cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_art_probe
+    #[tokio::test]
+    #[ignore]
+    async fn f95_live_art_probe() {
+        let Ok(cookie) = std::env::var("GOON_F95_COOKIE") else {
+            eprintln!("GOON_F95_COOKIE not set - skipping (which is exactly the bug)");
+            return;
+        };
+        let cookie = cookie.trim();
+        let url = "https://f95zone.to/threads/lewd-customs-in-the-tsugai-mating-village-2-final-itsumoeswaninatteorimasu.321420/";
+        // page fetch: the honest UA. The attachment fetch inside get_bytes
+        // overrides it with the browser UA, which is the #50 half.
+        let client = reqwest::Client::builder()
+            .user_agent(UA)
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .unwrap();
+        let meta = f95_thread(&client, url, Some(cookie), true)
+            .await
+            .expect("f95 thread with a cookie");
+        println!("title   = {:?}", meta.title);
+        println!("version = {:?}", meta.version);
+        println!("tags    = {}", meta.tags.len());
+        println!("images  = {}", meta.images.len());
+        println!("note    = {:?}", meta.note);
+        println!(
+            "thumb   = {} bytes",
+            meta.thumb_bytes.as_ref().map_or(0, |b| b.len())
+        );
+        assert!(
+            !meta.images.is_empty(),
+            "a logged-in f95 thread must expose lazy attachment images"
+        );
+        // the same page as a guest, to show what the cookie is worth
+        let guest = f95_thread(&client, url, None, true)
+            .await
+            .unwrap_or_else(|e| Meta {
+                title: None,
+                store_bytes: None,
+                thumb_bytes: None,
+                images: Vec::new(),
+                tags: Vec::new(),
+                version: None,
+                note: Some(e),
+            });
+        println!(
+            "guest   = images {}, note {:?}",
+            guest.images.len(),
+            guest.note
+        );
+        if let Some(first) = meta.images.first() {
+            let bytes = get_bytes(&client, first, "https://f95zone.to", Some(cookie))
+                .await
+                .expect("attachment bytes");
+            println!(
+                "first attachment = {} bytes, sniffed {:?}",
+                bytes.len(),
+                goon_core::media::detect_mime(&bytes)
+            );
+        }
+    }
 }

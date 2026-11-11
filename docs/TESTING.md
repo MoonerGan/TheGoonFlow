@@ -25,9 +25,27 @@ fingerprints, the Netscape bookmark parser, `ingest::classify` for every URL
 shape, the HTML parsers against fixtures, and the job registry (progress, cancel,
 bounded history). Parsers are parse-only — no network in tests, by design.
 
-Release build: `cmd /c "cargo build --release --locked"` from a shell that ran
-`tools\dev-env.ps1`; the frontend is embedded by `build.rs`, so
-`target\release\GoonFlow.exe` is the whole app.
+The exceptions are `#[ignore]`d on purpose and run by hand: `tools\` drives the
+real exe (below), and inside cargo `match_live_search_smoke`,
+`first_frame_live_probe` and `f95_live_art_probe` (the live half of #46) hit the
+real sites. The f95 one needs your own cookie in the environment, never in the
+repo:
+
+```powershell
+$env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw)
+cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_art_probe
+```
+
+Last run, 2026-11-10: title parsed, **15** lazy attachment images with the
+cookie, **0** as a guest (the login-wall note instead), cover stored as 59 478
+bytes and sniffed `image/avif`, and the note says out loud that this build
+cannot decode AVIF into a thumbnail.
+
+Release build: `powershell -ExecutionPolicy Bypass -File tools\run-release.ps1
+-tag mNN` (runs `tools\dev-env.ps1`, stops a live GoonFlow first, records the
+exe's mtime/bytes/sha256 in `tools\last-build-summary.txt`). The frontend is
+embedded by `build.rs`, so `target\release\GoonFlow.exe` is the whole app.
+Then `tools\verify-artifact.ps1` runs section 2 against that exact exe.
 
 ## 2. Live suite — real windows, real hotkeys
 
