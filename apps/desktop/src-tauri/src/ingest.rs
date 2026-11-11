@@ -436,7 +436,11 @@ pub struct FetchCtx<'a> {
 /// vault is stale, and that is worth recording instead of leaving the user to
 /// deduce it from a string in an item's note.
 ///
-/// Never call this while holding the inner lock (it takes the lock itself).
+/// **Never call this while holding the inner lock** - it takes the lock itself, and
+/// `std::sync::Mutex` is not reentrant, so a caller that holds it freezes its own
+/// thread instead of failing: the #55 test did exactly that and the whole suite hung
+/// with no output. Every fetch path calls this after its settings block has released
+/// the guard.
 pub fn mark_cookie_gate(core: Option<&Core>, site: &str) {
     let Some(core) = core else { return };
     let mut inner = core.inner.lock().unwrap();
@@ -572,7 +576,7 @@ async fn fetch_meta_with(
                 ..Default::default()
             }),
         },
-        Mode::Ehentai => eh_gallery(client, url, ctx.cookie).await,
+        Mode::Ehentai => eh_gallery(client, url, ctx, &s.site).await,
         Mode::DlSite => dl_product(client, url).await,
         Mode::Offsite => offsite_product(client, url).await,
         Mode::F95 => f95_thread(client, url, ctx, want_images).await,
@@ -731,13 +735,21 @@ pub fn parse_eh_gallery(html: &str) -> (Option<String>, Option<String>) {
 async fn eh_gallery(
     client: &reqwest::Client,
     url: &str,
-    cookie: Option<&str>,
+    ctx: &FetchCtx<'_>,
+    site: &str,
 ) -> Result<Meta, String> {
     // #46: a `/s/` slideshow link is parsed on its gallery page instead.
     let page = eh_gallery_url(url);
     let folded = page != url;
-    let html = get_text(client, &page, "https://e-hentai.org", cookie).await?;
+    let html = get_text(client, &page, "https://e-hentai.org", ctx.cookie).await?;
     if eh_is_gate(&html) {
+        // #55: #38 made a login-walled *f95* fetch mark the saved cookie stale, but
+        // the EH pair never did. An e-hentai/exhentai cookie could die and the
+        // Sources line stayed green, because nothing recorded what the site had
+        // just answered. Same rule, same helper, for the other two login sites.
+        if ctx.cookie.is_some() {
+            mark_cookie_gate(ctx.core, site);
+        }
         return Ok(Meta {
             note: Some(
                 "e-hentai gate page hit — open the gallery once in your browser \
@@ -755,7 +767,7 @@ async fn eh_gallery(
     };
     match cover {
         Some(cover) => {
-            match get_bytes(client, &cover, "https://e-hentai.org", cookie).await {
+            match get_bytes(client, &cover, "https://e-hentai.org", ctx.cookie).await {
                 Ok(bytes) => {
                     // #50: only hand a real image to the thumbnailer. A gallery cover
                     // stays a thumbnail — the gallery's pages themselves stay a link.
@@ -1395,7 +1407,9 @@ pub fn local_file(url: &str) -> Result<Meta, String> {
 
 // ---------- the clip pipeline ----------
 
-#[derive(Serialize)]
+/// `Debug` so a failing test can print what the clip actually reported instead of
+/// a trait bound error.
+#[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipReport {
     pub item_id: String,
@@ -1419,7 +1433,7 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     let s = classify(&url).ok_or("can't identify that link (site support grows over time)")?;
 
     // Phase 1 (sync): settings, dedup, cookie for this site.
-    let (cookie, existing) = {
+    let (cookie, rate_ms, existing) = {
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
         if !db::site_enabled(conn, &s.site, !is_mirror_site(&s.site)) {
@@ -1427,6 +1441,7 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
         }
         (
             db::site_cookie(conn, &s.site),
+            db::site_rate_ms(conn, &s.site, default_rate_ms(&s.site)),
             db::source_item_id(conn, &s.site, &url),
         )
     };
@@ -1442,6 +1457,30 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
             images_found: 0,
             note: Some("already in the flow".into()),
         });
+    }
+
+    // #57: the clip used to fetch immediately no matter what the site's rate box
+    // said, so two clips in a row could hit e-hentai inside its ~10 s lane while
+    // every *job* politely queued behind it. A clip is the most frequent thing this
+    // app does to a site, and the companion API's own comment promises "the exact
+    // same lock, job ledger and rate lanes" — so it claims a slot like a job does.
+    // First request to a site costs nothing (the lane opens immediately); a Lock or
+    // Nuke while waiting gives the clip up instead of fetching into a closed vault.
+    // One slot per clip, not per request: a clip can still make several (f95 fetches
+    // its page plus up to three cover candidates). That is the same compromise #15
+    // already makes for enrich, and closing it means counting requests inside the
+    // fetchers rather than at the call site.
+    if !matches!(s.mode, Mode::LocalFile) {
+        let gone = || match state.inner.try_lock() {
+            Ok(guard) => guard.opened.is_none(),
+            Err(_) => false, // someone else holds the lock; not a cancel signal
+        };
+        if !state.queue.reserve(&s.site, rate_ms, gone).await {
+            return Err(format!(
+                "the vault was locked before {site} could answer — the link was not clipped",
+                site = s.site
+            ));
+        }
     }
 
     // Phase 2 (async): metadata where available. Never fatal — a failed
@@ -2065,20 +2104,27 @@ pub fn parse_dl_search(html: &str) -> Vec<SearchHit> {
     out
 }
 
-/// f95zone search lives behind XenForo login. With the user's saved f95
-/// cookie (Sources panel) it works; without one the reply is the login page.
+/// f95zone search lives behind XenForo login, so **no cookie means no request**:
+/// the guide's promise (*f95 search runs only with your saved f95 cookie*) has to
+/// hold before anything leaves the machine. An anonymous query to a login-gated
+/// search endpoint is traffic the user never asked for and a hit on f95's limiter
+/// for nothing; the old code sent it and only then noticed the reply was the wall.
 pub async fn f95_search(
     client: &reqwest::Client,
     query: &str,
     cookie: Option<&str>,
 ) -> Result<Vec<SearchHit>, String> {
-    let mut req = client
+    let Some(cookie) = cookie else {
+        return Err(
+            "f95 search wants a login — save your f95 cookie under Sources, then search again"
+                .into(),
+        );
+    };
+    let req = client
         .get("https://f95zone.to/search/search")
         .header(reqwest::header::REFERER, "https://f95zone.to")
+        .header(reqwest::header::COOKIE, cookie)
         .query(&[("q", query), ("c", "message")]);
-    if let Some(c) = cookie {
-        req = req.header(reqwest::header::COOKIE, c);
-    }
     let resp = req
         .send()
         .await
@@ -2087,8 +2133,9 @@ pub async fn f95_search(
         resp.status(),
         reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::UNAUTHORIZED
     ) {
+        // The cookie was sent and refused: a different fact from having none.
         return Err(
-            "f95 search wants a login — save your f95 cookie under Sources, then search again"
+            "f95 refused the saved cookie — re-copy it from a logged-in window and set it under Sources"
                 .into(),
         );
     }
@@ -2097,11 +2144,11 @@ pub async fn f95_search(
     }
     let html = resp.text().await.map_err(|e| format!("read failed: {e}"))?;
     let hits = parse_f95_search(&html);
-    if hits.is_empty() && cookie.is_none() {
-        return Err(
-            "f95 found nothing without login — set an f95 cookie under Sources to search threads"
-                .into(),
-        );
+    if hits.is_empty() {
+        // A cookie was definitely sent (the guard above), so an empty result page
+        // means "no such title" — not "log in". The old code could not tell those
+        // apart and blamed the login on every empty page.
+        return Err(format!("f95 found no thread for \"{query}\""));
     }
     Ok(hits)
 }
@@ -2273,17 +2320,31 @@ pub async fn find_matches(state: &crate::Core, job: &JobHandle) -> Result<MatchR
             }
         }
         if f95_on {
-            if !state
-                .queue
-                .reserve("f95", f95_rate, || job.cancelled())
-                .await
-            {
-                report.stopped = true;
-                break;
-            }
-            match f95_search(&client, &query, f95_cookie.as_deref()).await {
-                Ok(hits) => wrote += store_hits(state, &id, "f95", &title, &hits),
-                Err(e) => report.failures.push(format!("f95: {e}")),
+            // #56: no saved cookie means no request, and no lane slot spent waiting
+            // for a fetch that cannot happen. The old code queued politely behind
+            // f95's lane and then asked for a login it already knew was missing.
+            match f95_cookie.as_deref() {
+                None => {
+                    let why = "f95: search skipped — no login cookie saved (Sources)".to_string();
+                    if !report.failures.contains(&why) {
+                        // once per run: the same reason for 40 titles is noise, not news
+                        report.failures.push(why);
+                    }
+                }
+                Some(saved) => {
+                    if !state
+                        .queue
+                        .reserve("f95", f95_rate, || job.cancelled())
+                        .await
+                    {
+                        report.stopped = true;
+                        break;
+                    }
+                    match f95_search(&client, &query, Some(saved)).await {
+                        Ok(hits) => wrote += store_hits(state, &id, "f95", &title, &hits),
+                        Err(e) => report.failures.push(format!("f95: {e}")),
+                    }
+                }
             }
         }
         report.scanned += 1;
@@ -2785,6 +2846,94 @@ mod tests {
         assert!(is_mirror_site("kimochi"));
     }
 
+    /// #56: the guide says f95 search runs only with the saved cookie, so the
+    /// cookie has to stop the *request*, not just colour the error afterwards. An
+    /// anonymous query to a login-gated search endpoint is traffic the user never
+    /// asked for. This test needs no network because the guard returns before any
+    /// client is used — remove the guard and it starts hitting f95zone.to.
+    #[tokio::test]
+    async fn f95_search_sends_nothing_without_a_cookie() {
+        let client = reqwest::Client::builder()
+            .user_agent(UA)
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap();
+        let e = f95_search(&client, "anything at all", None)
+            .await
+            .expect_err("no cookie means no search");
+        assert!(e.contains("wants a login"), "{e}");
+    }
+
+    /// #57: a clip is the most frequent thing this app does to a site, and until now
+    /// it fetched immediately while every *job* politely queued. These three checks
+    /// use `konachan` deliberately: a known site with no metadata API wired, so the
+    /// fetch path answers from the code ("no metadata API wired for konachan yet")
+    /// and the test proves lane behaviour without sending a single request.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clip_waits_its_sites_lane() {
+        let (core, tmp) = crate::scratch_core("lane", true);
+        let url = "https://konachan.com/post/show/1".to_string();
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked").conn;
+            db::set_site_setting(conn, "konachan", Some(true), None, Some(900), 900).unwrap();
+        }
+
+        // First clip: the lane is empty, so it costs nothing.
+        let at = std::time::Instant::now();
+        let first = clip(&core, url.clone()).await.expect("clip 1");
+        let fast = at.elapsed();
+        assert!(first.created, "the link must still be stored");
+
+        // Second clip, different link on the same site: it must wait the site's
+        // 900 ms rather than fetch now. (The *same* link returns earlier, from the
+        // dedup lookup, and correctly costs no lane slot.)
+        let at = std::time::Instant::now();
+        let second = clip(&core, "https://konachan.com/post/show/2".to_string())
+            .await
+            .expect("clip 2");
+        let waited = at.elapsed();
+        assert!(second.created, "a different link is a new item");
+        assert!(
+            waited.as_millis() >= 800,
+            "the clip fetched {waited:?} after the last one, but konachan's lane is 900 ms"
+        );
+        assert!(
+            fast.as_millis() < 800,
+            "the first clip to a quiet lane must not wait: {fast:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #57, the other half: Lock (or Nuke) while a clip is waiting in a lane must
+    /// give the clip up instead of fetching into a closed vault. The guide promises
+    /// a Lock stops running work; a clip that skipped the lane skipped that too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clip_gives_up_when_the_vault_locks_while_it_waits() {
+        let (core, tmp) = crate::scratch_core("lockwait", true);
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked").conn;
+            db::set_site_setting(conn, "konachan", Some(true), None, Some(1200), 1200).unwrap();
+        }
+        // Occupy the lane, then lock the vault underneath the waiting clip.
+        core.queue.reserve("konachan", 1200, || false).await;
+        let closer = {
+            let core2 = core.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                // Exactly what lock_core does to the shared state.
+                core2.inner.lock().unwrap().opened = None;
+            })
+        };
+        let e = clip(&core, "https://konachan.com/post/show/2".to_string())
+            .await
+            .expect_err("a clip may not fetch into a locked vault");
+        assert!(e.contains("locked before"), "{e}");
+        closer.await.unwrap();
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Manual smoke against the live sites (rate-limits ignored, run by hand):
     /// `cargo test -p goonflow-desktop --lib -- --ignored --nocapture match_live`
     #[tokio::test]
@@ -2804,12 +2953,28 @@ mod tests {
         for h in hits.iter().take(3) {
             println!("  {} | {}", h.url, h.title);
         }
-        // without a cookie f95 answers the login page — expect the friendly error
+        // #56: no cookie means no request at all — nothing leaves the machine.
         let r = f95_search(&client, "spring seed", None).await;
         println!(
             "f95 no-cookie result: {}",
             r.err().unwrap_or_else(|| "hits without a cookie?!".into())
         );
+        // With the cookie it is a real capability, so prove that half too instead of
+        // only ever testing the refusal.
+        match std::env::var("GOON_F95_COOKIE") {
+            Ok(c) => {
+                let hits = f95_search(&client, "spring seed", Some(c.trim()))
+                    .await
+                    .expect("f95 search with the saved cookie");
+                println!("f95 hits with cookie: {}", hits.len());
+                for h in hits.iter().take(3) {
+                    println!("  {} | {}", h.url, h.title);
+                }
+            }
+            Err(_) => {
+                println!("GOON_F95_COOKIE not set: f95 search *with* a cookie was not exercised")
+            }
+        }
     }
 
     /// The #46 probe, kept runnable instead of re-invented: this bug was

@@ -493,6 +493,61 @@ mod tests {
         );
     }
 
+    /// #55: the *fetch* path's mark-stale helper has to work for every login site.
+    /// f95 called it; e-hentai and Exhentai hit their gate, returned a note, and left
+    /// the Sources line green on a cookie the site had just refused. Pins the helper's
+    /// contract at the Core level: a saved cookie that hits the wall is recorded as
+    /// *refused* with a time; a site with no cookie saved is still not "refused"; and
+    /// one site's verdict never bleeds into another's row.
+    #[test]
+    fn a_login_wall_marks_any_login_site_refused() {
+        let (core, tmp) = crate::scratch_core("gate", true);
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked").conn;
+            for site in ["f95", "ehentai", "exhentai"] {
+                assert!(recorded(conn, site).is_none(), "{site} was never checked");
+            }
+            // A paste-shaped cookie for the site whose gate we are about to hit.
+            goon_core::db::set_site_setting(
+                conn,
+                "exhentai",
+                Some(true),
+                Some("ipb_member_id=0; ipb_pass_hash=0"),
+                None,
+                10_500,
+            )
+            .unwrap();
+        }
+        crate::ingest::mark_cookie_gate(Some(&core), "exhentai");
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked").conn;
+            let (ok, at) = recorded(conn, "exhentai").expect("the wall must be recorded");
+            assert!(!ok, "a login wall is a refusal, never 'accepted'");
+            assert!(!at.is_empty(), "and it carries the time it happened");
+            assert!(
+                recorded(conn, "ehentai").is_none(),
+                "exhentai's verdict must not leak into e-hentai's row"
+            );
+        }
+        // Nothing saved for f95, so a wall there is not a dead-cookie verdict.
+        // This call sits *outside* the block above on purpose: mark_cookie_gate takes
+        // the inner lock itself, and calling it with the guard held deadlocks the
+        // thread. That is how this test first presented itself - the whole suite hung
+        // on it, with no failure and no output.
+        crate::ingest::mark_cookie_gate(Some(&core), "f95");
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked").conn;
+            assert!(
+                recorded(conn, "f95").is_none(),
+                "no cookie saved, so no cookie to be stale"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
     /// Live proof that the f95 markers hold under the identity this app actually
     /// sends, both directions, in one run:
     ///
