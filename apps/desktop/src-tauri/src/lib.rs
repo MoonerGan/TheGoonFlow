@@ -1121,7 +1121,8 @@ fn get_site_settings(state: tauri::State<'_, AppState>) -> Result<Vec<SiteRow>, 
                 cookie_set: r.cookie_set,
                 rate_ms: r.rate_ms,
                 cookie_ok: verdict.as_ref().map(|(ok, _)| *ok),
-                cookie_checked_at: verdict.and_then(|(_, at)| if at.is_empty() { None } else { Some(at) }),
+                cookie_checked_at: verdict
+                    .and_then(|(_, at)| if at.is_empty() { None } else { Some(at) }),
                 needs_cookie: cookies::needs_cookie(&r.site),
             }
         })

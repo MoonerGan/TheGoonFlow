@@ -474,7 +474,7 @@ mod tests {
             Some((true, "2026-11-10T22:00:00Z".into()))
         );
         record(&conn, "f95", false, "2026-11-11T08:00:00Z").unwrap();
-        assert_eq!(recorded(&conn, "f95").unwrap().0, false);
+        assert!(!recorded(&conn, "f95").unwrap().0, "the later verdict wins");
         forget(&conn, "f95").unwrap();
         assert_eq!(recorded(&conn, "f95"), None);
     }
@@ -487,7 +487,10 @@ mod tests {
         goon_core::db::set_site_setting(&conn, "f95", None, Some("xf_session=c"), None, 1200)
             .unwrap();
         assert_eq!(note_gate(&conn, "f95", "2026-11-10T22:00:00Z"), Some(false));
-        assert_eq!(recorded(&conn, "f95").unwrap().0, false);
+        assert!(
+            !recorded(&conn, "f95").unwrap().0,
+            "the wall was recorded as a stale cookie"
+        );
     }
 
     /// Live proof that the f95 markers hold under the identity this app actually
