@@ -251,9 +251,27 @@ you guessing.
 Right-click any **link, image, page, or selected URL** → *Clip … to GoonFlow*.
 It travels the exact same pipeline as *+ Clip URL*: classified, politely
 enriched, stored in the vault, and it appears in the activity strip. A desktop
-notification tells you it landed (or why it didn't). The extension can only
-talk to `127.0.0.1`/`localhost` — it has no internet access at all; only the
-app reaches the content sites (and through your proxy if you set one).
+notification tells you it landed (or why it didn't).
+
+**No page can make the extension do anything.** Nothing fires on page load, at
+startup, or on a timer — every action is a click you made in the popup.
+
+**One thing to be aware of since #38:** the manifest now asks for the `cookies`
+permission plus read/write access to `f95zone.to`, `e-hentai.org` and
+`exhentai.org`, so Chrome/Edge/Firefox show a scarier install prompt than before
+(*"Read your browsing history"* and *"read and change all your data on … those
+three sites"*). That is only there so the popup can offer **Send this page's
+sign-in cookie** on those three hosts: it reads that browser's own jar (which
+sees the `HttpOnly` session keys a hand-copy misses) and posts it to
+`127.0.0.1:port`, into the same encrypted vault the *Sources* box writes to. The
+extension never sends anything to those sites and keeps no copy — the only things
+it stores are the pairing port and token. If you would rather not grant it, the
+extension's README names the two manifest lines to delete; clipping keeps working
+and the cookie hand-off then simply fails, with the popup saying so.
+
+The extension has no other network access: every request it makes goes to
+`127.0.0.1`/`localhost`. Only the app reaches the content sites (and through your
+proxy if you set one).
 
 ## 4. The library
 
@@ -373,7 +391,8 @@ app reaches the content sites (and through your proxy if you set one).
   and enabling a site for the first time keeps that default instead of resetting
   it to one shared number.
   - **Getting a cookie** (f95 threads, E-hentai/Exhentai). Only these need one —
-    DLsite and every booru work without it, so leave those boxes empty.
+    DLsite and every booru work without it, so **no other site even has a cookie
+    box**: a credential nothing asked for is only something to explain later.
     1. **Log in on the site first.** A cookie copied while you were logged out
        contains nothing useful and behaves like no cookie at all.
     2. On that site press **F12** → **Network** tab → reload the page.
@@ -381,24 +400,46 @@ app reaches the content sites (and through your proxy if you set one).
     4. Under **Request Headers**, find the line starting `cookie:` and copy
        **everything after the colon** — one long line, keep the `=` and `;`,
        don't include the word `cookie:`.
-    5. Sources → that site → Cookie → Save. The app sends exactly what you pasted
-       as the `Cookie` header, so one line is what it wants.
+    5. Sources → that site → Cookie → **Set**. The app sends exactly what you
+       pasted as the `Cookie` header, so one line is what it wants.
 
-    How to tell the paste is real: an f95 cookie must contain **`xf_session`** and
-    **`xf_user`** (usually also `xf_csrf` and Cloudflare's `cf_clearance`); an
-    e-hentai/exhentai cookie must contain **`ipb_member_id`** and
-    **`ipb_pass_hash`** (Exhentai additionally needs an account that is allowed
-    there). No `xf_session` = you were not logged in at step 1.
+    You no longer have to judge the paste yourself (#38):
+
+    - the paste is **checked before it is stored**. An f95 cookie must contain
+      **`xf_session`** (Cloudflare's `cf_clearance` is wanted, not required);
+      e-hentai and Exhentai need the **`ipb_member_id`** + **`ipb_pass_hash`**
+      pair. If a key is missing the app refuses the paste, names the key, and
+      keeps the cookie it already had — no half-cookie sitting in the vault, and
+      no request wasted on the site.
+    - the line under the box says what the **site** answered: *the site accepted
+      this cookie · <time>*, *the site refused this cookie · <time> — re-copy it
+      from a logged-in window*, or *cookie saved — never checked against the
+      site*. "Never checked" is shown as unknown, never as working.
+    - **Check** asks the site once more (one page fetch, on that site's own
+      polite delay) without re-pasting — useful after you logged out in the
+      browser or after a session rotation.
+    - a dead cookie announces itself: when a fetch sends your cookie and the site
+      still answers with its login wall, that cookie is marked stale on the spot,
+      so the Sources line goes red by itself.
+    - the browser extension can do steps 2-5 for you. On f95zone.to,
+      e-hentai.org or exhentai.org its popup offers **Send this page's sign-in
+      cookie**: one deliberate click, nothing automatic, straight to 127.0.0.1
+      and into this same encrypted vault. It reads the jar through the browser's
+      own cookie API, so it also picks up the `HttpOnly` keys a DevTools copy
+      usually misses, and it keeps no copy of its own.
 
     What it buys you on f95: without it the thread page renders a *register to
     view* wall with **no** screenshots, so a clipped f95 link gives you a title
-    only; with it the thread's preview art becomes reachable. The app keeps the
-    cookie inside the encrypted vault, never in a plain config file, and it never
-    reads your browser's own cookie store — this is a copy you chose to hand
-    over. Cookies expire (especially `cf_clearance`); when a session goes stale
-    the fetch says so out loud (e.g. *"f95 wants a login — set its cookie under
-    Sources"*) rather than importing nothing quietly. A one-click *"use this
-    browser's session"* flow instead of this copy/paste is planned (#38).
+    only; with it the thread's preview art becomes reachable (measured on one
+    thread: **15** attachment images with a session, **0** as a guest). The app
+    keeps the cookie inside the encrypted vault, never in a plain config file,
+    and it never goes looking through your browser's cookie store on its own —
+    the extension hand-off is a copy you chose to make, and the extension's
+    README names the two manifest lines to delete if you would rather not grant
+    it. Cookies expire; when a session goes stale the fetch says so out loud
+    (*"f95 answered, but this page shows its art to members only — save your f95
+    cookie under Sources and re-fetch this item to pull the images"*) instead of
+    importing nothing quietly.
 - **Proxy** (top of the Sources tab): route *every* outbound request — clip
   fetches, enrich, update checks, match search, video downloads — through one
   proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.
@@ -442,6 +483,7 @@ app reaches the content sites (and through your proxy if you set one).
 | Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
 | Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |
 | Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. Direct file links like `wimg.rule34.xxx/images/….jpeg?12345` now resolve through the site's API — old items imported before that fix can be repaired with **Re-fetch metadata** in the item editor. |
+| f95 card has no tile but the item shows real art | That item was clipped before AVIF decoding landed (#52): f95 serves its cover as AVIF, the vault kept the bytes and no thumbnail was ever made. Open the item → **Re-fetch metadata** and the card gets its tile. Newly clipped items need nothing. HEIF/HEIC is still a format this build cannot decode - those store fine and the item says the thumbnail is missing, out loud. |
 | Clip stored the picture but no tags/source | The link pointed straight at a file with **no post id anywhere in it** (`img3.gelbooru.com/images/2b/34/….jpg`). The image is stored anyway and the item says *"no post could be identified"*. Where the site can look a file up by hash, the app matches it back to its post — but only when the post's md5 **and** file size both match the bytes it downloaded, so it never guesses a wrong post. Fix the rest by hand: open the item, paste the real post page into **Sources**, then **Re-fetch metadata**. Find these in bulk under **Sources → No tags** in the sidebar. |
 | ▶ next to MTool started the tool but the game did not open | Recent MTool builds (NW.js `MToolClient`) accept **no** game on the command line — their list is drag-and-drop, so nothing was ever going to start. The app now uses the game's own `StartWithTool.bat` / `MTool_Game.exe` when the repack ships one, otherwise it opens MTool and puts the game's exe path **on your clipboard** for you to drop in (the message under the mod list says which happened and shows the path). |
 | Extension icon does nothing / only *Pin · Manage* | Out of date load: remove the add-on and load it again (temporary Firefox add-ons never pick up manifest changes on their own). The Chrome folder also cannot work in Firefox — use `extensions/goonflow-clip-firefox`. The popup says what it sees: *Nothing on port N* = the app isn't running or its port changed (re-copy port + token), *vault is LOCKED* = unlock it first. |

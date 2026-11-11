@@ -137,20 +137,27 @@ runs. Prove it after every release build:
 dumpbin /dependents target\release\GoonFlow.exe
 ```
 
-Expected: only Windows system DLLs. Measured with AVIF on (2026-11): **20
-dependent DLLs, no `dav1d*.dll`**. A dav1d entry there means the build picked up
-a shared library and the exe is no longer carryable.
+Expected: only Windows system DLLs. Measured on `m14` (2026-11-11, AVIF
+on): **31 distinct dependent DLLs, every one a Windows system DLL, no
+`dav1d*.dll`**. A dav1d entry there means the build picked up a shared library
+and the exe is no longer carryable.
 
 **Measured cost** (2026-11, release build, so nobody re-measures it):
 
-- `target\release\GoonFlow.exe` grows **+2 275 840 bytes**;
-- `cargo tree -p goon-core`: **57 → 85 packages**;
+- `target\release\GoonFlow.exe` grows **+2 273 792 bytes** (m13 → m14:
+  21 108 224 → 23 382 016);
+- `cargo tree -p goon-core`: **57 → 85 packages** (the toml/system-deps half is
+  build-time only);
 - dav1d decode alone: **2.5 ms** for a 706 B / 360x240 AVIF, **11.6 ms** for a
   50 101 B / 1600x1067 one;
-- the whole `put_thumbnail` path on those files: **~7-21 ms**, output ~**14 KB**.
+- the whole `put_thumbnail` path on those files: **~7-21 ms**, output ~**14 KB**;
+- what it bought, end to end: the live f95 probe's cover is 59 478 bytes of AVIF
+  and now yields a thumbnail instead of a "cannot decode" note (TESTING §1).
 
 **Licences for the new code.** DESIGN D5 keeps the project MIT; there is no
-NOTICE file in the repo yet, and when one lands these are the lines it needs.
+NOTICE file in the repo yet, so README's *Privacy & legal* section names dav1d
+(BSD-2-Clause), dav1d-sys (MIT) and mp4parse (MPL-2.0) as the statically linked
+parts. When a NOTICE lands, these are the lines it needs.
 The crate licences were read off the vendored manifests under
 `%USERPROFILE%\.cargo\registry\src\index.crates.io-*\<crate>\Cargo.toml`
 (dav1d-sys-0.8.3, dav1d-0.11.1, mp4parse-0.17.0, av-data-0.4.4,
