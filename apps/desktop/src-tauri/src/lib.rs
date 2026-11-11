@@ -48,6 +48,13 @@ struct OpenedVault {
 struct Inner {
     vault_root: Option<PathBuf>,
     opened: Option<OpenedVault>,
+    /// Bumped whenever decrypted vault material stops being valid (lock, nuke) or
+    /// a *different* vault gets attached, and reported by `app_status`. The
+    /// frontend caches decrypted media in RAM while unlocked (#44); this counter
+    /// is how it notices that the ground moved under it — including when the lock
+    /// came from the panic hotkey or the erase watcher instead of a UI click,
+    /// where nothing else would tell the webview anything.
+    vault_gen: AtomicU64,
 }
 
 /// The shareable half of the app state — everything that touches the vault or
@@ -118,6 +125,9 @@ struct AppStatus {
     unlocked: bool,
     vault_root: Option<String>,
     companion: Option<CompanionStatus>,
+    /// See `Inner::vault_gen`: changes on lock/nuke/attach, so anything caching
+    /// decrypted vault material in the webview knows to drop it (#44).
+    generation: u64,
 }
 
 #[tauri::command]
@@ -133,6 +143,7 @@ fn app_status(state: tauri::State<'_, AppState>) -> AppStatus {
             port: c.port,
             token: c.token.clone(),
         }),
+        generation: inner.vault_gen.load(Ordering::SeqCst),
     }
 }
 
@@ -172,6 +183,7 @@ fn create_vault(
     let mut inner = state.inner.lock().unwrap();
     inner.vault_root = Some(path);
     inner.opened = Some(OpenedVault { conn, _key: key });
+    inner.vault_gen.fetch_add(1, Ordering::SeqCst);
     state.locked.store(false, Ordering::SeqCst);
     Ok(())
 }
@@ -203,6 +215,7 @@ fn unlock(
     // #23: this vault may carry its own panic key next to the default.
     let stored = goon_core::db::get_meta(&conn, "panic_hotkey");
     inner.opened = Some(OpenedVault { conn, _key: key });
+    inner.vault_gen.fetch_add(1, Ordering::SeqCst);
     state.locked.store(false, Ordering::SeqCst);
     drop(inner);
     register_panic_keys(&app, stored.as_deref());
@@ -212,21 +225,36 @@ fn unlock(
 #[tauri::command]
 fn lock(state: tauri::State<'_, AppState>, app: tauri::AppHandle) {
     let scrub = scrub_on_lock_flag(&state.core);
-    lock_core(&state.core, &state.locked);
+    lock_core(&state.core, &state.locked, &app);
     if scrub {
         do_scrub(&app);
     }
 }
 
+/// #44: tell the webview that nothing decrypted may be kept any more. The viewer
+/// caches full-res media in RAM while the vault is unlocked, and the panic hotkey
+/// locks it without any frontend call, so waiting for the next poll would leave
+/// seconds of decrypted bytes in the page. `app_status.generation` is the belt to
+/// this brace: an event can be missed by a hidden or reloading webview, a changed
+/// counter cannot.
+fn end_vault_session(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    let _ = app.emit("vault-session-ended", ());
+}
+
 /// The lock half of #23 lives here so the panic hotkey and the Lock button
 /// do exactly the same thing: every job stops, the vault closes, the data
 /// key is zeroized.
-fn lock_core(core: &Core, locked: &AtomicBool) {
+fn lock_core(core: &Core, locked: &AtomicBool, app: &tauri::AppHandle) {
     core.jobs.cancel_all(); // imports/fetches must stop, not just hide
     core.queue.clear(); // drop lane timing history too
-    let mut inner = core.inner.lock().unwrap();
-    inner.opened = None; // drops conn (checkpoint) + zeroizes data key
+    {
+        let mut inner = core.inner.lock().unwrap();
+        inner.opened = None; // drops conn (checkpoint) + zeroizes data key
+        inner.vault_gen.fetch_add(1, Ordering::SeqCst);
+    }
     locked.store(true, Ordering::SeqCst);
+    end_vault_session(app);
 }
 
 // ---------- scrubber (#23): OS-side traces, never vault contents ----------
@@ -419,7 +447,7 @@ fn set_chrome(
 /// Registered at every launch; a vault may add its own key on unlock.
 pub const DEFAULT_PANIC_HOTKEY: &str = "CommandOrControl+Alt+L";
 
-/// Hold this long and the vault is crypto-erased (PLAN §4 escalation).
+/// Hold this long and the vault is crypto-erased (DESIGN §4 escalation, D19).
 pub const PANIC_HOLD_MS: u64 = 3000;
 
 /// Physical key state via the OS (same mechanism global-hotkey itself uses
@@ -463,6 +491,7 @@ fn panic_mods_down(_mods: tauri_plugin_global_shortcut::Modifiers) -> bool {
 /// - the first Release closes the episode = tap: Lock + hide (tap again
 ///   reveals the locked window); duplicate Releases fall through inert
 /// - if the watcher escalated, the erase already ran; releases do nothing
+///
 /// A watcher only escalates if it is still the *current* episode when its
 /// deadline lands (`panic_gen` matches): a stale watcher from an earlier
 /// quick tap must never fire while a fresh hold is still under 3 s old.
@@ -496,7 +525,7 @@ fn panic_event(
                 eprintln!("panic hold: crypto-erasing vault");
                 st.nuked.store(true, Ordering::SeqCst);
                 st.panic_hold.store(false, Ordering::SeqCst);
-                let _ = nuke_core(&st, None);
+                let _ = nuke_core(&st, None, &app2);
                 do_scrub(&app2);
                 if let Some(w) = app2.get_webview_window("main") {
                     let _ = w.hide();
@@ -529,7 +558,7 @@ fn panic_event(
     } else {
         eprintln!("panic tap: locking + hiding");
         let scrub = scrub_on_lock_flag(&state.core);
-        lock_core(&state.core, &state.locked);
+        lock_core(&state.core, &state.locked, app);
         if let Some(w) = win {
             let _ = w.hide();
         }
@@ -711,18 +740,19 @@ fn nuke_drill(state: tauri::State<'_, AppState>) -> Result<String, String> {
 #[tauri::command]
 fn nuke_vault(
     state: tauri::State<'_, AppState>,
+    app: tauri::AppHandle,
     confirm: String,
     dir: Option<String>,
 ) -> Result<(), String> {
     if confirm != "NUKE" {
         return Err("type NUKE exactly to confirm".into());
     }
-    nuke_core(&state, dir)
+    nuke_core(&state, dir, &app)
 }
 
 /// The irreversibility lives exactly once here — the typed-NUKE flow and the
 /// hold-3-seconds panic flow share it, so both really destroy everything.
-fn nuke_core(state: &AppState, dir: Option<String>) -> Result<(), String> {
+fn nuke_core(state: &AppState, dir: Option<String>, app: &tauri::AppHandle) -> Result<(), String> {
     // Stop every job first: nothing should be fetching or writing while the
     // files are being shredded, and no loop may re-open anything afterwards.
     state.jobs.cancel_all();
@@ -736,6 +766,7 @@ fn nuke_core(state: &AppState, dir: Option<String>) -> Result<(), String> {
             .ok_or("no vault folder attached — pick its folder or use \"Forget pointer\"")?;
         inner.opened = None; // close DB before shredding (Windows file locks)
         inner.vault_root = None;
+        inner.vault_gen.fetch_add(1, Ordering::SeqCst);
         goon_locator::clear(&state.exe_dir);
         state.locked.store(true, Ordering::SeqCst);
         root
@@ -746,20 +777,23 @@ fn nuke_core(state: &AppState, dir: Option<String>) -> Result<(), String> {
     }
     // Job history holds URLs and paths — wipe it along with the vault.
     state.jobs.clear();
+    end_vault_session(app);
     Ok(())
 }
 
 /// Clear the pointer file (flow.cfg) without touching any vault folder.
 /// Escape hatch when the pointer is stale/wrong and you want a clean start.
 #[tauri::command]
-fn reset_pointer(state: tauri::State<'_, AppState>) {
+fn reset_pointer(state: tauri::State<'_, AppState>, app: tauri::AppHandle) {
     state.jobs.cancel_all();
     state.queue.clear();
     goon_locator::clear(&state.exe_dir);
     let mut inner = state.inner.lock().unwrap();
     inner.vault_root = None;
     inner.opened = None;
+    inner.vault_gen.fetch_add(1, Ordering::SeqCst);
     state.locked.store(true, Ordering::SeqCst);
+    end_vault_session(&app);
 }
 
 // ---------- data (post-unlock) ----------
@@ -900,6 +934,19 @@ fn media_view(
     }))
 }
 
+/// #37: the vault refuses a nameless row. The library search matches on title,
+/// so an empty one is invisible forever - refusing the write here beats letting
+/// some future caller (companion route, importer bug) create an item nobody can
+/// find again. The UI guards this too; the guard belongs at the door.
+fn clean_title(title: &str) -> Result<&str, String> {
+    let t = title.trim();
+    if t.is_empty() {
+        Err("a title is required".into())
+    } else {
+        Ok(t)
+    }
+}
+
 #[tauri::command]
 fn update_item(
     state: tauri::State<'_, AppState>,
@@ -908,18 +955,22 @@ fn update_item(
     circle: Option<String>,
     status: String,
     version: Option<String>,
+    notes: Option<String>,
 ) -> Result<(), String> {
+    let title = clean_title(&title)?;
     let status = Status::from_str(&status).ok_or("invalid status")?;
     let mut inner = state.inner.lock().unwrap();
     let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
     goon_core::db::update_item(
         conn,
         &id,
-        title.trim(),
+        title,
         circle.as_deref().filter(|c| !c.trim().is_empty()),
         status,
         version.as_deref().filter(|v| !v.trim().is_empty()),
-        None,
+        // None keeps the old note (the DB uses IFNULL); Some("") clears it, which
+        // is what an emptied Notes box means.
+        notes.as_deref(),
         &now_epoch(),
     )
     .map_err(err)
@@ -1026,7 +1077,7 @@ fn known_sites() -> Vec<SiteInfo> {
         .iter()
         .map(|(site, kind)| SiteInfo {
             site: (*site).to_string(),
-            kind: *kind,
+            kind,
             mirror: ingest::is_mirror_site(site),
             default_rate_ms: ingest::default_rate_ms(site),
         })
@@ -1757,7 +1808,11 @@ async fn re_enrich_items(
             break;
         }
         job.set_progress(i, n, id);
-        match ingest::reenrich_item(&state, id, &job).await {
+        // #49: the worker gets a *child* handle. Its per-source counts land in
+        // the nested `sub_*` fields instead of replacing this batch's `i/n`,
+        // which is what made the strip read `0/1` for the whole run.
+        let scope = job.child();
+        match ingest::reenrich_item(&state, id, &scope).await {
             Ok(r) => {
                 sum.enriched += r.enriched;
                 sum.sources += r.sources;
@@ -1884,6 +1939,7 @@ pub fn run() {
         inner: Arc::new(Mutex::new(Inner {
             vault_root,
             opened: None,
+            vault_gen: AtomicU64::new(0),
         })),
         jobs: Arc::new(Jobs::default()),
         queue: Arc::new(queue::SiteQueue::default()),
@@ -2018,7 +2074,7 @@ pub fn run() {
 
     // Arm the panic key before anything else can go wrong — it must always
     // be pressable, even if the vault is locked or a source is down.
-    register_panic_keys(&app.handle(), None);
+    register_panic_keys(app.handle(), None);
 
     // Decoy window title (#27). Config windows are only guaranteed to exist
     // once the loop is running, so push it on Ready.
@@ -2114,6 +2170,7 @@ mod integration_tests {
                 inner: Arc::new(Mutex::new(Inner {
                     vault_root: Some(vault.clone()),
                     opened: Some(OpenedVault { conn, _key: key }),
+                    ..Default::default()
                 })),
                 jobs: Arc::new(Jobs::default()),
                 queue: Arc::new(queue::SiteQueue::default()),

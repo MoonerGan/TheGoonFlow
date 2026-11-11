@@ -437,6 +437,7 @@ mod tests {
             inner: Arc::new(Mutex::new(crate::Inner {
                 vault_root: Some(vault),
                 opened: Some(crate::OpenedVault { conn, _key: key }),
+                ..Default::default()
             })),
             jobs: Arc::new(Jobs::default()),
             queue: Arc::new(crate::queue::SiteQueue::default()),

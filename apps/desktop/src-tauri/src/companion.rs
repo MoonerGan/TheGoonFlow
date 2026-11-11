@@ -194,6 +194,7 @@ mod tests {
                     conn: c,
                     _key: key.unwrap(),
                 }),
+                ..Default::default()
             })),
             jobs: Arc::new(Jobs::default()),
             queue: Arc::new(crate::queue::SiteQueue::default()),
