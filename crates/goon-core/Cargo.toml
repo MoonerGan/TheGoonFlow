@@ -9,4 +9,11 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 rusqlite = { workspace = true }
 sha2 = "0.10"
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp"] }
+# `avif-native` (#52) is the dav1d-backed AVIF **decoder**: f95zone serves its
+# attachment art as AVIF behind `.jpg` URLs, and without a decoder the vault
+# holds the picture but the grid has no thumbnail. It is a build-time system
+# dependency (static dav1d, see tools/dev-env.ps1 and docs/DEVELOPMENT.md) and
+# it is deliberately static - the shipped artifact stays one exe. The plain
+# `avif` feature is encode-only (ravif) and is NOT wanted here. HEIF is not in
+# reach for `image` 0.25.10 either way, so the app keeps saying so out loud.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "avif-native"] }

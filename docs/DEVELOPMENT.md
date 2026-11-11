@@ -13,13 +13,27 @@ is, what invariants matter" companion.
 | Strawberry Perl + NASM | vendored OpenSSL build (SQLCipher backend) | `winget install StrawberryPerl.StrawberryPerl` `winget install NASM.NASM` |
 | Node 18+ | frontend toolchain | `winget install OpenJS.NodeJS.LTS` |
 | WebView2 runtime | Tauri webview | preinstalled on Win 11 |
+| dav1d, **static** build | AVIF decoding (#52) — a C library linked into the exe | `vcpkg install dav1d:x64-windows-static` + copy into `%LOCALAPPDATA%\goonflow-build\dav1d-x64-static` (see "dav1d, the AVIF decoder" below) |
 
 ### The dev-env wrapper
 Plain `cargo` in a bare shell **fails for the C deps** (they need the MSVC
-env, not just `cl` on PATH). Always:
+env, not just `cl` on PATH — and since #52 also the static dav1d, so
+`dav1d-sys` dies in its build script with a pkg-config stack trace). For the
+everyday commands there is a wrapper per job; each one sources `dev-env.ps1`
+itself, writes a log under `tools\`, and leaves a summary file whose numbers any
+claim in a report can be checked against:
 
 ```powershell
-. tools\dev-env.ps1        # imports vcvars64 env + cargo/node/perl/nasm paths
+powershell -ExecutionPolicy Bypass -File tools\run-test.ps1   -tag mNN   # cargo test --workspace
+powershell -ExecutionPolicy Bypass -File tools\run-clippy.ps1 -tag cN    # cargo clippy --workspace --all-targets
+powershell -ExecutionPolicy Bypass -File tools\run-release.ps1 -tag mNN  # release build + sha256
+```
+
+Anything else that needs cargo imports the environment first. Dot-sourcing needs
+a bypassed policy (`powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; …"`),
+and then the cargo call goes through `cmd /c`:
+
+```powershell
 cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
 ```
 
@@ -44,6 +58,115 @@ Known harmless noise: linking emits hundreds of `LNK4099: PDB 'ossl_static.pdb'
 was not found` lines from the vendored OpenSSL objects (no debug info shipped).
 Ignore; it does not affect the build. Grep test runs with e.g.
 `Select-String -Pattern 'test result|error'` instead of reading raw tails.
+
+### dav1d, the AVIF decoder (#52)
+
+`crates/goon-core/Cargo.toml` turns on `image`'s `avif-native` feature, so an
+AVIF cover stops being "stored verbatim, no thumbnail" and gets a real tile.
+That matters more than it sounds: #46/#50 measured f95zone answering
+`content-type: image/avif` for a URL that ends in `.jpg` (see §6), and a live
+f95 cover is 59 478 bytes of AVIF. The booru CDNs measured in #52 all answered
+`image/jpeg` (e621 and yande.re have **zero** AVIF originals today), so f95 is
+where AVIF comes from - which is also why asking the source for a sized variant
+could not fix this. `image` 0.25.10 splits AVIF into two features and only one
+of them reads files:
+
+- `avif = ["dep:ravif", "dep:rgb"]` — **encode only**: ravif writes AV1/AVIF, it
+  cannot decode them. Enabling `avif` alone buys nothing at import time.
+- `avif-native = ["dep:mp4parse", "dep:dav1d"]` — **the decoder**: mp4parse reads
+  the ISOBMFF/AVIF container, dav1d (C, VideoLAN) decodes the AV1 frame.
+
+So there is now a C library in the link, and it has to be the *static* one.
+`goon_core::media::thumbnailable` is the single place that says what this build
+can decode; keep it truthful. HEIF/HEIC is **still not decodable** — this path is
+AV1-in-AVIF, HEVC-in-HEIF is a different container and codec, and dav1d has no
+HEVC decoder — so `image/heif` must stay out of `thumbnailable` and the ingest
+report must keep its "stored as-is, this type cannot be decoded" line.
+
+**Why the environment variables exist.** `dav1d-sys` 0.8.3 contains no C source;
+it is a `system-deps` binding whose `build.rs` probes `dav1d >= 1.3.0` with
+pkg-config, and only falls back to cloning dav1d (its `build.rs` pins tag 1.5.0)
+and building it with meson + ninja. Both routes fail here: the only `pkg-config`
+on PATH is Strawberry Perl's (`C:\Strawberry\perl\bin\pkg-config.bat`, plus a
+shebang-perl `pkg-config` beside it) — neither is a Win32 executable, so Rust's
+`Command`/CreateProcess cannot exec it — and meson is not installed. So the
+library is handed to the build explicitly, with exactly these five variables:
+
+| Variable | What it does |
+|---|---|
+| `SYSTEM_DEPS_DAV1D_NO_PKG_CONFIG=1` | skips the pkg-config probe that cannot work here |
+| `SYSTEM_DEPS_DAV1D_LIB=dav1d` | names the library to link (bare name, so `dav1d.lib`) |
+| `SYSTEM_DEPS_DAV1D_SEARCH_NATIVE=<root>\lib` | folder holding `dav1d.lib` |
+| `SYSTEM_DEPS_DAV1D_SEARCH_INCLUDE=<root>\include` | folder holding `include\dav1d\*.h` |
+| `SYSTEM_DEPS_DAV1D_LINK=static` | forces a static link — import lib + DLL is not an option |
+
+**Getting dav1d (pick one):**
+
+1. `vcpkg install dav1d:x64-windows-static` (**static triplet, not the default
+   `x64-windows`**), then copy `installed\x64-windows-static\include\dav1d` and
+   `installed\x64-windows-static\lib\dav1d.lib` into
+   `%LOCALAPPDATA%\goonflow-build\dav1d-x64-static`, keeping the `include\` +
+   `lib\` layout. That is what this machine holds: dav1d 1.5.4, `lib\dav1d.lib`
+   8 110 908 bytes.
+2. Any prebuilt static dav1d `>= 1.3` — set `GOON_DAV1D_DIR` to its root (the
+   folder with `include\` and `lib\` in it).
+
+**What `tools\dev-env.ps1` does for you.** It resolves the dav1d root as
+`GOON_DAV1D_DIR` when set, and otherwise uses
+`%LOCALAPPDATA%\goonflow-build\dav1d-x64-static`; if `lib\dav1d.lib` **and**
+`include\dav1d\dav1d.h` both exist it sets the five variables above from that
+root (never overwriting one you exported yourself) and reports on its ready
+line:
+
+```
+dev env ready: cl.exe=yes, perl=yes, nasm=yes, dav1d=static
+```
+
+When the two files are missing it does not go quiet: the ready line says
+`dav1d=missing` and an `!!!` block prints where it looked and the three fixes
+(vcpkg static copy, `GOON_DAV1D_DIR`, or the five variables by hand). It sets
+nothing in that case, so the next `cargo build` dies with dav1d-sys' own probe
+error — read the `!!!` block rather than re-deriving the cause from cargo.
+
+**Static, or the artifact is wrong.** The shipping rule is one portable exe with
+no DLLs beside it (§8), so a shared dav1d — the `x64-windows` triplet, or someone
+dropping `dav1d.dll` next to the exe — is not acceptable even if it links and
+runs. Prove it after every release build:
+
+```powershell
+dumpbin /dependents target\release\GoonFlow.exe
+```
+
+Expected: only Windows system DLLs. Measured with AVIF on (2026-11): **20
+dependent DLLs, no `dav1d*.dll`**. A dav1d entry there means the build picked up
+a shared library and the exe is no longer carryable.
+
+**Measured cost** (2026-11, release build, so nobody re-measures it):
+
+- `target\release\GoonFlow.exe` grows **+2 275 840 bytes**;
+- `cargo tree -p goon-core`: **57 → 85 packages**;
+- dav1d decode alone: **2.5 ms** for a 706 B / 360x240 AVIF, **11.6 ms** for a
+  50 101 B / 1600x1067 one;
+- the whole `put_thumbnail` path on those files: **~7-21 ms**, output ~**14 KB**.
+
+**Licences for the new code.** DESIGN D5 keeps the project MIT; there is no
+NOTICE file in the repo yet, and when one lands these are the lines it needs.
+The crate licences were read off the vendored manifests under
+`%USERPROFILE%\.cargo\registry\src\index.crates.io-*\<crate>\Cargo.toml`
+(dav1d-sys-0.8.3, dav1d-0.11.1, mp4parse-0.17.0, av-data-0.4.4,
+bitreader-0.3.11); dav1d's own BSD-2-Clause terms were read from the copyright
+block in the installed `include\dav1d\version.h` rather than from the web:
+
+| Component | Licence |
+|---|---|
+| dav1d 1.5.4 (C library, statically linked) | BSD-2-Clause |
+| dav1d-sys 0.8.3, dav1d 0.11.1 (rust-av FFI bindings) | MIT |
+| mp4parse 0.17.0 (ISOBMFF/AVIF container parser) | MPL-2.0 |
+| av-data 0.4.4 (shared codec data types) | MIT |
+| bitreader 0.3.11 | MIT OR Apache-2.0 |
+
+MPL-2.0 is file-level copyleft, which is fine as long as mp4parse stays an
+unmodified dependency — another reason not to vendor-patch it into `goon-core`.
 
 ### Frontend
 ```powershell
@@ -90,7 +213,11 @@ apps/desktop/
 extensions/
   goonflow-clip/    #19 MV3 browser extension (manifest, background, options)
 tools/
-  dev-env.ps1       MSVC/toolchain env import
+  dev-env.ps1       MSVC/toolchain env import (+ the static dav1d vars for #52)
+  run-test.ps1      dev-env + cargo test --workspace, log + summary file
+  run-clippy.ps1    dev-env + cargo clippy --workspace --all-targets
+  run-release.ps1   dev-env + release build, writes size/sha256 evidence
+  verify-artifact.ps1  runs the live checks against the built exe as a set
   smoke-release.ps1 launches target\release\GoonFlow.exe, checks the companion
                     handshake, closes it (run after every tauri build)
   close-exit-test.ps1 live check for #41: close exits, panic tap hides, a second

@@ -33,19 +33,25 @@ bounded history). Parsers are parse-only — no network in tests, by design.
 
 The exceptions are `#[ignore]`d on purpose and run by hand: `tools\` drives the
 real exe (below), and inside cargo `match_live_search_smoke`,
-`first_frame_live_probe` and `f95_live_art_probe` (the live half of #46) hit the
-real sites. The f95 one needs your own cookie in the environment, never in the
-repo:
+`first_frame_live_probe`, `f95_live_art_probe` (the live half of #46) and
+`live_f95_markers_separate_member_from_guest_under_our_ua` (the live half of #38)
+hit the real sites. The f95 ones need your own cookie in the environment, never
+in the repo — and they need the dev env, because `dav1d-sys` builds the AVIF
+decoder (#52):
 
 ```powershell
-$env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw)
-cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_art_probe
+$env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt -Raw).Trim()
+powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_art_probe"
 ```
 
-Last run, 2026-11-10: title parsed, **15** lazy attachment images with the
-cookie, **0** as a guest (the login-wall note instead), cover stored as 59 478
-bytes and sniffed `image/avif`, and the note says out loud that this build
-cannot decode AVIF into a thumbnail.
+Last run, 2026-11-11 (same thread as #46, cookie refreshed): title parsed,
+**15** lazy attachment images with the cookie, **0** as a guest (the login-wall
+note instead), the first attachment 59 478 bytes and sniffed `image/avif`, and
+the note reads *"cover stored from post #1 as image/avif; 15 attachment image(s)
+on the page — they stay links, only the cover was downloaded"* — the AVIF now
+decodes into a thumbnail instead of announcing a missing decoder (#52). The
+#38 probe in the same run: `guest says signed-in = false, cookie says signed-in
+= true`.
 
 Release build: `powershell -ExecutionPolicy Bypass -File tools\run-release.ps1
 -tag mNN` (runs `tools\dev-env.ps1`, stops a live GoonFlow first, records the

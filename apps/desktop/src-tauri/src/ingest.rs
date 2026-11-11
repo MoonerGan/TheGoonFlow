@@ -1132,9 +1132,10 @@ async fn f95_thread(
                 images.len()
             ));
         } else {
-            // No decoder for this format in this build (AVIF/HEIF): store the
-            // original so the item view still shows real art, and say the grid
-            // thumbnail is missing instead of pretending it was made.
+            // No decoder for this format in this build (HEIF/HEIC, anything
+            // `image` 0.25.10 cannot read): store the original so the item view
+            // still shows real art, and say the grid thumbnail is missing
+            // instead of pretending it was made. AVIF no longer lands here.
             m.store_bytes = Some(bytes);
             m.note = Some(format!(
                 "cover is {mime} from post #1 — this build cannot decode {mime} into a \
@@ -1499,8 +1500,9 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     if let Some(bytes) = &meta.thumb_bytes {
         thumb = media::put_thumbnail(conn, &id, bytes);
     }
-    // A thumbnail this build cannot make stays visible in the report (#46: f95
-    // and the booru CDNs hand out AVIF, which goon-core has no decoder for).
+    // A thumbnail this build cannot make stays visible in the report (#46 found
+    // AVIF coming back from f95 with no decoder; #52 linked dav1d in, so what
+    // lands here now is HEIF and anything else `image` cannot read).
     let missing = undecodable_note(&meta, thumb);
     meta.note = note_with(meta.note.take(), missing);
     let mut tags = 0usize;
@@ -1544,10 +1546,22 @@ fn undecodable_note(meta: &Meta, thumb_stored: bool) -> Option<String> {
             _ => None,
         })
         .unwrap_or("an unknown format");
-    Some(format!(
-        "no thumbnail: this build cannot decode {mime} (the stored image itself is fine \
-         and shows in the item view)"
-    ))
+    // Two different facts, and they must not share a sentence (#52): a format
+    // this build has no decoder for (HEIF) is a fact about the app, while a
+    // decodable format whose bytes refused to decode is a fact about those
+    // bytes. Saying "this build cannot decode image/avif" after dav1d was
+    // linked in would be a lie that sent users looking for a missing feature.
+    if media::thumbnailable(mime) {
+        Some(format!(
+            "no thumbnail: the stored {mime} would not decode (the stored image itself \
+             is fine and shows in the item view)"
+        ))
+    } else {
+        Some(format!(
+            "no thumbnail: this build cannot decode {mime} (the stored image itself is \
+             fine and shows in the item view)"
+        ))
+    }
 }
 
 // ---------- update checking (M2) ----------
@@ -2661,13 +2675,29 @@ mod tests {
         assert_eq!(store_bytes_in(&mut mov, mp4), None);
         assert!(mov.note.as_deref().unwrap().contains("video/mp4"));
 
-        // the missing-decoder case stays visible instead of reading as success
+        // Two kinds of "no thumbnail", and the note must tell them apart (#52).
+        // These synthetic `ftypavif` bytes are not a decodable AVIF, so this is
+        // a failed decode, not an unsupported format: the wording may not claim
+        // the build has no AVIF decoder, because dav1d is linked in.
         let mut avif_meta = Meta::default();
-        store_bytes_in(&mut avif_meta, avif);
+        store_bytes_in(&mut avif_meta, avif.clone());
         assert!(media::make_thumbnail(avif_meta.thumb_bytes.as_ref().unwrap()).is_none());
         let note = undecodable_note(&avif_meta, false).expect("must stay visible");
         assert!(note.contains("image/avif"), "{note}");
+        assert!(!note.contains("cannot decode"), "{note}");
         assert!(undecodable_note(&avif_meta, true).is_none());
+
+        // HEIF has no decoder in this build (image 0.25.10 reads AVIF containers
+        // only), and that stays stated as the missing capability it is.
+        let mut heif = vec![0u8, 0, 0, 0x18];
+        heif.extend_from_slice(b"ftypheic");
+        heif.extend_from_slice(&[7u8; 24]);
+        let mut heif_meta = Meta::default();
+        assert_eq!(store_bytes_in(&mut heif_meta, heif), Some("image/heif"));
+        assert!(!media::thumbnailable("image/heif"));
+        let note = undecodable_note(&heif_meta, false).expect("must stay visible");
+        assert!(note.contains("cannot decode"), "{note}");
+        assert!(note.contains("image/heif"), "{note}");
     }
 
     #[test]

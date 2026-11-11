@@ -1,0 +1,4 @@
+# Line endings must never be "helpfully" rewritten for binary assets: the icons,
+# and the AVIF test fixture under crates/goon-core/src/fixtures.
+*.avif binary
+*.png binary

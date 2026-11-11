@@ -103,13 +103,20 @@ pub fn sniff_media(bytes: &[u8]) -> Sniffed {
     }
 }
 
-/// Can this build's decoder make a thumbnail out of `mime`? AVIF/HEIF are stored
-/// verbatim but cannot be decoded until `image`'s `avif-native` feature (dav1d)
-/// is enabled for goon-core — say so in the job report instead of going quiet.
+/// Can this build's decoder make a thumbnail out of `mime`?
+///
+/// AVIF is decodable since #52: `image`'s `avif-native` feature links dav1d
+/// statically, which is what f95zone actually serves for its attachment art
+/// (`image/avif` behind a `.jpg` URL, measured in #46).
+///
+/// HEIF/HEIC is **not** and will not be with this `image` version: the dav1d
+/// path reads AVIF containers only (`mp4parse::read_avif`). A HEIF original is
+/// still stored verbatim, and the job report says the grid thumbnail is missing
+/// because this build cannot decode that format - it does not go quiet.
 pub fn thumbnailable(mime: &str) -> bool {
     matches!(
         mime,
-        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp"
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" | "image/avif"
     )
 }
 
@@ -445,13 +452,49 @@ mod tests {
         assert_eq!(row.kind, "full");
         assert_eq!(row.mime, "image/avif");
         assert_eq!(row.data, avif);
-        // this build cannot decode AVIF → no thumbnail, and that stays visible
-        assert!(!thumbnailable("image/avif"));
+        // #52: this build CAN decode AVIF (dav1d is linked in), so these
+        // synthetic bytes produce no thumbnail because the *decode* fails, not
+        // because the format is unsupported. That distinction is what keeps the
+        // job report honest: unsupported is a fact about the build, a failed
+        // decode is a fact about these bytes.
+        assert!(thumbnailable("image/avif"));
         assert!(!put_thumbnail(&conn, "m6", &avif));
+        assert!(!thumbnailable("image/heif"), "HEIF is still out of reach");
         assert!(get_thumb(&conn, "m6").is_none());
         assert!(thumbnailable("image/jpeg"));
         // an HTML error page never becomes "art"
         assert!(!put_full_image(&conn, "m6", b"<html>Access denied</html>"));
+    }
+
+    /// #52: the dav1d-backed AVIF decoder is a claim this build has to keep
+    /// honouring. `image` only exports this type with the `avif-native` feature,
+    /// so the line below stops compiling the moment the feature is dropped -
+    /// which would otherwise pass every other test here and quietly take
+    /// thumbnails away from f95's art.
+    #[test]
+    fn the_avif_decoder_is_actually_linked_in() {
+        let never: Option<image::codecs::avif::AvifDecoder<std::io::Cursor<Vec<u8>>>> = None;
+        assert!(never.is_none(), "the type exists only when dav1d is linked");
+    }
+
+    /// A real AVIF made by this project (a deterministic gradient, not a photo
+    /// somebody else owns): the grid must get a thumbnail out of it. Written by
+    /// `ravif`, read back by dav1d, so it also guards the two codecs agreeing on
+    /// the container.
+    #[test]
+    fn a_real_avif_gets_a_thumbnail() {
+        let bytes = include_bytes!("fixtures/avif-tiny.avif");
+        assert_eq!(detect_mime(bytes), Some("image/avif"));
+        assert!(thumbnailable("image/avif"));
+        let t = make_thumbnail(bytes).expect("dav1d should decode what we wrote");
+        assert!(
+            t.width <= THUMB_MAX && t.height <= THUMB_MAX,
+            "the thumbnail must fit the grid budget"
+        );
+        assert!(
+            t.bytes.starts_with(&[0xff, 0xd8]),
+            "an opaque source thumbnails to jpeg"
+        );
     }
 
     /// A `.mkv`-looking source carrying WebM bytes is recorded as WebM: the row's

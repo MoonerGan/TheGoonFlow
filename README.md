@@ -51,14 +51,26 @@ embedded, nothing installed, safe to run from a USB stick.
 
 ## Testing
 
-```sh
-cargo test --workspace                    # ~81 tests: db, vault, extractors, jobs…
-cd apps/desktop && npx svelte-check       # frontend types
+```powershell
+# cargo on Windows needs the MSVC + dav1d environment; these wrappers source
+# tools\dev-env.ps1 for you and leave a log + summary file behind as evidence
+powershell -ExecutionPolicy Bypass -File tools\run-test.ps1 -tag mNN
+powershell -ExecutionPolicy Bypass -File tools\run-clippy.ps1 -tag cN
+cd apps/desktop; npx svelte-check          # frontend types
 ```
 
-Plus committed live checks against the release exe: `tools/smoke-release.ps1`
-(handshake), `tools/panic-tap-test.ps1` / `panic-hold-test.ps1` /
-`panic-stale-test.ps1` (the panic hotkey state machine, safe-by-construction).
+Do **not** type `cargo test --workspace` in a bare shell on Windows: SQLCipher +
+OpenSSL need the MSVC tools and, since #52, `dav1d-sys` needs the static dav1d
+that `dev-env.ps1` points at. Without it cargo dies inside a C build script with
+a pkg-config stack trace that says nothing useful. The wrappers above are the
+entry point; `dev-env.ps1` prints `dav1d=static` (or `dav1d=missing` and the
+three fixes) on its first line.
+
+Plus committed live checks against the release exe: `tools/verify-artifact.ps1`
+runs them as a set — `smoke-release.ps1` (handshake on the real vault),
+`close-exit-test.ps1` (close exits, single-instance hand-off) and
+`panic-tap-test.ps1` / `panic-hold-test.ps1` / `panic-stale-test.ps1` (the panic
+hotkey state machine, safe-by-construction).
 
 ## Privacy & legal
 
@@ -67,3 +79,10 @@ store stay on your disk, encrypted. You are responsible for what you download an
 your local laws; this tool stores what you tell it and nothing else.
 
 MIT licensed — see [docs/DESIGN.md](docs/DESIGN.md) §2 (D5) for the rationale.
+
+**Third-party code inside the exe.** The release binary statically links **dav1d**
+(BSD-2-Clause, VideoLAN) as its AVIF decoder, plus the Rust bindings `dav1d-sys`
+(MIT) and `mp4parse` (MPL-2.0). Static linking is a deliberate choice — the
+artifact stays a single file with no DLLs beside it — so the attribution lives
+here instead of in a redistributable you could inspect. `cargo tree` names every
+other crate and its license; the license texts ship in each project's repository.
