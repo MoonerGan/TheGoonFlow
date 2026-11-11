@@ -128,7 +128,7 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     )?;
 
     // Versioned migrations, run in order. Every step is idempotent so opening
-    // an old vault upgrades it in place (PLAN §13: no vault has been published
+    // an old vault upgrades it in place (DESIGN §4.1: no vault has been published
     // yet, but field-test vaults exist and must keep working).
     let v = schema_version(conn).unwrap_or(1);
     if v < 2 {
@@ -1102,7 +1102,7 @@ pub fn site_enabled(conn: &Connection, site: &str, default: bool) -> bool {
     .unwrap_or(default)
 }
 
-/// Politeness delay for this site, in ms (PLAN §6 rate limiters).
+/// Politeness delay for this site, in ms (DESIGN §6 rate limiters).
 pub fn site_rate_ms(conn: &Connection, site: &str, fallback: i64) -> i64 {
     conn.query_row(
         "SELECT rate_ms FROM site_settings WHERE site = ?1",
@@ -1244,10 +1244,16 @@ fn pairing_key(title: &str) -> String {
 
 /// Suggestions grouped by view. `kind` = 'game' | 'media' | None(all).
 /// - Games: titles that match once version/engine brackets are stripped — the
-///   usual DLsite origin ↔ f95 thread ↔ local folder triple.
+///   usual DLsite origin ↔ f95 thread ↔ local folder triple. Titles that name the
+///   *tool* instead of the game (`mmnz-game` and friends, see
+///   `goon_core::title_is_placeholder`) are never suggested — that was the #47
+///   complaint of 40+ `mmnz-game` rows hiding the real pairs. A bucket is also
+///   capped, and cross-site pairs come first, so one shared title cannot produce
+///   N·(N-1)/2 rows.
 /// - Media: **the same stored bytes** (media.hash) on two items — a repost of
 ///   one image across boorus, or the same file imported twice. Title matching
 ///   is useless for `1743761874698456.jpg`, so we match content instead.
+///
 /// These are only ever *suggestions*; a human confirms the merge.
 pub fn pairing_suggestions(
     conn: &Connection,
@@ -1278,8 +1284,8 @@ pub fn pairing_suggestions(
         let mut groups: BTreeMap<String, Vec<(String, String, String, String)>> = BTreeMap::new();
         for (id, title, sites, src) in rows {
             let key = pairing_key(&title);
-            if key.is_empty() {
-                continue;
+            if key.is_empty() || crate::title_is_placeholder(&title) {
+                continue; // a title that names a tool is not an identity (#47)
             }
             groups.entry(key).or_default().push((id, title, sites, src));
         }
@@ -1289,22 +1295,32 @@ pub fn pairing_suggestions(
                 continue;
             }
             g.sort_by(|a, b| a.0.cmp(&b.0));
+            // Cross-site pairs are what pairing exists for (the DLsite origin +
+            // f95 thread + local folder triple). A dozen games that merely share
+            // a title must not bury those, so cross-site pairs come first and a
+            // bucket is capped instead of emitting N·(N-1)/2 rows (#47).
+            let mut pairs: Vec<(u8, usize, usize)> = Vec::new();
             for i in 0..g.len() {
                 for j in (i + 1)..g.len() {
-                    if pair_dismissed(conn, &g[i].0, &g[j].0)? {
-                        continue; // user said "keep both" (#31)
-                    }
-                    out.push(PairSuggestion {
-                        a_id: g[i].0.clone(),
-                        a_title: g[i].1.clone(),
-                        a_sites: g[i].2.clone(),
-                        a_src: g[i].3.clone(),
-                        b_id: g[j].0.clone(),
-                        b_title: g[j].1.clone(),
-                        b_sites: g[j].2.clone(),
-                        b_src: g[j].3.clone(),
-                    });
+                    pairs.push((if g[i].2 == g[j].2 { 1 } else { 0 }, i, j));
                 }
+            }
+            pairs.sort_by_key(|p| (p.0, p.1, p.2));
+            const PAIRS_PER_BUCKET: usize = 12;
+            for (_, i, j) in pairs.into_iter().take(PAIRS_PER_BUCKET) {
+                if pair_dismissed(conn, &g[i].0, &g[j].0)? {
+                    continue; // user said "keep both" (#31)
+                }
+                out.push(PairSuggestion {
+                    a_id: g[i].0.clone(),
+                    a_title: g[i].1.clone(),
+                    a_sites: g[i].2.clone(),
+                    a_src: g[i].3.clone(),
+                    b_id: g[j].0.clone(),
+                    b_title: g[j].1.clone(),
+                    b_sites: g[j].2.clone(),
+                    b_src: g[j].3.clone(),
+                });
             }
         }
     }
@@ -1744,6 +1760,92 @@ mod tests {
         let d = get_item(&conn, "g1").unwrap().unwrap();
         assert_eq!(d.sources.len(), 2);
         assert_eq!(d.tags.len(), 1);
+    }
+
+    /// Field report #47: repack placeholders (`mmnz-game` comes from
+    /// `www/data/System.json`'s `gameTitle`) name the *tool*, not the game, so
+    /// they must never become dupe suggestions.
+    #[test]
+    fn placeholder_titles_are_never_suggested() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for n in 1..=9 {
+            let id = format!("p{n}");
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at)
+                 VALUES (?1,'game','mmnz-game','0','1')",
+                rusqlite::params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sources (item_id, site, url) VALUES (?1,'local',?2)",
+                rusqlite::params![id, format!("file:///D:/games/p{n}")],
+            )
+            .unwrap();
+        }
+        for (n, t) in ["game", "Demo", "new folder", "Sample Game"]
+            .iter()
+            .enumerate()
+        {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at)
+                 VALUES (?1,'game',?2,'0','1')",
+                rusqlite::params![format!("x{n}"), t],
+            )
+            .unwrap();
+        }
+        let sugg = pairing_suggestions(&conn, Some("game")).unwrap();
+        assert!(
+            sugg.is_empty(),
+            "placeholders paired {} rows; the tool's name is not an identity",
+            sugg.len()
+        );
+    }
+
+    /// Ten games sharing a real title must not bury the pair pairing exists for
+    /// (the DLsite/f95/local triple), so cross-site pairs come first and a bucket
+    /// is capped rather than emitting N·(N-1)/2 rows (#47).
+    #[test]
+    fn cross_site_pairs_win_and_a_bucket_is_capped() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for n in 1..=10 {
+            let id = format!("l{n}");
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at)
+                 VALUES (?1,'game','Garden Party','0','1')",
+                rusqlite::params![id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO sources (item_id, site, url) VALUES (?1,'local',?2)",
+                rusqlite::params![id, format!("file:///D:/games/gp{n}")],
+            )
+            .unwrap();
+        }
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at)
+             VALUES ('f1','game','Garden Party [v1.02]','0','1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url) VALUES ('f1','f95','https://f95zone.to/threads/gp.1/')",
+            [],
+        )
+        .unwrap();
+
+        let sugg = pairing_suggestions(&conn, Some("game")).unwrap();
+        let crosses = sugg
+            .iter()
+            .filter(|p| p.a_sites == "f95" || p.b_sites == "f95")
+            .count();
+        assert_eq!(crosses, 10, "every local copy vs the f95 thread");
+        assert!(
+            sugg.len() <= 12,
+            "bucket is capped, got {} of 55 possible pairs",
+            sugg.len()
+        );
     }
 
     /// Field report #1: direct-file bookmarks stored site "i"/"wimg" — opening

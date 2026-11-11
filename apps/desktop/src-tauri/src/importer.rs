@@ -67,7 +67,7 @@ fn is_internal_dir(name: &str) -> bool {
         "x86",
         "dll",
     ];
-    name.starts_with('.') || INTERNAL.iter().any(|i| name == *i) || name.starts_with("python")
+    name.starts_with('.') || INTERNAL.contains(&name) || name.starts_with("python")
 }
 
 /// What a scan noticed along the way — so a scan that finds *nothing* can
@@ -624,15 +624,17 @@ pub fn zip_engine_info(path: &Path) -> Result<ZipEngineInfo, String> {
 
     // RPG Maker MV/MZ
     if find(&|n| n == "game.rmmzproject" || n == "game.rmvproject").is_some() {
-        let title = find(&|n| n == "www/data/system.json")
-            .and_then(|i| zip_read_text(&mut za, &names, i))
-            .and_then(|raw| {
-                serde_json::from_str::<serde_json::Value>(&raw)
-                    .ok()?
-                    .get("gameTitle")?
-                    .as_str()
-                    .map(str::to_string)
-            });
+        let title = usable_title(
+            find(&|n| n == "www/data/system.json")
+                .and_then(|i| zip_read_text(&mut za, &names, i))
+                .and_then(|raw| {
+                    serde_json::from_str::<serde_json::Value>(&raw)
+                        .ok()?
+                        .get("gameTitle")?
+                        .as_str()
+                        .map(str::to_string)
+                }),
+        );
         return Ok(ZipEngineInfo {
             tag: Some("rpg-maker"),
             title,
@@ -761,11 +763,11 @@ fn common_zip_prefix(names: &[String]) -> String {
         return String::new();
     };
     let seg = &first[..first.find('/').unwrap() + 1];
-    names
-        .iter()
-        .all(|n| n.starts_with(seg))
-        .then(|| seg.to_string())
-        .unwrap_or_default()
+    if names.iter().all(|n| n.starts_with(seg)) {
+        seg.to_string()
+    } else {
+        Default::default()
+    }
 }
 
 // ---------- engine fingerprinting ----------
@@ -948,19 +950,31 @@ fn first_image_in(dir: &Path) -> Option<PathBuf> {
 fn rpgm_title(dir: &Path) -> Option<String> {
     let raw = fs::read_to_string(dir.join("www").join("data").join("System.json")).ok()?;
     let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-    v.get("gameTitle")
-        .and_then(|t| t.as_str())
-        .filter(|t| !t.trim().is_empty())
-        .map(String::from)
+    usable_title(
+        v.get("gameTitle")
+            .and_then(|t| t.as_str())
+            .map(String::from),
+    )
+}
+
+/// A self-reported title that names the *tool* (`mmnz-game`, `game`,
+/// `new folder`) is worse than no title at all: the caller falls back to the
+/// folder/archive name, which is the thing the user can actually read, and the
+/// library stops filling with rows whose titles all match each other and get
+/// proposed as duplicates of one another (#47).
+fn usable_title(t: Option<String>) -> Option<String> {
+    t.filter(|t| !t.trim().is_empty() && !goon_core::title_is_placeholder(t))
 }
 
 fn ini_title(path: &Path) -> Option<String> {
     let raw = fs::read_to_string(path).ok()?;
-    raw.lines()
-        .find_map(|l| l.trim().strip_prefix("Title="))
-        .map(str::trim)
-        .filter(|t| !t.is_empty())
-        .map(String::from)
+    usable_title(
+        raw.lines()
+            .find_map(|l| l.trim().strip_prefix("Title="))
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(String::from),
+    )
 }
 
 fn package_json_title(path: &Path) -> Option<String> {
@@ -1098,6 +1112,24 @@ mod tests {
         let info = detect_engine(&rpgm);
         assert_eq!(info.engine, Some("rpg-maker"));
         assert_eq!(info.title.as_deref(), Some("Real Title Here"));
+
+        // A repack placeholder is the installer's tag, not a title (#47): refuse
+        // it here so the caller falls back to the folder name and the item never
+        // lands in the dupe bucket shared by every game from that tool.
+        let ph = base.join("mmnz-game");
+        fs::create_dir_all(ph.join("www").join("data")).unwrap();
+        fs::write(ph.join("game.rmmzproject"), "").unwrap();
+        fs::write(
+            ph.join("www").join("data").join("System.json"),
+            r#"{"gameTitle":"mmnz-game"}"#,
+        )
+        .unwrap();
+        let info = detect_engine(&ph);
+        assert_eq!(info.engine, Some("rpg-maker"));
+        assert_eq!(
+            info.title, None,
+            "mmnz-game names the tool; the folder name wins instead"
+        );
 
         // Not a game: random folder.
         let random = base.join("photos");
