@@ -20,7 +20,10 @@ impl ItemKind {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Name from the string the vault stores. Deliberately not called `from_str`:
+    /// that name belongs to `std::str::FromStr`, and an inherent method with that
+    /// name quietly wins over the trait in people's heads (#51).
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "game" => Some(ItemKind::Game),
             "gallery" => Some(ItemKind::Gallery),
@@ -52,7 +55,8 @@ impl Status {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// See [`ItemKind::parse`] for why this is not called `from_str`.
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "seen" => Some(Status::Seen),
             "tracking" => Some(Status::Tracking),

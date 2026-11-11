@@ -1713,7 +1713,7 @@ pub fn apply_meta(
                 item_id,
                 new_title.unwrap_or(&d.title),
                 d.circle.as_deref(),
-                Status::from_str(&d.status).unwrap_or(Status::Seen),
+                Status::parse(&d.status).unwrap_or(Status::Seen),
                 meta.version.as_deref().or(d.version.as_deref()),
                 None,
                 &now_epoch(),

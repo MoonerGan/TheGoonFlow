@@ -502,17 +502,31 @@ mod tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let media_items =
-            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, None, None).unwrap();
+        let media_items = goon_core::db::list_items(
+            conn,
+            &goon_core::db::ListQuery {
+                limit: 100,
+                kind: Some("media"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(media_items.len(), 4, "all four are media items");
         let titles: Vec<&str> = media_items.iter().map(|i| i.title.as_str()).collect();
         assert!(
             titles.iter().any(|t| t.contains("clip")),
             "video stem used as title: {titles:?}"
         );
-        let local_only =
-            goon_core::db::list_items(conn, 100, 0, None, Some("media"), None, Some("local"), None)
-                .unwrap();
+        let local_only = goon_core::db::list_items(
+            conn,
+            &goon_core::db::ListQuery {
+                limit: 100,
+                kind: Some("media"),
+                site: Some("local"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(local_only.len(), 2);
         drop(inner);
 

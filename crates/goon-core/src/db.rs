@@ -380,17 +380,41 @@ pub struct ItemSummary {
     pub updated_at: String,
 }
 
-pub fn list_items(
-    conn: &Connection,
-    limit: i64,
-    offset: i64,
-    search: Option<&str>,
-    kind: Option<&str>,
-    tag: Option<&str>,
-    site: Option<&str>,
-    source: Option<&str>,
-) -> rusqlite::Result<Vec<ItemSummary>> {
-    let like = search.map(|s| format!("%{}%", s.trim()));
+/// Filters for one grid page. Grew out of #40 (source-state filters) and the
+/// M2 site filter; as a plain argument list it was already eight wide, so every
+/// new facet would have pushed it further past clippy's limit (#51). Call sites
+/// are meant to read as `ListQuery { kind: Some("game"), ..Default::default() }`.
+#[derive(Debug)]
+pub struct ListQuery<'a> {
+    pub limit: i64,
+    pub offset: i64,
+    pub search: Option<&'a str>,
+    /// `"game"` or `"media"` (media = galleries + posts), as the views ask for it.
+    pub kind: Option<&'a str>,
+    pub tag: Option<&'a str>,
+    pub site: Option<&'a str>,
+    /// Sidebar source state: `local_only` | `no_local` | `no_tags`.
+    pub source: Option<&'a str>,
+}
+
+impl Default for ListQuery<'_> {
+    fn default() -> Self {
+        Self {
+            // The grid has no pagination yet; this is the safety ceiling, and the
+            // desktop command overrides it the same way it always did.
+            limit: 200,
+            offset: 0,
+            search: None,
+            kind: None,
+            tag: None,
+            site: None,
+            source: None,
+        }
+    }
+}
+
+pub fn list_items(conn: &Connection, q: &ListQuery<'_>) -> rusqlite::Result<Vec<ItemSummary>> {
+    let like = q.search.map(|s| format!("%{}%", s.trim()));
     // Placeholders are always ?1..?7 — binding with params! fills positions
     // in order, so skipping ?1 while using ?2 would bind offset to ?2.
     let sql = "SELECT id, kind, title, status, version,
@@ -418,7 +442,7 @@ pub fn list_items(
     let mut stmt = conn.prepare(sql)?;
     let mut out = Vec::new();
     let mapped = stmt.query_map(
-        params![like, limit, offset, kind, tag, site, source],
+        params![like, q.limit, q.offset, q.kind, q.tag, q.site, q.source],
         map_item_summary,
     )?;
     for row in mapped {
@@ -431,9 +455,7 @@ fn map_item_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     let kind: String = r.get(1)?;
     Ok(ItemSummary {
         id: r.get(0)?,
-        kind: ItemKind::from_str(&kind)
-            .map(|k| k.as_str())
-            .unwrap_or("game"),
+        kind: ItemKind::parse(&kind).map(|k| k.as_str()).unwrap_or("game"),
         title: r.get(2)?,
         status: r.get(3)?,
         version: r.get(4)?,
@@ -1488,11 +1510,34 @@ mod tests {
             )
             .unwrap();
         }
-        let all = list_items(&conn, 300, 0, None, None, None, None, None).unwrap();
+        let all = list_items(
+            &conn,
+            &ListQuery {
+                limit: 300,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(all.len(), 3);
-        let games = list_items(&conn, 300, 0, None, Some("game"), None, None, None).unwrap();
+        let games = list_items(
+            &conn,
+            &ListQuery {
+                limit: 300,
+                kind: Some("game"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(games.len(), 2);
-        let search = list_items(&conn, 300, 0, Some("gamma"), None, None, None, None).unwrap();
+        let search = list_items(
+            &conn,
+            &ListQuery {
+                limit: 300,
+                search: Some("gamma"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(search.len(), 1);
         let counts = counts_by_status(&conn, Some("game")).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 2);
@@ -1555,12 +1600,19 @@ mod tests {
         add_item_tag(&conn, "g_both", "renpy", TYPE_CONTENT).unwrap();
 
         let ids = |source: &str, kind: &str| -> Vec<String> {
-            let mut v: Vec<String> =
-                list_items(&conn, 300, 0, None, Some(kind), None, None, Some(source))
-                    .unwrap()
-                    .into_iter()
-                    .map(|i| i.id)
-                    .collect();
+            let mut v: Vec<String> = list_items(
+                &conn,
+                &ListQuery {
+                    limit: 300,
+                    kind: Some(kind),
+                    source: Some(source),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect();
             v.sort();
             v
         };
@@ -1675,22 +1727,44 @@ mod tests {
         // Tag write path + tag filter + top tags.
         add_item_tag(&conn, "g1", "renpy", TYPE_CONTENT).unwrap();
         add_item_tag(&conn, "g2", "renpy", TYPE_CONTENT).unwrap();
-        let tagged = list_items(&conn, 300, 0, None, None, Some("renpy"), None, None).unwrap();
+        let tagged = list_items(
+            &conn,
+            &ListQuery {
+                limit: 300,
+                tag: Some("renpy"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(tagged.len(), 2);
         let tops = top_tags(&conn, 10, None).unwrap();
         assert_eq!(tops[0].name, "renpy");
         assert_eq!(tops[0].count, 2);
         remove_item_tag(&conn, "g2", tops[0].id).unwrap();
         assert_eq!(
-            list_items(&conn, 300, 0, None, None, Some("renpy"), None, None)
-                .unwrap()
-                .len(),
+            list_items(
+                &conn,
+                &ListQuery {
+                    limit: 300,
+                    tag: Some("renpy"),
+                    ..Default::default()
+                }
+            )
+            .unwrap()
+            .len(),
             1
         );
 
         // Site filter + per-site counts (Media view filters).
-        let from_dlsite =
-            list_items(&conn, 300, 0, None, None, None, Some("dlsite"), None).unwrap();
+        let from_dlsite = list_items(
+            &conn,
+            &ListQuery {
+                limit: 300,
+                site: Some("dlsite"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(from_dlsite.len(), 1);
         let sites = counts_by_site(&conn, Some("game")).unwrap();
         assert_eq!(sites.len(), 2);

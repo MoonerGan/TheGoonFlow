@@ -560,8 +560,11 @@ manually.
 ## 7. Release-ish notes for contributors
 
 - MIT licensed (DESIGN D5).
-- Keep `cargo test --workspace` green and `npm run build` warning-free
-  (svelte a11y warnings count).
+- Keep `cargo test --workspace` green (via `tools\run-test.ps1`), clippy clean of
+  warnings (`tools\run-clippy.ps1` must report **0**; if you add a warning on
+  purpose, `#[allow(...)]` with a comment saying why, exactly as
+  `list_items` in `src-tauri/src/lib.rs` does for the frontend wire shape), and
+  `npm run build` warning-free (svelte a11y warnings count).
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
   `target/`, `node_modules/`, build logs under `tools/*.log`.

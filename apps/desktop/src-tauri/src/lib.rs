@@ -816,6 +816,12 @@ fn kind_stats(state: tauri::State<'_, AppState>) -> Result<Vec<(&'static str, i6
     goon_core::db::counts_by_kind(&opened.conn).map_err(err)
 }
 
+/// The flat argument list is the wire contract: `api.ts listItems` sends these
+/// keys and Tauri matches them by name. Nesting them into one struct argument
+/// would be the cleaner Rust shape but would change every grid call's payload for
+/// no gain the frontend can see, so #51 resolves this one by keeping the shape
+/// and reshaping the *core* call (`db::ListQuery`) instead.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 fn list_items(
     state: tauri::State<'_, AppState>,
@@ -829,17 +835,16 @@ fn list_items(
 ) -> Result<Vec<goon_core::db::ItemSummary>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::list_items(
-        &opened.conn,
-        limit.unwrap_or(200),
-        offset.unwrap_or(0),
-        search.as_deref(),
-        kind.as_deref(),
-        tag.as_deref(),
-        site.as_deref(),
-        source.as_deref(),
-    )
-    .map_err(err)
+    let q = goon_core::db::ListQuery {
+        limit: limit.unwrap_or(200),
+        offset: offset.unwrap_or(0),
+        search: search.as_deref(),
+        kind: kind.as_deref(),
+        tag: tag.as_deref(),
+        site: site.as_deref(),
+        source: source.as_deref(),
+    };
+    goon_core::db::list_items(&opened.conn, &q).map_err(err)
 }
 
 #[tauri::command]
@@ -959,7 +964,7 @@ fn update_item(
     notes: Option<String>,
 ) -> Result<(), String> {
     let title = clean_title(&title)?;
-    let status = Status::from_str(&status).ok_or("invalid status")?;
+    let status = Status::parse(&status).ok_or("invalid status")?;
     let mut inner = state.inner.lock().unwrap();
     let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
     goon_core::db::update_item(
@@ -2280,12 +2285,26 @@ mod integration_tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let items = goon_core::db::list_items(conn, 300, 0, None, None, None, None, None).unwrap();
+        let items = goon_core::db::list_items(
+            conn,
+            &goon_core::db::ListQuery {
+                limit: 300,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(items.len(), 1, "imported but list showed nothing");
         assert_eq!(items[0].title, "Game X");
         assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only =
-            goon_core::db::list_items(conn, 300, 0, None, Some("game"), None, None, None).unwrap();
+        let games_only = goon_core::db::list_items(
+            conn,
+            &goon_core::db::ListQuery {
+                limit: 300,
+                kind: Some("game"),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(games_only.len(), 1);
         drop(inner);
 
