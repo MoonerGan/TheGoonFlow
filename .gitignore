@@ -3,9 +3,17 @@ node_modules/
 dist/
 target/
 
-# runtime state — never commit vault material
+# runtime state — never commit vault material.
+# flow.cfg is the plaintext pointer, chrome.cfg the plaintext decoy title (both sit
+# beside the exe), and *.db / *-journal are what a vault root looks like when someone
+# renames the folder — the goonflow-vault/ entry alone stops nothing else.
 flow.cfg
+chrome.cfg
 goonflow-vault/
+*.db
+*.db-wal
+*.db-shm
+*-journal
 *.log
 
 # scratch build logs (tools/)

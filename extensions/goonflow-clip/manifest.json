@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "GoonFlow Clip",
   "version": "0.1.0",
-  "description": "Clip links and images from your browser straight into The Goon Flow vault. Talks only to the local app.",
+  "description": "Clip links and images into The Goon Flow vault. Sends only to the local app; reads sign-in cookies only when you ask.",
   "permissions": ["contextMenus", "storage", "notifications", "activeTab", "cookies"],
   "host_permissions": [
     "http://127.0.0.1/*",

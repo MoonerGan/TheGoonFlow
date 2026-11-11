@@ -407,6 +407,89 @@ mod tests {
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }
 
+    /// The extension is the one piece of this app that lives inside a browser, and
+    /// the docs describe it as talking only to the local app. Nothing checked that,
+    /// and #38 grew it on purpose: the manifest now carries the `cookies` permission
+    /// plus three `https://` hosts so the popup can hand over a sign-in cookie. So
+    /// two facts get pinned here:
+    ///
+    /// * every `fetch(` in the extension's own code addresses the loopback companion
+    ///   API (the cookie read is a browser API call, not a network request), and
+    /// * the hosts it may read cookies for are exactly the sites the app will accept
+    ///   a cookie for (`cookies::needs_cookie`) — no more, and none missing.
+    ///
+    /// Add a login site without growing both manifests, or point a fetch at a remote
+    /// host, and this fails instead of quietly shipping a wider grant.
+    #[test]
+    fn extension_sends_to_loopback_only_and_its_cookie_hosts_match_the_app() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../extensions");
+        let cookie_hosts = ["f95zone.to", "e-hentai.org", "exhentai.org"];
+        for name in ["goonflow-clip", "goonflow-clip-firefox"] {
+            let dir = root.join(name);
+            let manifest: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap())
+                    .unwrap();
+
+            for h in manifest["host_permissions"]
+                .as_array()
+                .expect("host_permissions")
+            {
+                let h = h.as_str().unwrap();
+                if let Some(rest) = h.strip_prefix("https://") {
+                    let host = rest.trim_end_matches("/*");
+                    assert!(
+                        cookie_hosts.contains(&host),
+                        "{name}: {h} puts a remote host in host_permissions"
+                    );
+                    let site = match host {
+                        "f95zone.to" => "f95",
+                        "e-hentai.org" => "ehentai",
+                        _ => "exhentai",
+                    };
+                    assert!(
+                        crate::cookies::needs_cookie(site),
+                        "{name}: {h} is granted, but the app refuses cookies for {site}"
+                    );
+                } else {
+                    assert!(
+                        h == "http://127.0.0.1/*" || h == "http://localhost/*",
+                        "{name}: only loopback may be fetched, found {h}"
+                    );
+                }
+            }
+            assert!(
+                manifest["permissions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|p| p.as_str() == Some("cookies")),
+                "{name}: the manifest still promises the cookie hand-off"
+            );
+
+            // Its own code may only ever dial the companion API.
+            let mut calls = 0usize;
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.extension().and_then(|e| e.to_str()) != Some("js") {
+                    continue;
+                }
+                let text = std::fs::read_to_string(&path).unwrap();
+                for line in text.lines() {
+                    if !line.contains("fetch(") {
+                        continue;
+                    }
+                    assert!(
+                        line.contains("127.0.0.1") && !line.contains("https://"),
+                        "{}: {line} fetches somewhere that is not the app",
+                        path.display()
+                    );
+                    calls += 1;
+                }
+            }
+            assert!(calls >= 3, "{name}: expected companion calls, saw {calls}");
+        }
+    }
+
     #[tokio::test]
     async fn unreachable_clip_stores_bare_and_second_is_duplicate() {
         let (client, info) = serve(false, true).await;
