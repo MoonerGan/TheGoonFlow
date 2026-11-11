@@ -318,40 +318,9 @@ async fn require_token(State(shared): State<Shared>, req: Request, next: Next) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Inner, Jobs};
 
     fn temp_core(tag: &str, unlocked: bool) -> (Core, std::path::PathBuf) {
-        // Tests run in parallel inside one process, so the pid alone does not keep
-        // two vaults apart: #38 hit exactly that, one test deleting the directory
-        // another was still using ("file is not a database").
-        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let tmp =
-            std::env::temp_dir().join(format!("goonflow-cp-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-        let vault = tmp.join("vault");
-        let (conn, key) = if unlocked {
-            let key = goon_vault::create_keyfile(&vault, "hunter2").unwrap();
-            let conn = goon_vault::open_db(&vault, &key).unwrap();
-            goon_core::db::init_schema(&conn).unwrap();
-            (Some(conn), Some(key))
-        } else {
-            (None, None)
-        };
-        let core = Core {
-            inner: Arc::new(std::sync::Mutex::new(Inner {
-                vault_root: Some(vault),
-                opened: conn.map(|c| crate::OpenedVault {
-                    conn: c,
-                    _key: key.unwrap(),
-                }),
-                ..Default::default()
-            })),
-            jobs: Arc::new(Jobs::default()),
-            queue: Arc::new(crate::queue::SiteQueue::default()),
-        };
-        (core, tmp)
+        crate::scratch_core(tag, unlocked)
     }
 
     async fn serve(locked: bool, unlocked: bool) -> (reqwest::Client, CompanionInfo) {

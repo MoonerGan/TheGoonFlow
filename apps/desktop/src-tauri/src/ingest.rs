@@ -1109,40 +1109,9 @@ async fn f95_thread(
         };
         // #46/#50: the type comes from the bytes (f95 answers image/avif for a
         // URL ending .jpg); the extension decides nothing here.
-        let mime = match media::sniff_media(&bytes) {
-            media::Sniffed::Image(mime) => mime,
-            media::Sniffed::Video(mime) => {
-                why = format!("{cand} is {mime}, not an image");
-                continue;
-            }
-            media::Sniffed::Unknown => {
-                why = format!("{cand} was not a recognizable image");
-                continue;
-            }
-        };
-        if bytes.len() > MAX_COVER_BYTES {
-            why = format!("{cand} is {} bytes — too big for a cover", bytes.len());
+        if let Err(e) = keep_f95_cover(&mut m, bytes, images.len()) {
+            why = format!("{cand} {e}");
             continue;
-        }
-        m.thumb_bytes = Some(bytes.clone());
-        if media::thumbnailable(mime) {
-            m.note = Some(format!(
-                "cover stored from post #1 as {mime}; {} attachment image(s) on the page — \
-                 they stay links, only the cover was downloaded",
-                images.len()
-            ));
-        } else {
-            // No decoder for this format in this build (HEIF/HEIC, anything
-            // `image` 0.25.10 cannot read): store the original so the item view
-            // still shows real art, and say the grid thumbnail is missing
-            // instead of pretending it was made. AVIF no longer lands here.
-            m.store_bytes = Some(bytes);
-            m.note = Some(format!(
-                "cover is {mime} from post #1 — this build cannot decode {mime} into a \
-                 thumbnail, so the original image is stored and the grid thumbnail stays \
-                 missing; {} attachment image(s) on the page, only the cover was downloaded",
-                images.len()
-            ));
         }
         return Ok(m);
     }
@@ -1152,6 +1121,51 @@ async fn f95_thread(
         images.len()
     ));
     Ok(m)
+}
+
+/// Decide what one fetched f95 cover contributes to the vault, and what the
+/// note says about it. Split out of the fetch loop so the storage rule is
+/// testable without a network.
+///
+/// Both halves are kept whenever the bytes are a keepable image: the
+/// **original**, so the item view shows the real picture, and the bytes the
+/// thumbnailer works from. They used to be either/or here, which is how #52
+/// went wrong: making AVIF `thumbnailable` moved f95's covers out of the "no
+/// decoder, store the original" branch and into the "make a tile" branch, and
+/// that branch kept *only* the tile - so the full cover quietly stopped being
+/// stored while the note went on claiming "cover stored". A live clip of one
+/// thread proved it: thumbnail row present, full image row absent. The rest of
+/// the ingest path (`store_bytes_in`) has always kept both, so this matches it.
+///
+/// `Err(reason)` means these bytes are not a keepable cover: the caller tries
+/// the next candidate and the reason still reaches the report.
+fn keep_f95_cover(m: &mut Meta, bytes: Vec<u8>, found: usize) -> Result<(), String> {
+    let mime = match media::sniff_media(&bytes) {
+        media::Sniffed::Image(mime) => mime,
+        media::Sniffed::Video(mime) => return Err(format!("is {mime}, not an image")),
+        media::Sniffed::Unknown => return Err("was not a recognizable image".into()),
+    };
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err(format!("is {} bytes — too big for a cover", bytes.len()));
+    }
+    m.thumb_bytes = Some(bytes.clone());
+    m.store_bytes = Some(bytes);
+    if media::thumbnailable(mime) {
+        m.note = Some(format!(
+            "cover stored from post #1 as {mime}; {found} attachment image(s) on the page — \
+             they stay links, only the cover was downloaded"
+        ));
+    } else {
+        // No decoder for this format in this build (HEIF/HEIC, anything `image`
+        // 0.25.10 cannot read): the original is kept so the item view still shows
+        // real art, and the note says which of the two facts it is.
+        m.note = Some(format!(
+            "cover is {mime} from post #1 — the original is stored, but this build cannot \
+             decode {mime} into a thumbnail, so the grid tile stays missing; {found} \
+             attachment image(s) on the page, only the cover was downloaded"
+        ));
+    }
+    Ok(())
 }
 
 // ---- direct media & local files ----
@@ -2700,6 +2714,55 @@ mod tests {
         assert!(note.contains("image/heif"), "{note}");
     }
 
+    /// #54 follow-up of #52, offline: a thumbnailable cover must keep **both**
+    /// the original and the tile bytes. The live rehearsal below proves it with
+    /// real f95 bytes; this pins the rule so it cannot quietly regress again.
+    #[test]
+    fn f95_covers_keep_the_original_and_the_tile() {
+        const AVIF: &[u8] =
+            include_bytes!("../../../../crates/goon-core/src/fixtures/avif-tiny.avif");
+        let mut m = Meta::default();
+        keep_f95_cover(&mut m, AVIF.to_vec(), 15).expect("a real AVIF is a keepable cover");
+        assert_eq!(
+            m.store_bytes.as_deref(),
+            Some(AVIF),
+            "the original must reach the vault, not just the tile"
+        );
+        assert!(m.thumb_bytes.is_some(), "and the tile bytes too");
+        let note = m.note.clone().unwrap();
+        assert!(note.contains("image/avif"), "{note}");
+        assert!(note.contains("15 attachment image(s)"), "{note}");
+        assert!(
+            !note.contains("cannot"),
+            "a thumbnailable format must not be described as a missing capability: {note}"
+        );
+
+        // HEIF: no decoder in this build, so the tile is missing - but the bytes
+        // are still kept, and the note says which of the two facts it is.
+        let mut heif = vec![0u8, 0, 0, 0x18];
+        heif.extend_from_slice(b"ftypheic");
+        heif.extend_from_slice(&[7u8; 24]);
+        let mut m2 = Meta::default();
+        keep_f95_cover(&mut m2, heif.clone(), 3).expect("HEIF is still a keepable cover");
+        assert_eq!(m2.store_bytes.as_deref(), Some(heif.as_slice()));
+        let note = m2.note.unwrap();
+        assert!(
+            note.contains("image/heif") && note.contains("cannot"),
+            "{note}"
+        );
+
+        // A hotlink block page is not a cover: rejected, so the loop tries the
+        // next candidate and the reason still reaches the report.
+        let mut m3 = Meta::default();
+        let why = keep_f95_cover(&mut m3, b"<html>Access denied</html>".to_vec(), 1)
+            .expect_err("html is not a cover");
+        assert!(why.contains("recognizable"), "{why}");
+        assert!(
+            m3.store_bytes.is_none() && m3.thumb_bytes.is_none(),
+            "nothing may be stored from a rejected candidate"
+        );
+    }
+
     #[test]
     fn dlsite_product_parse() {
         let page = r#"<html><head>
@@ -2831,5 +2894,168 @@ mod tests {
                 goon_core::media::detect_mime(&bytes)
             );
         }
+    }
+
+    /// The same thread, but through the real pipeline: cookie in `site_settings`,
+    /// `clip()` doing the fetch, and then what the **vault** actually holds. The
+    /// probe above proves the parser; #52 was proven offline against a 680-byte
+    /// fixture, and manual TESTING item 21 ("clip a new f95 thread, the tile is
+    /// there") is exactly this flow — so here it is as a machine check with live
+    /// bytes: stored cover + a real thumbnail row + the grid reporting `has_thumb`.
+    ///
+    ///   $env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw).Trim()
+    ///   powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_clip_rehearsal"
+    #[tokio::test]
+    #[ignore]
+    async fn f95_live_clip_rehearsal() {
+        let Ok(cookie) = std::env::var("GOON_F95_COOKIE") else {
+            panic!(
+                "GOON_F95_COOKIE must be set — silently skipping this is how #46 hid for a release"
+            );
+        };
+        let cookie = cookie.trim().to_string();
+        let url = "https://f95zone.to/threads/lewd-customs-in-the-tsugai-mating-village-2-final-itsumoeswaninatteorimasu.321420/";
+
+        let (core, tmp) = crate::scratch_core("f95clip", true);
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            db::set_site_setting(
+                conn,
+                "f95",
+                Some(true),
+                Some(&cookie),
+                None,
+                default_rate_ms("f95"),
+            )
+            .unwrap();
+        }
+        let report = clip(&core, url.to_string())
+            .await
+            .expect("clip an f95 thread with a cookie");
+        println!(
+            "clip     = created {} stored_image {} thumb {} tags {} images_found {}",
+            report.created, report.stored_image, report.thumb, report.tags, report.images_found
+        );
+        println!("clip     = note {:?}", report.note);
+        assert!(report.created, "the thread must become an item");
+        assert!(report.stored_image, "the cover must be stored in the vault");
+        assert!(
+            report.thumb,
+            "the cover must decode into a thumbnail (#52 with live bytes)"
+        );
+        assert!(
+            report.images_found >= 10,
+            "the page's attachments must be reported, not dropped"
+        );
+
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            let full = media::best_for(conn, &report.item_id).expect("stored cover");
+            println!(
+                "vault    = full {} bytes mime {} (sniffed {:?})",
+                full.data.len(),
+                full.mime,
+                media::detect_mime(&full.data)
+            );
+            // Pinned to what f95 serves today (AVIF behind a `.jpg` URL, #46/#50).
+            // If this ever fails because the CDN changed, the expectation is what
+            // needs updating — and the `thumbnailable` rule below is the real test.
+            assert_eq!(
+                full.mime, "image/avif",
+                "the row must say what the bytes are"
+            );
+            assert_eq!(
+                media::detect_mime(&full.data),
+                Some(full.mime.as_str()),
+                "the stored mime must match the stored bytes"
+            );
+            assert!(media::thumbnailable(&full.mime), "this build can decode it");
+            let (tmime, tbytes) = media::get_thumb(conn, &report.item_id).expect("thumbnail row");
+            println!("vault    = thumb {} bytes mime {}", tbytes.len(), tmime);
+            assert_eq!(
+                tmime, "image/jpeg",
+                "dav1d decoded it, image wrote the tile"
+            );
+            assert!(
+                tbytes.len() < full.data.len(),
+                "a tile must be smaller than what it came from"
+            );
+            // Which grid it lands in is part of the claim: an f95 **thread** is a
+            // game, so it belongs to the Games tab (`kind = 'game'`), not Media.
+            // Getting this wrong in a test is how a tile "disappears" in a report.
+            let games = db::list_items(
+                conn,
+                &db::ListQuery {
+                    limit: 300,
+                    kind: Some("game"),
+                    site: Some("f95"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let me = games.iter().find(|i| i.id == report.item_id);
+            assert!(me.is_some(), "the games grid must list this item");
+            assert!(me.unwrap().has_thumb, "and the card must show a tile");
+            println!(
+                "grid     = {} game row(s) for site f95, this one has_thumb",
+                games.len()
+            );
+            let media_rows = db::list_items(
+                conn,
+                &db::ListQuery {
+                    limit: 300,
+                    kind: Some("media"),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !media_rows.iter().any(|i| i.id == report.item_id),
+                "an f95 thread is a game, not a media item"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        // The same link with no cookie in the vault. The invariant is not "it
+        // fails": the link is still stored and the login wall is said out loud
+        // (#38/#46), because a bare entry beats a lost bookmark.
+        let (guest_core, tmp2) = crate::scratch_core("f95guest", true);
+        let guest = clip(&guest_core, url.to_string())
+            .await
+            .expect("clip an f95 thread without a cookie");
+        println!(
+            "guest    = created {} stored_image {} thumb {} images_found {} note {:?}",
+            guest.created, guest.stored_image, guest.thumb, guest.images_found, guest.note
+        );
+        assert!(guest.created, "the link must survive the login wall");
+        assert!(!guest.stored_image, "a guest page has no art to store");
+        // Where the reason lives matters: it is the clip report's note (the
+        // activity strip), *not* `items.notes` - that column is the user's own
+        // notes field and a fetch must never overwrite it. So the check is on the
+        // report, and the vault check is that nothing art-shaped got stored.
+        let note = guest.note.unwrap_or_default();
+        assert!(
+            note.contains("members only"),
+            "the report must say why there is no art: {note}"
+        );
+        {
+            let inner = guest_core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            assert!(
+                media::best_for(conn, &guest.item_id).is_none(),
+                "nothing was stored, so the viewer must have nothing"
+            );
+            let detail = db::get_item(conn, &guest.item_id)
+                .unwrap()
+                .expect("the guest clip created an item");
+            assert!(
+                detail.notes.is_empty(),
+                "a fetch must not write into the user's notes field: {:?}",
+                detail.notes
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp2);
     }
 }

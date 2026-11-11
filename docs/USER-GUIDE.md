@@ -436,10 +436,14 @@ proxy if you set one).
     and it never goes looking through your browser's cookie store on its own —
     the extension hand-off is a copy you chose to make, and the extension's
     README names the two manifest lines to delete if you would rather not grant
-    it. Cookies expire; when a session goes stale the fetch says so out loud
+    it. Cookies expire; when a session goes stale the fetch says so out loud, in the
+    strip under the tabs
     (*"f95 answered, but this page shows its art to members only — save your f95
     cookie under Sources and re-fetch this item to pull the images"*) instead of
-    importing nothing quietly.
+    importing nothing quietly. The same strip also tells you when a page offered more
+    art than was stored (*"15 attachment image(s) on the page — they stay links, only
+    the cover was downloaded"*); which images those are, and a way to pick them, is
+    #53.
 - **Proxy** (top of the Sources tab): route *every* outbound request — clip
   fetches, enrich, update checks, match search, video downloads — through one
   proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.

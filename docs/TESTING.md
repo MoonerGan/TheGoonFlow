@@ -33,15 +33,18 @@ bounded history). Parsers are parse-only — no network in tests, by design.
 
 The exceptions are `#[ignore]`d on purpose and run by hand: `tools\` drives the
 real exe (below), and inside cargo `match_live_search_smoke`,
-`first_frame_live_probe`, `f95_live_art_probe` (the live half of #46) and
+`first_frame_live_probe`, `f95_live_art_probe` (the live half of #46),
 `live_f95_markers_separate_member_from_guest_under_our_ua` (the live half of #38)
+and `f95_live_clip_rehearsal` (#52/#54: clips the live thread into a scratch
+encrypted vault through the real `clip()` and then reads the vault rows back)
 hit the real sites. The f95 ones need your own cookie in the environment, never
 in the repo — and they need the dev env, because `dav1d-sys` builds the AVIF
 decoder (#52):
 
 ```powershell
-$env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt -Raw).Trim()
+$env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw).Trim()
 powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_art_probe"
+powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_clip_rehearsal"
 ```
 
 Last run, 2026-11-11 (same thread as #46, cookie refreshed): title parsed,
@@ -52,6 +55,23 @@ on the page — they stay links, only the cover was downloaded"* — the AVIF no
 decodes into a thumbnail instead of announcing a missing decoder (#52). The
 #38 probe in the same run: `guest says signed-in = false, cookie says signed-in
 = true`.
+
+The rehearsal is the one that found a bug no offline test could see (#54): it
+prints what the **vault** ends up holding, not what the report claimed.
+
+```
+clip  = created true stored_image true thumb true tags 0 images_found 15
+vault = full 59 478 bytes mime image/avif (sniffed image/avif)
+vault = thumb 33 144 bytes mime image/jpeg
+grid  = 1 game row(s) for site f95, this one has_thumb
+guest = created true stored_image false thumb false images_found 0
+        note "f95 answered, but this page shows its art to members only …"
+```
+
+Two facts worth remembering from it: an f95 clip lands in the **Games** grid
+(`kind = 'game'`), not Media — filtering the wrong kind is how a tile looks
+missing — and it stores **0 tags**, because nothing in `f95_thread` reads the
+thread's tag list yet.
 
 Release build: `powershell -ExecutionPolicy Bypass -File tools\run-release.ps1
 -tag mNN` (runs `tools\dev-env.ps1`, stops a live GoonFlow first, records the
@@ -164,14 +184,22 @@ the board's *In review* column is the current list.
     a live one → the line under the box says the site answered as a signed-in
     member, with the time. Press **Check** after logging out in the browser → that
     line goes red and says the site answered as a guest. Clip an f95 thread while
-    the cookie is dead → the item's note says *members only* and the Sources line
-    marks the cookie stale without being asked.
-21. AVIF thumbnails (#52): take an f95 item clipped **before** this build → the
-    card has no tile while the viewer still shows the art (the vault always held the
-    real picture). **Re-fetch metadata** on it → the tile appears, because f95
-    serves its cover as AVIF and dav1d now decodes it. Clip a *new* f95 thread link
-    → the tile is there without asking. A HEIF/HEIC file still stores fine and still
-    says out loud that this build cannot thumbnail that format.
+    the cookie is dead → the clip report strip says *members only* in the site's own
+    words (the reason belongs to the report, not the item: `items.notes` is your own
+    notes field and no fetch writes into it) and the Sources line marks the cookie
+    stale without being asked.
+21. AVIF thumbnails (#52): an f95 item clipped **before #52** (m13 or older) has no
+    tile while the viewer still shows the real art — the vault always held the
+    picture, only the tile was missing. **Re-fetch metadata** on it → the tile
+    appears, because f95 serves its cover as AVIF and dav1d now decodes it. Clip a
+    *new* f95 thread link → the tile is there without asking. A HEIF/HEIC file still
+    stores fine and still says out loud that this build cannot thumbnail that format.
+22. Full cover, not only the tile (#54): an f95 item clipped with **m14 or m15** kept
+    only the 360 px tile, so its viewer showed a soft, upscaled version of the cover.
+    **Re-fetch metadata** with this build → the report strip says *image stored,
+    thumbnail made* and the viewer shows the real preview-size art (59 478 bytes of
+    AVIF in the measured thread). Items clipped before #52, or clipped with this
+    build, already hold the original.
 
 ## 4. House rules that prevent whole classes of damage
 

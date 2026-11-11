@@ -75,11 +75,17 @@
 
   function clipLabel(r: ClipReport): string {
     if (!r.created) return `already in the flow as one item (${r.site})`;
+    // The note is the *why*, and it was being thrown away here: an f95 clip that
+    // hit the login wall ("f95 answered, but this page shows its art to members
+    // only - save your f95 cookie under Sources…") or a clip where the source
+    // page offered 15 images and we stored one cover reported as a plain success
+    // (#38/#46). The backend always said it; only this label dropped it.
     return (
       `clipped from ${r.site}: "${r.title}"` +
       (r.storedImage ? ", image stored" : "") +
       (r.thumb ? ", thumbnail made" : "") +
-      (r.tags ? `, ${r.tags} tags` : "")
+      (r.tags ? `, ${r.tags} tags` : "") +
+      (r.note ? ` — ${r.note}` : "")
     );
   }
 </script>
