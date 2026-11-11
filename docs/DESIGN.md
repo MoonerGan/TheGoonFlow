@@ -100,7 +100,7 @@ TheGoonFlow/
 ```
 
 - **Local-first.** Single process owns DB, thumbnail cache, downloads. No cloud, no telemetry, works offline.
-- **Companion API:** app listens on `127.0.0.1` only, random port, per-session bearer token, strict CORS (extension ID). Extension talks to it; embedded webviews use IPC directly.
+- **Companion API:** app listens on `127.0.0.1` only, random port, per-session bearer token, strict CORS (extension ID). The MV3 extension (#19) is the only browser integration that exists today — there are no in-app webview tabs to reach over IPC (#20 not started).
 
 ### 4.1 Vault & portability
 - One folder = everything except the web engine's own profile: DB (SQLCipher) + WAL,
@@ -189,7 +189,7 @@ below is design intent, not schema.
   - **Cheat Engine:** attach/launch action.
 - **`mods`** — DLL/patch mods from f95 threads or local zips. Apply = deploy + back up originals `*.flowbak` + record manifest/hashes. Revert = restore.
   - **Update-clobber guard:** version watcher detects new build → warn "update wipes Mods" → one-click revert → update → re-apply.
-- **`attachments`** — misc community files (patches, saves, OSTs) on items: vault-stored w/ source URL, open/extract-in-place.
+- **`attachments`** — *planned, not built* (§5): misc community files (patches, saves, OSTs) on items: vault-stored w/ source URL, open/extract-in-place.
 
 ---
 

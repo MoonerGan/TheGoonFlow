@@ -395,8 +395,11 @@ tools/
     through the *exact* same `ingest::clip` path, the same single-vault lock,
     and the same site rate lanes as the `+ Clip URL` button. Never spin a
     second vault/job/queue inside a companion handler — take the shared `Core`
-    clone. The companion token is per-run (rotates each launch); the
-    extension's host_permissions are `127.0.0.1`/`localhost` only.
+    clone. The companion token is per-run (rotates each launch). Every request the
+    extension *makes* goes to `127.0.0.1`/`localhost`; its `host_permissions` also
+    name the three cookie hand-off hosts (`f95zone.to`, `e-hentai.org`,
+    `exhentai.org`) so the popup can read that browser's own jar on one deliberate
+    click — no code in the extension sends anything to those hosts.
 17. **Mods are thin launch recipes (D10, #25).** `mods.rs::recipe` only
     resolves what to *spawn* — the app never injects, wraps or patches a
     game, and never runs anything that isn't a user-registered `.exe` path.

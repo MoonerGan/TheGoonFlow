@@ -10,7 +10,7 @@ manual checks in [docs/TESTING.md](docs/TESTING.md). Everything below already wo
 
 - **Users:** start at [docs/USER-GUIDE.md](docs/USER-GUIDE.md)
 - **Developers:** see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
-- **Why it is built this way:** [docs/DESIGN.md](docs/DESIGN.md) — decisions D1–D21
+- **Why it is built this way:** [docs/DESIGN.md](docs/DESIGN.md) — decisions D1–D22
 
 ## What it does today
 

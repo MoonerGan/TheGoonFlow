@@ -122,8 +122,10 @@ hyphen even though the host `e-hentai.org` does.
     entries is impossible. They are declared for **reading the local jar only** —
     no code in this extension issues a request to those hosts, and content scripts
     are not used at all, so nothing runs inside those pages.
-  - If you would rather not grant it, delete the `cookies` permission and the three
-    `https://…` entries from `host_permissions`; clipping keeps working, and the
+  - If you would rather not grant it, delete **four lines** from `manifest.json`:
+    the `cookies` entry in `permissions`, and the three `https://…` entries in
+    `host_permissions` (`f95zone.to`, `e-hentai.org`, `exhentai.org`). The Firefox
+    folder's manifest has the same four lines. Clipping keeps working, and the
     popup's cookie path fails closed with a plain "the browser would not give up
     its cookies" line.
 - Unpacked / temporary installs are the only distribution today, so the grant is
