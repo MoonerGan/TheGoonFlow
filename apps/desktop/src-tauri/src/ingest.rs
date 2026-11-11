@@ -58,7 +58,7 @@ pub fn default_rate_ms(site: &str) -> i64 {
 
 /// Everything classify() knows about, for the Sources settings panel:
 /// (site, what it yields). Mirrors default to off (D8).
-pub const KNOWN_SITES: &[(&str, &'static str)] = &[
+pub const KNOWN_SITES: &[(&str, &str)] = &[
     ("gelbooru", "posts"),
     ("rule34", "posts"),
     ("e621", "posts"),
@@ -179,9 +179,41 @@ fn numeric_query_id(url: &str) -> Option<String> {
     (!q.is_empty() && q.chars().all(|c| c.is_ascii_digit())).then(|| q.to_string())
 }
 
+/// gid out of an e-hentai/exhentai URL. `/g/<gid>/<token>/` is the gallery page.
+/// `/s/<token>/<gid>-<n>` is the slideshow (#46) — the gid is still in the URL,
+/// and it is the only thing that page can give us.
 fn eh_gid(segments: &[&str]) -> Option<String> {
-    let i = segments.iter().position(|s| *s == "g")?;
-    segments.get(i + 1).map(|s| s.to_string())
+    if let Some(i) = segments.iter().position(|s| *s == "g") {
+        return segments.get(i + 1).map(|s| s.to_string());
+    }
+    if segments.first().map(|s| *s == "s").unwrap_or(false) {
+        let gid = segments.last()?.split('-').next().unwrap_or("");
+        if !gid.is_empty() && gid.chars().all(|c| c.is_ascii_digit()) {
+            return Some(gid.to_string());
+        }
+    }
+    None
+}
+
+/// #46: fold a slideshow link (`/s/<token>/<gid>-<n>`) onto the gallery page
+/// (`/g/<gid>/`) before parsing. The slideshow is a ~4.7 KB JS shell: no `gdtm`
+/// grid, no `og:image`, no `<img id="image">` — parsing it can only come back
+/// empty, while the gallery page carries the grid. Non-slideshow links are
+/// returned untouched.
+pub fn eh_gallery_url(url: &str) -> String {
+    let url = url.trim();
+    let (host, path) = host_of(url);
+    if host.is_empty() {
+        return url.to_string();
+    }
+    let path = path.split('#').next().unwrap_or(&path).to_string();
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.first().map(|s| *s == "s").unwrap_or(false) {
+        if let Some(gid) = eh_gid(&segments) {
+            return format!("https://{host}/g/{gid}/");
+        }
+    }
+    url.to_string()
 }
 
 fn dlsite_product_id(url: &str) -> Option<String> {
@@ -201,9 +233,7 @@ pub fn classify(url: &str) -> Option<SiteRef> {
     // as media items (site "local"), not "unrecognized".
     if let Some(rest) = url.strip_prefix("file://") {
         let path = rest.split('?').next().unwrap_or(rest);
-        if media_ext(path).is_none() {
-            return None;
-        }
+        media_ext(path)?;
         return Some(SiteRef {
             site: "local".into(),
             kind: ItemKind::Post,
@@ -384,6 +414,10 @@ pub struct Meta {
     pub store_bytes: Option<Vec<u8>>,
     /// bytes used to generate the thumbnail (may differ from the stored original)
     pub thumb_bytes: Option<Vec<u8>>,
+    /// image links the source page exposed but we did not download (#46).
+    /// Reported as a count up the chain: "the art is there, we only stored the
+    /// cover" must never read as "the source carried nothing".
+    pub images: Vec<String>,
     pub tags: Vec<String>,
     pub version: Option<String>,
     pub note: Option<String>,
@@ -411,13 +445,22 @@ async fn get_text(
     resp.text().await.map_err(|e| format!("read failed: {e}"))
 }
 
+/// Fetch **file bytes** (image/video). #50: goes out with the browser UA — the
+/// other half of the split documented in [`crate::http`]. Applied per request
+/// rather than by swapping clients so a caller that only handed us its page
+/// client (bookmark import, re-enrich) keeps that client's vault proxy, while
+/// the CDN still sees a browser. reqwest fills *default* headers only where the
+/// request set none, so this override wins.
 async fn get_bytes(
     client: &reqwest::Client,
     url: &str,
     referer: &str,
     cookie: Option<&str>,
 ) -> Result<Vec<u8>, String> {
-    let mut req = client.get(url).header(reqwest::header::REFERER, referer);
+    let mut req = client
+        .get(url)
+        .header(reqwest::header::REFERER, referer)
+        .header(reqwest::header::USER_AGENT, crate::http::FILE_UA);
     if let Some(c) = cookie {
         req = req.header(reqwest::header::COOKIE, c);
     }
@@ -428,10 +471,57 @@ async fn get_bytes(
     if !resp.status().is_success() {
         return Err(format!("http {}", resp.status()));
     }
-    resp.bytes()
+    let bytes = resp
+        .bytes()
         .await
         .map(|b| b.to_vec())
-        .map_err(|e| format!("download interrupted: {e}"))
+        .map_err(|e| format!("download interrupted: {e}"))?;
+    // f95zone answers a guest with 204 and no body: "success" that gave us
+    // nothing. Saying so beats storing an empty file.
+    if bytes.is_empty() {
+        return Err("the host answered with no bytes (art is gated behind a login?)".into());
+    }
+    Ok(bytes)
+}
+
+/// Ceiling for cover art pulled into the vault. An oversized body is refused
+/// with a note — never silently truncated, never stored as a thumbnail.
+const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Decide what to keep from fetched bytes by **sniffing them**, never by the URL
+/// suffix (#46/#50: f95zone serves `image/avif` from a URL ending `.jpg`, and a
+/// blocked hotlink request can answer with an HTML page at status 200). Sets
+/// `meta.note` when the bytes are not art we can keep. Returns the image mime.
+fn store_bytes_in(meta: &mut Meta, bytes: Vec<u8>) -> Option<&'static str> {
+    match media::sniff_media(&bytes) {
+        media::Sniffed::Image(mime) if bytes.len() <= MAX_COVER_BYTES => {
+            meta.thumb_bytes = Some(bytes.clone());
+            meta.store_bytes = Some(bytes);
+            Some(mime)
+        }
+        media::Sniffed::Image(mime) => {
+            meta.note = Some(format!(
+                "the image came back as {mime} but is {} bytes — too large to store; \
+                 the link is kept",
+                bytes.len()
+            ));
+            None
+        }
+        media::Sniffed::Video(mime) => {
+            meta.note = Some(format!(
+                "video ({mime}) — kept as a link, not stored in the vault"
+            ));
+            None
+        }
+        media::Sniffed::Unknown => {
+            meta.note = Some(
+                "the host answered, but the bytes were not a recognizable image/video — \
+                 nothing stored"
+                    .into(),
+            );
+            None
+        }
+    }
 }
 
 pub async fn fetch_meta(
@@ -439,6 +529,20 @@ pub async fn fetch_meta(
     s: &SiteRef,
     url: &str,
     ctx: &FetchCtx<'_>,
+) -> Result<Meta, String> {
+    fetch_meta_with(client, s, url, ctx, true).await
+}
+
+/// `want_images = false`: read the page only. Update sweeps use this so a
+/// version check stays one request per item instead of pulling cover art for
+/// every tracked game (#46 added per-item art work; it must not silently
+/// double the traffic the polite per-site lanes are budgeted for).
+async fn fetch_meta_with(
+    client: &reqwest::Client,
+    s: &SiteRef,
+    url: &str,
+    ctx: &FetchCtx<'_>,
+    want_images: bool,
 ) -> Result<Meta, String> {
     match s.mode {
         Mode::BooruId => match s.site.as_str() {
@@ -454,7 +558,7 @@ pub async fn fetch_meta(
         Mode::Ehentai => eh_gallery(client, url, ctx.cookie).await,
         Mode::DlSite => dl_product(client, url).await,
         Mode::Offsite => offsite_product(client, url).await,
-        Mode::F95 => f95_thread(client, url, ctx.cookie).await,
+        Mode::F95 => f95_thread(client, url, ctx.cookie, want_images).await,
         Mode::DirectMedia => direct_media(client, url, Some(&s.site)).await,
         Mode::LocalFile => local_file(url),
     }
@@ -510,14 +614,20 @@ async fn post_from_json(
         .unwrap_or_default();
     let is_video = media_ext(file_url) == Some("video");
     let bytes = get_bytes(client, file_url, referer, None).await?;
-    Ok(Meta {
-        title: None,
-        store_bytes: (!is_video).then_some(bytes.clone()),
-        thumb_bytes: (!is_video).then_some(bytes),
+    let mut m = Meta {
         tags,
-        note: is_video.then(|| "video post — kept as link, not stored in vault".into()),
         ..Default::default()
-    })
+    };
+    // #50: image vs video is decided by the bytes we got, not by the file URL's
+    // extension (and a CDN that dislikes us answers HTML at 200 — that is not art).
+    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+        m.note = Some(if is_video {
+            "video post — kept as link, not stored in vault".into()
+        } else {
+            "post json had no storable file (deleted?)".into()
+        });
+    }
+    Ok(m)
 }
 
 async fn e621_post(client: &reqwest::Client, id: Option<&str>) -> Result<Meta, String> {
@@ -550,14 +660,19 @@ async fn e621_post(client: &reqwest::Client, id: Option<&str>) -> Result<Meta, S
         .unwrap_or_default();
     let is_video = media_ext(file_url) == Some("video");
     let bytes = get_bytes(client, file_url, "https://e621.net", None).await?;
-    Ok(Meta {
-        title: None,
-        store_bytes: (!is_video).then_some(bytes.clone()),
-        thumb_bytes: (!is_video).then_some(bytes),
+    let mut m = Meta {
         tags,
-        note: is_video.then(|| "video post — kept as link, not stored in vault".into()),
         ..Default::default()
-    })
+    };
+    // #50: bytes decide, not the URL extension
+    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+        m.note = Some(if is_video {
+            "video post — kept as link, not stored in vault".into()
+        } else {
+            "post json had no storable file (deleted?)".into()
+        });
+    }
+    Ok(m)
 }
 
 // ---- e-hentai ----
@@ -601,7 +716,10 @@ async fn eh_gallery(
     url: &str,
     cookie: Option<&str>,
 ) -> Result<Meta, String> {
-    let html = get_text(client, url, "https://e-hentai.org", cookie).await?;
+    // #46: a `/s/` slideshow link is parsed on its gallery page instead.
+    let page = eh_gallery_url(url);
+    let folded = page != url;
+    let html = get_text(client, &page, "https://e-hentai.org", cookie).await?;
     if eh_is_gate(&html) {
         return Ok(Meta {
             note: Some(
@@ -615,11 +733,43 @@ async fn eh_gallery(
     let (title, cover) = parse_eh_gallery(&html);
     let mut m = Meta {
         title,
+        images: cover.clone().map(|c| vec![c]).unwrap_or_default(),
         ..Default::default()
     };
-    if let Some(cover) = cover {
-        if let Ok(bytes) = get_bytes(client, &cover, "https://e-hentai.org", cookie).await {
-            m.thumb_bytes = Some(bytes);
+    match cover {
+        Some(cover) => {
+            match get_bytes(client, &cover, "https://e-hentai.org", cookie).await {
+                Ok(bytes) => {
+                    // #50: only hand a real image to the thumbnailer. A gallery cover
+                    // stays a thumbnail — the gallery's pages themselves stay a link.
+                    match media::sniff_media(&bytes) {
+                        media::Sniffed::Image(_) if bytes.len() <= MAX_COVER_BYTES => {
+                            m.thumb_bytes = Some(bytes)
+                        }
+                        _ => m.note = Some(
+                            "the gallery cover was not a usable image — only the title was stored"
+                                .into(),
+                        ),
+                    }
+                }
+                Err(e) => {
+                    m.note = Some(format!(
+                    "gallery cover at {cover} could not be fetched ({e}) — the title was stored"
+                ));
+                }
+            }
+        }
+        None => {
+            if m.title.is_some() {
+                m.note = Some(format!(
+                    "e-hentai gallery page had no thumbnail grid to take a cover from{}",
+                    if folded {
+                        " (the slideshow link was folded onto its /g/ gallery page)"
+                    } else {
+                        ""
+                    }
+                ));
+            }
         }
     }
     Ok(m)
@@ -704,6 +854,128 @@ async fn offsite_product(client: &reqwest::Client, url: &str) -> Result<Meta, St
 
 // ---- f95zone ----
 
+/// Hosts that carry a thread's real art. XenForo keeps smilies, badges, avatars,
+/// signatures and ad creatives under `f95zone.to/data/…` and `/assets/…`, so the
+/// host allow-list — not a class filter alone — is what keeps them out (#46).
+const F95_ATTACHMENT_HOSTS: &[&str] = &["attachments.f95zone.to"];
+
+/// Read one attribute out of an already-sliced tag body (`name="v"` / `name='v'`).
+fn html_attr(tag: &str, name: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        for pat in [format!("{name}={quote}"), format!("{name} = {quote}")] {
+            if let Some(i) = tag.find(&pat) {
+                let rest = &tag[i + pat.len()..];
+                if let Some(j) = rest.find(quote) {
+                    let v = rest[..j].trim();
+                    if !v.is_empty() {
+                        return Some(v.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// #46: the real post-image URLs of a XenForo thread page, in document order.
+/// Lazy-load means `src` is a `data:image/svg+xml…` placeholder — the URL we want
+/// is in `data-src` (`data-url` repeats it for the lightbox). Verified markup:
+///
+/// ```html
+/// <img src="data:image/svg+xml;charset=utf-8,%3Csvg … width='560' height='420' …"
+///      data-src="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
+///      data-url="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
+///      class="bbImage lazyload" data-zoom-target="1" alt= …>
+/// ```
+///
+/// `src` is only a fallback when it is not a `data:` placeholder. Deduped; the
+/// first entry is post #1's preview, which is what the cover is taken from.
+pub fn parse_f95_post_images(html: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut idx = 0usize;
+    while let Some(rel) = html[idx..].find("<img") {
+        let tag_start = idx + rel + "<img".len();
+        let tag_end = html[tag_start..]
+            .find('>')
+            .map(|e| tag_start + e)
+            .unwrap_or(html.len());
+        let tag = &html[tag_start..tag_end];
+        idx = tag_end;
+        // the class says what the tag *is*: smilies/emoji are never art
+        let class = html_attr(tag, "class").unwrap_or_default();
+        if class.contains("smilie") || class.contains("smiley") || class.contains("emoji") {
+            continue;
+        }
+        let raw = html_attr(tag, "data-src")
+            .or_else(|| html_attr(tag, "data-url"))
+            .or_else(|| html_attr(tag, "src"));
+        let Some(raw) = raw.map(|v| unescape_html(v.trim())) else {
+            continue;
+        };
+        // the svg/gif placeholder is not a link to anything
+        if raw.is_empty() || raw.starts_with("data:") || raw.starts_with("javascript:") {
+            continue;
+        }
+        let url = if raw.starts_with("//") {
+            format!("https:{raw}")
+        } else {
+            raw
+        };
+        let host = host_of(&url).0.to_lowercase();
+        if !F95_ATTACHMENT_HOSTS
+            .iter()
+            .any(|h| host == *h || host.ends_with(&format!(".{h}")))
+        {
+            continue;
+        }
+        if seen.insert(url.clone()) {
+            out.push(url);
+        }
+    }
+    out
+}
+
+/// #46: the guest login wall, measurable on a cookie-less fetch of thread
+/// 321420: XenForo replaces each hidden post with
+/// `class="messageHide messageHide--attach"` + "Log in or register to see
+/// attachments" (20 "register to" hits, zero `attachments.f95zone.to` URLs).
+/// With the user's saved cookie the same page carries 26 lazy images.
+pub fn f95_login_wall(html: &str) -> bool {
+    let lower = html.to_ascii_lowercase();
+    lower.contains("messagehide--attach")
+        || lower.contains("register to see attachments")
+        || lower.contains("register to see links")
+        || lower.contains("log in or register to")
+        || lower.contains("you must register")
+        || html.contains("login required")
+        || html.contains("You do not have permission")
+}
+
+/// What a fetched f95 thread page says about its art (#46). Three verdicts, so
+/// the report never sends the user to the wrong fix — the old code lumped "needs
+/// a login" in with "nothing there" and the UI printed the misleading verdict.
+#[derive(Debug, PartialEq, Eq)]
+enum F95Art {
+    /// the page is the guest wall: the art exists, we are not allowed to see it
+    NeedsLogin,
+    /// we could see the post and the thread really has no post images
+    NoArt,
+    /// real attachment URLs, document order (first = post #1's preview)
+    Art(Vec<String>),
+}
+
+fn f95_art(html: &str, cookie: Option<&str>, images: &[String]) -> F95Art {
+    if !images.is_empty() {
+        return F95Art::Art(images.to_vec());
+    }
+    if f95_login_wall(html) || cookie.is_none() {
+        F95Art::NeedsLogin
+    } else {
+        F95Art::NoArt
+    }
+}
+
 /// XenForo thread: og:title carries `Game Name [v0.12] [renpy] [WiP]`.
 /// Returns the raw title text (brackets intact — [`crate::importer::clean_name`]
 /// turns that into title + version) plus engine/status tags.
@@ -748,21 +1020,19 @@ pub fn parse_f95_thread(html: &str) -> (Option<String>, Vec<String>) {
     (Some(raw.trim().to_string()), tags)
 }
 
+/// #46: an f95 thread carries its art in lazy-loaded `data-src` images on
+/// `attachments.f95zone.to`, and a cookie-less fetch only sees the login wall.
+/// `og:image` on f95 threads is **the site logo** — never a cover. The three
+/// outcomes (needs a login / no art at all / art fetched) each get their own
+/// note so the UI stops pointing users at the wrong thing. `want_images=false`
+/// (version sweeps) reads title/version/tags and downloads nothing.
 async fn f95_thread(
     client: &reqwest::Client,
     url: &str,
     cookie: Option<&str>,
+    want_images: bool,
 ) -> Result<Meta, String> {
     let html = get_text(client, url, "https://f95zone.to", cookie).await?;
-    if html.contains("login required") || html.contains("You do not have permission") {
-        return Ok(Meta {
-            note: Some(
-                "f95 wants a login for this thread — set its cookie under Sources, then re-clip"
-                    .into(),
-            ),
-            ..Default::default()
-        });
-    }
     let (raw_title, tags) = parse_f95_thread(&html);
     let (title, version) = match raw_title {
         Some(t) => {
@@ -772,12 +1042,92 @@ async fn f95_thread(
         }
         None => (None, None),
     };
-    Ok(Meta {
+    let found = parse_f95_post_images(&html);
+    let mut m = Meta {
         title,
         version,
         tags,
+        images: found.clone(),
         ..Default::default()
-    })
+    };
+    if !want_images {
+        return Ok(m);
+    }
+    let images = match f95_art(&html, cookie, &found) {
+        F95Art::NeedsLogin => {
+            m.note = Some(
+                "f95 answered, but this page shows its art to members only — save your f95 \
+                 cookie under Sources and re-fetch this item to pull the images"
+                    .into(),
+            );
+            return Ok(m);
+        }
+        F95Art::NoArt => {
+            m.note = Some(
+                "this f95 thread page carries no post images — title/tags came from it, \
+                 there is no cover to fetch"
+                    .into(),
+            );
+            return Ok(m);
+        }
+        F95Art::Art(list) => list,
+    };
+    // Cover = post #1's preview; a thread may open with a banner, so a few
+    // candidates get one try each. Nothing else is downloaded — the rest stay
+    // links, and the note says that out loud.
+    let mut why = String::new();
+    for cand in images.iter().take(3) {
+        let bytes = match get_bytes(client, cand, "https://f95zone.to", cookie).await {
+            Ok(b) => b,
+            Err(e) => {
+                why = e;
+                continue;
+            }
+        };
+        // #46/#50: the type comes from the bytes (f95 answers image/avif for a
+        // URL ending .jpg); the extension decides nothing here.
+        let mime = match media::sniff_media(&bytes) {
+            media::Sniffed::Image(mime) => mime,
+            media::Sniffed::Video(mime) => {
+                why = format!("{cand} is {mime}, not an image");
+                continue;
+            }
+            media::Sniffed::Unknown => {
+                why = format!("{cand} was not a recognizable image");
+                continue;
+            }
+        };
+        if bytes.len() > MAX_COVER_BYTES {
+            why = format!("{cand} is {} bytes — too big for a cover", bytes.len());
+            continue;
+        }
+        m.thumb_bytes = Some(bytes.clone());
+        if media::thumbnailable(mime) {
+            m.note = Some(format!(
+                "cover stored from post #1 as {mime}; {} attachment image(s) on the page — \
+                 they stay links, only the cover was downloaded",
+                images.len()
+            ));
+        } else {
+            // No decoder for this format in this build (AVIF/HEIF): store the
+            // original so the item view still shows real art, and say the grid
+            // thumbnail is missing instead of pretending it was made.
+            m.store_bytes = Some(bytes);
+            m.note = Some(format!(
+                "cover is {mime} from post #1 — this build cannot decode {mime} into a \
+                 thumbnail, so the original image is stored and the grid thumbnail stays \
+                 missing; {} attachment image(s) on the page, only the cover was downloaded",
+                images.len()
+            ));
+        }
+        return Ok(m);
+    }
+    m.note = Some(format!(
+        "f95 lists {} attachment image(s) but none came through ({why}) — f95 gates its art \
+         behind a login: save your f95 cookie under Sources and re-fetch",
+        images.len()
+    ));
+    Ok(m)
 }
 
 // ---- direct media & local files ----
@@ -801,7 +1151,7 @@ async fn direct_media(
     let clean = format!("{}://{}{}", "https", host, clean_path);
     let referer = format!(
         "https://{}/",
-        registrable_domain(&host.split(':').next().unwrap_or(&host))
+        registrable_domain(host.split(':').next().unwrap_or(&host))
     );
     let bytes = match get_bytes(client, &clean, &referer, None).await {
         Ok(b) => b,
@@ -811,6 +1161,19 @@ async fn direct_media(
                 .await
                 .map_err(|_| first)?
         }
+    };
+
+    // #46/#50: what these bytes are is decided by magic bytes, never by the
+    // link's suffix — a `.jpg` link can carry AVIF, and a CDN that dislikes us
+    // answers an HTML error page at status 200. Unusable bodies are never stored
+    // and never handed to the thumbnailer, and the note says what happened.
+    let size = bytes.len();
+    let mut meta = Meta::default();
+    let Some(mime) = store_bytes_in(&mut meta, bytes) else {
+        if meta.note.is_none() {
+            meta.note = Some("direct file link — the host's bytes were not storable art".into());
+        }
+        return Ok(meta);
     };
 
     // #39: booru CDN filenames embed the post's md5 (`<md5><crc32>.png`). If
@@ -842,7 +1205,7 @@ async fn direct_media(
                         .and_then(|s| s.as_i64())
                 });
                 let md5_ok = claimed_md5.is_some_and(|m| m.eq_ignore_ascii_case(&md5));
-                let size_ok = claimed_size.is_none_or(|s| s as usize == bytes.len());
+                let size_ok = claimed_size.is_none_or(|s| s as usize == size);
                 if md5_ok && size_ok {
                     let pid = post
                         .get("id")
@@ -864,29 +1227,21 @@ async fn direct_media(
                                 })
                         })
                         .unwrap_or_default();
-                    return Ok(Meta {
-                        store_bytes: Some(bytes.clone()),
-                        thumb_bytes: Some(bytes),
-                        tags,
-                        note: Some(format!(
-                            "reverse-matched to post {pid} by file hash — link the post page as a source if you want it official"
-                        )),
-                        ..Default::default()
-                    });
+                    meta.tags = tags;
+                    meta.note = Some(format!(
+                        "reverse-matched to post {pid} by file hash — link the post page as a source if you want it official"
+                    ));
+                    return Ok(meta);
                 }
             }
         }
     }
 
-    Ok(Meta {
-        store_bytes: Some(bytes.clone()),
-        thumb_bytes: Some(bytes),
-        note: Some(
-            "direct file link — stored as-is; no post could be identified, edit tags/source later"
-                .into(),
-        ),
-        ..Default::default()
-    })
+    meta.note = Some(format!(
+        "direct file link — stored as-is as {mime} (type read from the bytes, not the link); \
+         no post could be identified, edit tags/source later"
+    ));
+    Ok(meta)
 }
 
 /// One-post lookup by file md5 on the sites that support it. Anything but a
@@ -941,10 +1296,10 @@ fn local_path(decoded: &str) -> Result<std::path::PathBuf, String> {
     if let Some(rest) = s.strip_prefix("localhost/") {
         return ok_path(rest);
     }
-    let candidate = if s.starts_with("//") {
+    let candidate = if let Some(unc) = s.strip_prefix("//") {
         // UNC share: \\server\share\file.ext
         // keep the leading double backslash — that is what marks a UNC path
-        format!(r"\\{}", s[2..].replace('/', "\\"))
+        format!(r"\\{}", unc.replace('/', "\\"))
     } else if s.starts_with('/') && is_drive_path(&s[1..]) {
         s[1..].to_string()
     } else {
@@ -988,12 +1343,16 @@ pub fn local_file(url: &str) -> Result<Meta, String> {
         });
     }
     let bytes = std::fs::read(&path).map_err(|e| format!("cannot read local file: {e}"))?;
-    Ok(Meta {
+    let mut m = Meta {
         title: Some(stem),
-        store_bytes: Some(bytes.clone()),
-        thumb_bytes: Some(bytes),
         ..Default::default()
-    })
+    };
+    // #50: even for a file the user pointed at, the type we store is the type the
+    // bytes have — a `.png` that is really an AVI stays a link, not a broken row.
+    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+        m.note = Some("the file's bytes were not a recognizable image — kept as a link".into());
+    }
+    Ok(m)
 }
 
 // ---------- the clip pipeline ----------
@@ -1008,6 +1367,9 @@ pub struct ClipReport {
     pub stored_image: bool,
     pub thumb: bool,
     pub tags: usize,
+    /// #46: images the source page offered beyond the cover we stored. Reported,
+    /// never dropped, so "20 images on the page, 1 cover stored" is visible.
+    pub images_found: usize,
     pub note: Option<String>,
 }
 
@@ -1039,13 +1401,24 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
             stored_image: false,
             thumb: false,
             tags: 0,
+            images_found: 0,
             note: Some("already in the flow".into()),
         });
     }
 
     // Phase 2 (async): metadata where available. Never fatal — a failed
     // fetch still stores the link (bare entry beats lost bookmark).
-    let client = crate::http::client_for(state, 25)?;
+    // #50: a direct file link on a host we have no API for is *only* file bytes,
+    // so it uses the browser-UA client. Booru CDN links keep the honest client:
+    // their md5 reverse-lookup talks to the site's API, and that traffic must
+    // stay identifiable — the file bytes they fetch still carry the browser UA,
+    // per request, inside `get_bytes`.
+    let client = match s.mode {
+        Mode::DirectMedia if !matches!(s.site.as_str(), "rule34" | "gelbooru" | "e621") => {
+            crate::http::file_client_for(state, 25)?
+        }
+        _ => crate::http::client_for(state, 25)?,
+    };
     let ctx = FetchCtx {
         cookie: cookie.as_deref(),
     };
@@ -1072,6 +1445,7 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
         .unwrap_or_else(|| s.site.clone());
     let title = meta
         .title
+        .take()
         .filter(|t| !t.trim().is_empty())
         .unwrap_or(fallback);
     let id = new_id("c");
@@ -1101,6 +1475,10 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     if let Some(bytes) = &meta.thumb_bytes {
         thumb = media::put_thumbnail(conn, &id, bytes);
     }
+    // A thumbnail this build cannot make stays visible in the report (#46: f95
+    // and the booru CDNs hand out AVIF, which goon-core has no decoder for).
+    let missing = undecodable_note(&meta, thumb);
+    meta.note = note_with(meta.note.take(), missing);
     let mut tags = 0usize;
     for t in meta.tags.iter().take(40) {
         if db::add_item_tag(conn, &id, t, db::TYPE_CONTENT).is_ok() {
@@ -1115,8 +1493,37 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
         stored_image,
         thumb,
         tags,
+        images_found: meta.images.len(),
         note: meta.note,
     })
+}
+
+/// Join two report notes without duplicating prose.
+fn note_with(existing: Option<String>, extra: Option<String>) -> Option<String> {
+    match (existing, extra) {
+        (Some(a), Some(b)) if a != b => Some(format!("{a} — {b}")),
+        (a, b) => a.or(b),
+    }
+}
+
+/// The honest sentence for "we have bytes but cannot thumbnail them". Never
+/// silently reported as success, never silently skipped.
+fn undecodable_note(meta: &Meta, thumb_stored: bool) -> Option<String> {
+    if meta.thumb_bytes.is_none() || thumb_stored {
+        return None;
+    }
+    let mime = meta
+        .thumb_bytes
+        .as_deref()
+        .and_then(|b| match media::sniff_media(b) {
+            media::Sniffed::Image(m) => Some(m),
+            _ => None,
+        })
+        .unwrap_or("an unknown format");
+    Some(format!(
+        "no thumbnail: this build cannot decode {mime} (the stored image itself is fine \
+         and shows in the item view)"
+    ))
 }
 
 // ---------- update checking (M2) ----------
@@ -1197,10 +1604,10 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
         let ctx = FetchCtx {
             cookie: cookie.as_deref(),
         };
-        match fetch_meta(&client, &s, &t.url, &ctx).await {
+        match fetch_meta_with(&client, &s, &t.url, &ctx, false).await {
             Ok(m) => {
                 if let Some(nv) = m.version.filter(|v| !v.is_empty()) {
-                    let changed = t.old_version.as_deref().map_or(true, |o| o != nv);
+                    let changed = t.old_version.as_deref().is_none_or(|o| o != nv);
                     if changed {
                         let now = now_epoch();
                         let inner = state.inner.lock().unwrap();
@@ -1293,6 +1700,8 @@ pub struct EnrichReport {
     pub stopped: bool,
     pub notes: Vec<String>,
     pub failures: Vec<EnrichFailure>,
+    /// #46: image links the sources offered beyond what was stored.
+    pub images_found: usize,
 }
 
 /// "Re-fetch metadata" (#11): re-run every source of an item through the same
@@ -1323,6 +1732,7 @@ pub async fn reenrich_item(
         stopped: false,
         notes: Vec::new(),
         failures: Vec::new(),
+        images_found: 0,
     };
     if sources.is_empty() {
         report
@@ -1392,14 +1802,26 @@ pub async fn reenrich_item(
             report.stopped = true;
             break;
         };
+        // #46: "did this item already have art?" is the question that decides
+        // whether a source with no new thumbnail is a dead end or simply already
+        // stored. Without it the only verdict left was the misleading
+        // "the source answered but carried nothing new".
+        let had_art = media::best_for(&opened.conn, item_id).is_some();
         let (thumb, tags, title_updated) = apply_meta(&opened.conn, item_id, site, &meta);
+        report.images_found += meta.images.len();
         if thumb || tags > 0 || title_updated {
             report.enriched += 1;
         }
-        if let Some(note) = &meta.note {
+        let already = !thumb && had_art && (meta.thumb_bytes.is_some() || !meta.images.is_empty());
+        let note = note_with(meta.note.clone(), undecodable_note(&meta, thumb));
+        if let Some(note) = &note {
             report.notes.push(format!("{site}: {note}"));
+        } else if already {
+            report.notes.push(format!(
+                "{site}: this item already has art stored — {site} had nothing new to add"
+            ));
         }
-        if !thumb && tags == 0 && !title_updated && meta.note.is_none() {
+        if !thumb && tags == 0 && !title_updated && note.is_none() && !already {
             report.failures.push(EnrichFailure {
                 url: url.clone(),
                 reason: "the source answered but carried nothing new".into(),
@@ -2068,6 +2490,158 @@ mod tests {
         let (t, v) = crate::importer::clean_name(raw.as_deref().unwrap());
         assert_eq!(t, "Summer Witch");
         assert_eq!(v.as_deref(), Some("0.12"));
+    }
+
+    // ---- #46: f95zone post art, e-hentai slideshow links, sniffed types ----
+
+    /// The exact XenForo lazy-load shape from the field report (a member page),
+    /// plus everything that must NOT become a cover: avatar, badge, smiley, ad
+    /// creative and the `og:image` site logo.
+    const F95_MEMBER_PAGE: &str = r##"<html><head>
+        <meta property="og:title" content="Lewd Customs in the Tsugai Mating Village 2 Final [v1.0] [renpy] [Completed] | f95zone">
+        <meta property="og:image" content="https://f95zone.to/assets/images/logo-sqw192.png">
+        </head><body>
+        <div class="message-userAvatar"><img src="https://f95zone.to/data/avatars/m/112/1121990.jpg" class="board-avatar-image" alt=""></div>
+        <img class="smilie smilie--smile" src="https://f95zone.to/data/smililies/custom/smiley4.png" alt=":o">
+        <img src="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 560 420'%3E%3Crect width='560' height='420' fill='%2323262e'/%3E%3C/svg%3E"
+             data-src="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
+             data-url="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
+             class="bbImage lazyload" data-zoom-target="1" alt="preview">
+        <img src="data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E" class="bbImage lazyload" data-src="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg">
+        <img src="//attachments.f95zone.to/2026-11-6671101_second.png" class="bbImage lazyload">
+        <img src="https://attachments.f95zone.to/2026-11-6671101_third.jpg?sig=1&amp;t=2" class="bbImage lazyload">
+        <img src="https://f95zone.to/data/badges/2022/wholesome.png" class="message-userInfo-badge">
+        <div class="samAd"><img src="https://ads.example.net/banner.gif" data-src="https://ads.example.net/banner.gif"></div>
+        </body></html>"##;
+
+    /// Measured guest fetch of thread 321420 (286 128 B, zero attachment URLs):
+    /// the post body is replaced by XenForo `messageHide` divs.
+    const F95_GUEST_PAGE: &str = r##"<html><head>
+        <meta property="og:title" content="Lewd Customs in the Tsugai Mating Village 2 Final [v1.0] [renpy] | f95zone">
+        <meta property="og:image" content="https://f95zone.to/assets/images/logo-sqw192.png">
+        </head><body>
+        <div class="bbWrapper"><div style="text-align: center"><div class="messageHide messageHide--attach"><a href="/login/" data-xf-click="overlay" data-follow-redirects="on" rel="nofollow">Log in or register to see attachments</a></div><br /> <b>Overview</b>:<br /></div>
+        <div class="messageHide messageHide--link"><a href="/login/" rel="nofollow">Log in or register to see links</a></div>
+        <img src="https://f95zone.to/assets/images/logo-sqw192.png" class="message-avatar">
+        </body></html>"##;
+
+    #[test]
+    fn f95_post_images_come_from_lazy_data_src() {
+        let imgs = parse_f95_post_images(F95_MEMBER_PAGE);
+        assert_eq!(
+            imgs,
+            vec![
+                "https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg",
+                "https://attachments.f95zone.to/2026-11-6671101_second.png",
+                "https://attachments.f95zone.to/2026-11-6671101_third.jpg?sig=1&t=2",
+            ],
+            "the svg placeholder must not win over data-src, dupes/ad/ badge hosts must drop"
+        );
+        assert!(!imgs.iter().any(|u| u.contains("logo")));
+        assert!(!imgs.iter().any(|u| u.contains("smiley")));
+        assert!(!imgs.iter().any(|u| u.contains("avatars")));
+        assert!(!f95_login_wall(F95_MEMBER_PAGE));
+        assert_eq!(
+            f95_art(F95_MEMBER_PAGE, Some("xf_cookies=x"), &imgs),
+            F95Art::Art(imgs.clone())
+        );
+    }
+
+    #[test]
+    fn f95_guest_page_reads_as_a_login_wall_not_as_no_art() {
+        let imgs = parse_f95_post_images(F95_GUEST_PAGE);
+        assert!(
+            imgs.is_empty(),
+            "a guest page must not invent art: {imgs:?}"
+        );
+        assert!(f95_login_wall(F95_GUEST_PAGE));
+        assert_eq!(f95_art(F95_GUEST_PAGE, None, &imgs), F95Art::NeedsLogin);
+        // wall gone, cookie sent, page genuinely has no post images → other verdict
+        assert_eq!(
+            f95_art(
+                "<html><body><div class=\"bbWrapper\">no images here</div></body></html>",
+                Some("c=1"),
+                &imgs
+            ),
+            F95Art::NoArt
+        );
+        // title/tags do come through even for a guest — that is not a failure
+        let (raw, tags) = parse_f95_thread(F95_GUEST_PAGE);
+        assert!(raw.as_deref().unwrap().starts_with("Lewd Customs"));
+        assert!(tags.contains(&"renpy".to_string()));
+    }
+
+    /// #46: `/s/<token>/<gid>-<n>` is a ~4.7 KB JS shell — no `gdtm` grid, no
+    /// `og:image`, no `<img id="image">`. Fold it onto the gallery page.
+    #[test]
+    fn eh_slideshow_links_fold_onto_their_gallery_page() {
+        assert_eq!(
+            eh_gallery_url("https://e-hentai.org/s/f6a1b2c3d4/3214201-2"),
+            "https://e-hentai.org/g/3214201/"
+        );
+        assert_eq!(
+            eh_gallery_url("https://exhentai.org/s/f6a1b2c3d4/3214201-7/"),
+            "https://exhentai.org/g/3214201/"
+        );
+        let gallery_link = "https://e-hentai.org/g/3214201/f6a1b2c3d4/?p=2";
+        assert_eq!(eh_gallery_url(gallery_link), gallery_link);
+        // the gid is already in the slideshow link
+        let s = classify("https://e-hentai.org/s/f6a1b2c3d4/3214201-2").unwrap();
+        assert_eq!(
+            (s.site.as_str(), s.mode, s.remote_id.as_deref()),
+            ("ehentai", Mode::Ehentai, Some("3214201"))
+        );
+        // and the page we now parse really does yield the grid
+        let shell = "<html><head><script>var show = JSON.parse(galleries[\"3214201\"])</script></head><body></body></html>";
+        assert!(parse_eh_gallery(shell).0.is_none());
+        let page = "<html><head><title>Sample Gallery [English] | e-hentai.org</title></head>\
+                    <body><div id=\"gdt\"><div class=\"gdtm\"><a href=\"https://e-hentai.org/s/f6a1b2c3d4/3214201-0\"><img src=\"https://ex.ph/covers/1.jpg\"></a></div></div></body></html>";
+        assert!(!eh_is_gate(page));
+        let (title, cover) = parse_eh_gallery(page);
+        assert_eq!(title.as_deref(), Some("Sample Gallery"));
+        assert_eq!(cover.as_deref(), Some("https://ex.ph/covers/1.jpg"));
+    }
+
+    /// #46/#50: `attachments.f95zone.to/…_642380pr.jpg` answers `image/avif`.
+    /// What gets stored and what goes to the thumbnailer follows the bytes.
+    #[test]
+    fn sniffed_bytes_not_the_url_decide_what_is_stored() {
+        let mut avif = vec![0u8, 0, 0, 0x1c];
+        avif.extend_from_slice(b"ftypavif");
+        avif.extend_from_slice(&[7u8; 40]);
+        let mut m = Meta::default();
+        assert_eq!(store_bytes_in(&mut m, avif.clone()), Some("image/avif"));
+        assert_eq!(m.store_bytes.as_deref(), Some(avif.as_slice()));
+        assert!(m.thumb_bytes.is_some());
+        assert!(m.note.is_none());
+
+        // a hotlink block page served at HTTP 200 is not art
+        let mut blocked = Meta::default();
+        assert_eq!(
+            store_bytes_in(
+                &mut blocked,
+                b"<html><body>Access denied</body></html>".to_vec()
+            ),
+            None
+        );
+        assert!(blocked.store_bytes.is_none() && blocked.thumb_bytes.is_none());
+        assert!(blocked.note.unwrap().contains("not a recognizable"));
+
+        // `.jpg` link carrying an mp4 body → link, not stored art
+        let mut mp4 = vec![0u8, 0, 0, 0x18];
+        mp4.extend_from_slice(b"ftypisom");
+        mp4.extend_from_slice(&[9u8; 24]);
+        let mut mov = Meta::default();
+        assert_eq!(store_bytes_in(&mut mov, mp4), None);
+        assert!(mov.note.as_deref().unwrap().contains("video/mp4"));
+
+        // the missing-decoder case stays visible instead of reading as success
+        let mut avif_meta = Meta::default();
+        store_bytes_in(&mut avif_meta, avif);
+        assert!(media::make_thumbnail(avif_meta.thumb_bytes.as_ref().unwrap()).is_none());
+        let note = undecodable_note(&avif_meta, false).expect("must stay visible");
+        assert!(note.contains("image/avif"), "{note}");
+        assert!(undecodable_note(&avif_meta, true).is_none());
     }
 
     #[test]

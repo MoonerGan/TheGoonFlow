@@ -127,7 +127,10 @@ pub async fn store_video(
         if !state.queue.reserve(&site, rate, || job.cancelled()).await {
             return Err("stopped".into());
         }
-        let client = crate::http::client_for(state, 600)?;
+        // #50: this is file bytes from a content host, so the CDN sees an
+        // ordinary browser UA. The referer (which boorus check) is unchanged,
+        // and the polite lane above still spaces the requests.
+        let client = crate::http::file_client_for(state, 600)?;
         let resp = client
             .get(&url)
             .header(reqwest::header::REFERER, format!("https://{site}"))
