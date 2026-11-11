@@ -37,7 +37,10 @@ real exe (below), and inside cargo `match_live_search_smoke`,
 `live_f95_markers_separate_member_from_guest_under_our_ua` (the live half of #38)
 and `f95_live_clip_rehearsal` (#52/#54: clips the live thread into a scratch
 encrypted vault through the real `clip()` and then reads the vault rows back)
-hit the real sites. The f95 ones need your own cookie in the environment, never
+hit the real sites. `first_frame_live_probe` (#16) needs `GOON_FF_PATH` pointed at
+any real video file and **skips** without it — it is the only one of the five that
+depends on a file on this machine, so a whole-`--ignored` run stays readable. The
+f95 ones need your own cookie in the environment, never
 in the repo — and they need the dev env, because `dav1d-sys` builds the AVIF
 decoder (#52):
 

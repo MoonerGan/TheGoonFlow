@@ -157,10 +157,22 @@ mod tests {
 
     /// Not automated — needs a real video file. Run by hand against any mp4:
     /// `GOON_FF_PATH=D:\some.mp4 cargo test -p goonflow-desktop --lib -- --ignored --nocapture ff_live`
+    ///
+    /// Missing input here means **skip**, not fail: unlike the f95 probes (where a
+    /// silent skip is exactly how #46 hid for a release), nothing is being claimed
+    /// about the product when there is no video on this machine — only that one of
+    /// five live probes cannot run. Keeping it a skip is what makes "run every
+    /// `#[ignore]`d probe in one command" a usable check.
     #[test]
     #[ignore]
     fn first_frame_live_probe() {
-        let p = std::env::var("GOON_FF_PATH").expect("set GOON_FF_PATH to a video file");
+        let Ok(p) = std::env::var("GOON_FF_PATH") else {
+            eprintln!(
+                "GOON_FF_PATH not set - no video file to grab a frame from, \
+                 so this probe is skipped (not a failure)"
+            );
+            return;
+        };
         let f = first_frame(std::path::Path::new(&p)).expect("no frame extracted");
         println!(
             "frame {}x{}, {} bytes RGBA",
