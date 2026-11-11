@@ -59,6 +59,16 @@ exe's mtime/bytes/sha256 in `tools\last-build-summary.txt`). The frontend is
 embedded by `build.rs`, so `target\release\GoonFlow.exe` is the whole app.
 Then `tools\verify-artifact.ps1` runs section 2 against that exact exe.
 
+**Only one release build at a time, and read the summary before quoting it.** The
+wrapper holds `tools\last-build.lock` and aborts with exit 2 if another build
+holds it; it also prints `build ran to completion: yes|NO` (derived from cargo's
+own `Finished \`release\` profile` line in the log) and `exe rebuilt: yes|no|new`.
+That ceremony exists because a run once reported `exit=0 sha=<previous build>`
+for a build that never started — the log file was still held by the previous run,
+`Out-File` threw, and the script went on hashing the old exe. If `build ran to
+completion: NO`, the sha in that summary is someone else's artifact; quote
+`Get-FileHash target\release\GoonFlow.exe` instead.
+
 ## 2. Live suite — real windows, real hotkeys
 
 These drive the actual exe with Win32 calls, because the panic path and the
