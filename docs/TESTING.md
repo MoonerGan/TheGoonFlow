@@ -156,6 +156,12 @@ the board's *In review* column is the current list.
     line goes red and says the site answered as a guest. Clip an f95 thread while
     the cookie is dead → the item's note says *members only* and the Sources line
     marks the cookie stale without being asked.
+21. AVIF thumbnails (#52): take an f95 item clipped **before** this build → the
+    card has no tile while the viewer still shows the art (the vault always held the
+    real picture). **Re-fetch metadata** on it → the tile appears, because f95
+    serves its cover as AVIF and dav1d now decodes it. Clip a *new* f95 thread link
+    → the tile is there without asking. A HEIF/HEIC file still stores fine and still
+    says out loud that this build cannot thumbnail that format.
 
 ## 4. House rules that prevent whole classes of damage
 
