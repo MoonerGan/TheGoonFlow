@@ -16,7 +16,13 @@ cd apps\desktop
 cmd /c "npx svelte-check --tsconfig ./tsconfig.json --output human"   # must be 0 errors AND 0 warnings
 cmd /c "npm run build"
 node tools\char-audit.js <every file you touched>                     # encoding guard
+node tools\lost-calls.js apps\desktop\src\components\ItemEditor.svelte <rev before> HEAD
 ```
+
+`lost-calls.js` exists because a dialog rework can pass every compiler and still
+drop a button: it diffs the `await someApi(...)` calls and `onclick={handler}`
+buttons of one file between two revisions and fails if either shrank. Renamed
+handlers show up as a lost+new pair, which is the honest result - read it.
 
 What the Rust suites actually cover (`DEVELOPMENT.md` §5 lists the per-crate
 breakdown): vault key handling and rejection, locator resolution against a temp
