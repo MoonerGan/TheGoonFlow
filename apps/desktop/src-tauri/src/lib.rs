@@ -1047,7 +1047,25 @@ async fn clip_url(
     state: tauri::State<'_, AppState>,
     url: String,
 ) -> Result<ingest::ClipReport, String> {
-    ingest::clip(&state, url).await
+    // #58: this used to call `ingest::clip` with no job at all, so the one action
+    // most users take had no line in the activity strip, no spinner, no Stop button,
+    // and nothing for Lock or Nuke to cancel. The companion API's clip path
+    // (companion.rs) already started one; the in-app path now does the same, so both
+    // doors give the same observability and the same cancellation.
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("url is empty".into());
+    }
+    let job = state
+        .jobs
+        .start("clip", &url)
+        .ok_or("a clip is still running \u{2014} the activity strip shows where it got to")?;
+    let report = ingest::clip(&state, url).await;
+    match &report {
+        Ok(r) => job.finish(&format!("clipped ({})", r.site)),
+        Err(e) => job.finish(&format!("clip failed: {e}")),
+    }
+    report
 }
 
 #[tauri::command]

@@ -227,6 +227,14 @@ the board's *In review* column is the current list.
     says *the vault was locked before ehentai could answer — the link was not clipped*.
     A **first** clip to a quiet site never waits, and clipping the same link twice costs no
     lane slot (the dedup answers before the queue is asked).
+26. A clip is a job now (#58 #60): *+ Clip URL* on a slow site (e-hentai at its 10 500 ms
+    default) → the strip gains a `clip: <url>` line with a **Stop** button while it waits.
+    Clip a second link from the browser extension during that wait → the app answers *a clip
+    is still running - the activity strip shows where it got to* instead of fetching twice.
+    Press **Lock** during the wait → the `clip:` line stops and no item appears (that is
+    #57's lane giving up). The labels must read `clip:`, `match search:`, `video store:`,
+    `extract:` - never `updates:` for something that is not an update check (#60).
+
 
 ## 4. House rules that prevent whole classes of damage
 

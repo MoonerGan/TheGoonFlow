@@ -40,13 +40,12 @@ profile behind on whatever machine it runs on. #61 tracks moving it next to the 
 ## 2. Lock, unlock, and the nuke
 
 - **Lock** (top-bar) closes the database and wipes the key from memory. Every running
-  **job** (import, enrich, update check, batch re-fetch, extract, match search, video
-  store) is cancelled first, and a clip that is *waiting its turn* in a site's queue
-  gives up rather than fetching into a closed vault (#57) - nothing keeps writing after
-  you lock. One honest gap: the **+ Clip URL** button starts no job, so a clip that is
-  already mid-fetch is not something Lock can interrupt; it finishes the request and then
-  finds the vault gone (#58). Reopen with the passphrase.
-- **Panic key** (global hotkey, works from any other app): `Ctrl+Alt+L` by
+  **job** - import, enrich, update check, batch re-fetch, extract, match search, video
+  store, and a **clip** from either the app or the extension (#58) - is cancelled first,
+  and a clip that is *waiting its turn* in a site's queue gives up rather than fetching
+  into a closing vault (#57): nothing keeps writing after you lock. The one thing a
+  request in flight still does is finish itself and then find the vault closed, which
+  stores nothing and says *the vault was locked*. Reopen with the passphrase.
   default — a short press does a Lock *and* hides the window entirely; press
   again to bring the locked window back. **Hold the key down for 3 seconds
   and it escalates to a full crypto-erase** of the attached vault — exactly

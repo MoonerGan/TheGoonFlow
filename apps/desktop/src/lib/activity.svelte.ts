@@ -90,21 +90,32 @@ export function jobState(kind: string): "running" | "cancelled" | "finished" | "
   return j.cancelled ? "cancelled" : "finished";
 }
 
+/**
+ * What the activity strip prints for a job. Every kind the backend starts is
+ * listed here: `bookmarks`, `games`, `images`, `videos`, `enrich`, `updates`
+ * (lib.rs), plus `clip` (both clip doors: lib.rs `clip_url` and the companion API),
+ * `matches`, `video` and `extract` (lib.rs).
+ *
+ * An unknown kind falls back to its own name, never to a label that belongs to a
+ * different job - that is what made an extension clip read as `updates: clipped …`.
+ */
+const JOB_LABELS: Record<string, string> = {
+  bookmarks: "bookmarks",
+  games: "games",
+  images: "images",
+  videos: "videos",
+  enrich: "re-fetching",
+  updates: "update check",
+  clip: "clip",
+  matches: "match search",
+  video: "video store",
+  extract: "extract",
+};
+
 export function jobLabel(j: JobInfo): string {
-  const kind =
-    j.kind === "bookmarks"
-      ? "bookmarks"
-      : j.kind === "games"
-        ? "games"
-        : j.kind === "images"
-          ? "images"
-          : j.kind === "videos"
-            ? "videos"
-            : j.kind === "enrich"
-              ? "re-fetching"
-              : "updates";
+  const kind = JOB_LABELS[j.kind] ?? j.kind;
   if (j.finished) return `${kind}: ${j.note || "done"}`;
-  if (j.cancelled) return `${kind}: stopping…`;
+  if (j.cancelled) return `${kind}: stopping\u2026`;
   if (j.total > 0) return `${kind} ${j.done}/${j.total}`;
   return `${kind}: ${j.note || j.current || "working"}`;
 }
