@@ -22,6 +22,13 @@ pub struct JobInfo {
     pub total: usize,
     /// the item currently being worked on
     pub current: String,
+    /// Nested detail, written by [`JobHandle::child`] — what the owner is doing
+    /// *inside* the current item (which source, which archive entry). Kept apart
+    /// from `done`/`total` on purpose: see #49, where a per-source worker
+    /// destroyed the batch's counts by reusing the same handle.
+    pub sub_done: usize,
+    pub sub_total: usize,
+    pub sub_current: String,
     pub note: String,
     pub finished: bool,
     pub cancelled: bool,
@@ -42,10 +49,18 @@ pub struct Jobs {
 }
 
 /// Handle passed into the work loop. Cheap to clone, Send+Sync.
+///
+/// **One writer per level.** A job's `done`/`total` belong to whoever called
+/// [`Jobs::start`]. A function that works *inside* the current item (one item's
+/// sources, one archive's entries) must use [`JobHandle::child`], which writes to
+/// the `sub_*` fields instead — otherwise the outer count is silently replaced by
+/// the inner one (#49: an 85-item batch displayed `0/1` for its whole run).
 pub struct JobHandle {
     id: u64,
     jobs: Arc<Jobs>,
     cancel: Arc<AtomicBool>,
+    /// true = this handle writes the nested `sub_*` detail, not the job's counts
+    nested: bool,
 }
 
 impl JobHandle {
@@ -55,15 +70,42 @@ impl JobHandle {
         self.cancel.load(Ordering::Relaxed)
     }
 
+    /// Handle for the work *inside* the current item. Cancellation is shared, the
+    /// numbers are not.
+    pub fn child(&self) -> JobHandle {
+        JobHandle {
+            id: self.id,
+            jobs: self.jobs.clone(),
+            cancel: self.cancel.clone(),
+            nested: true,
+        }
+    }
+
     pub fn set_progress(&self, done: usize, total: usize, current: &str) {
+        if self.nested {
+            self.jobs.patch(self.id, |info| {
+                info.sub_done = done;
+                info.sub_total = total;
+                info.sub_current = current.to_string();
+            });
+            return;
+        }
+        // The owner moving to the next item invalidates whatever the last item's
+        // nested detail said.
         self.jobs.patch(self.id, |info| {
             info.done = done;
             info.total = total;
             info.current = current.to_string();
+            info.sub_done = 0;
+            info.sub_total = 0;
+            info.sub_current = String::new();
         });
     }
 
     pub fn set_note(&self, note: &str) {
+        if self.nested {
+            return; // nested workers must not erase the owner's note
+        }
         self.jobs
             .patch(self.id, |info| info.note = note.to_string());
     }
@@ -73,6 +115,7 @@ impl JobHandle {
             info.finished = true;
             info.finished_at = now_secs();
             info.current = String::new();
+            info.sub_current = String::new();
             info.note = note.to_string();
         });
     }
@@ -110,6 +153,9 @@ impl Jobs {
                 done: 0,
                 total: 0,
                 current: "starting…".into(),
+                sub_done: 0,
+                sub_total: 0,
+                sub_current: String::new(),
                 note: String::new(),
                 finished: false,
                 cancelled: false,
@@ -134,6 +180,7 @@ impl Jobs {
             id,
             jobs: self.clone(),
             cancel,
+            nested: false,
         })
     }
 
@@ -214,6 +261,42 @@ mod tests {
             .map(|j| j.kind.as_str())
             .collect();
         assert_eq!(live, vec!["games", "bookmarks"]);
+    }
+
+    #[test]
+    fn nested_worker_cannot_destroy_the_owner_counts() {
+        // #49: an 85-item batch re-fetch showed "0/1" for its whole run because
+        // the per-item worker wrote progress on the parent's own handle.
+        let jobs = Arc::new(Jobs::default());
+        let job = jobs.start("enrich", "85 items").expect("first starts");
+        let id = job.id;
+        job.set_progress(0, 85, "item-1");
+
+        let inner = job.child();
+        inner.set_progress(0, 1, "https://rule34.xxx/post/1");
+        inner.set_note("ignored");
+
+        let snap = jobs.snapshot();
+        let j = snap.iter().find(|j| j.id == id).unwrap();
+        assert_eq!(j.done, 0);
+        assert_eq!(j.total, 85, "the batch denominator survives");
+        assert_eq!(j.current, "item-1");
+        assert_eq!(j.sub_total, 1);
+        assert_eq!(j.sub_current, "https://rule34.xxx/post/1");
+        assert_eq!(j.note, "", "a nested worker may not rewrite the job note");
+
+        // the owner moving on clears the stale nested detail
+        drop(snap);
+        job.set_progress(1, 85, "item-2");
+        let snap = jobs.snapshot();
+        let j = snap.iter().find(|j| j.id == id).unwrap();
+        assert_eq!(j.done, 1);
+        assert_eq!(j.sub_done, 0);
+        assert_eq!(j.sub_current, "");
+
+        // Stop still reaches the nested worker
+        jobs.cancel(id);
+        assert!(inner.cancelled());
     }
 
     #[test]
