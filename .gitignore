@@ -16,8 +16,9 @@ goonflow-vault/
 *-journal
 *.log
 
-# scratch build logs (tools/)
+# scratch build logs (tools/) and the one-build-at-a-time lock run-release.ps1 holds
 tools/*.log
+tools/last-build.lock
 # machine-local evidence written by tools/run-test.ps1 + run-release.ps1
 tools/last-*.txt
 

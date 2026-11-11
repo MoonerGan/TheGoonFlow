@@ -2883,6 +2883,7 @@ mod tests {
         let at = std::time::Instant::now();
         let first = clip(&core, url.clone()).await.expect("clip 1");
         let fast = at.elapsed();
+        println!("clip 1 to a quiet lane: {fast:?}");
         assert!(first.created, "the link must still be stored");
 
         // Second clip, different link on the same site: it must wait the site's
@@ -2893,6 +2894,7 @@ mod tests {
             .await
             .expect("clip 2");
         let waited = at.elapsed();
+        println!("clip 2 behind a 900 ms lane: {waited:?}");
         assert!(second.created, "a different link is a new item");
         assert!(
             waited.as_millis() >= 800,

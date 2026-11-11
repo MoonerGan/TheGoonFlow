@@ -144,8 +144,13 @@ the board's *In review* column is the current list.
 8. Deniability (#27): copy the exe to a boring name → works; set a *Decoy title* in
    Sources → taskbar title changes at once, brand returns after re-lock; check
    `chrome.cfg` reads like nothing sensitive (D21).
-9. Sources rates (#28): enable a site that was never touched (e.g. e621) → its ms
-   box shows that site's default (1200), not a shared 700; e-hentai stays 10500.
+9. Sources rates (#28): enable a site that was never touched → its ms box starts at
+   that site's own default, not one shared number. `ingest::default_rate_ms` says
+   **10 500** for e-hentai and Exhentai, **1 200** for the five repack mirrors (kimochi,
+   otomi, ryuugames, nagadoki, hentaihaven) and **700 for everything else — every booru
+   included**, so an e621 box reads 700. Setting one site's rate must not move
+   another's, and enabling a site for the first time must not reset a rate you had
+   already set (#28).
 10. Layout (#29 #30 #32): shrink to the 1100×640 minimum → one scrollbar for the
     grid, sidebar scrolls on its own, long folder names wrap per character, and an
     item with many tags keeps its Save/Cancel reachable.
@@ -173,9 +178,9 @@ the board's *In review* column is the current list.
     working set in Task Manager - it should plateau near 200 MB, not climb; press the
     panic key mid-load, tap again, re-unlock → the viewer refetches and shows nothing
     from the previous vault session.
-18. f95 and e-hentai art (#46 #50): with the f95 cookie set under *Sources*, *Re-fetch
-    metadata* on a thread stores the post-#1 cover and the note names the attachment
-    count (and says so if the cover is AVIF and cannot be thumbnailed); an
+18. f95 and e-hentai art (#46 #50 #54): with the f95 cookie set under *Sources*, *Re-fetch
+     metadata* on a thread stores the post-#1 cover **and** its tile, and the note names
+     the attachment count; an
     `e-hentai.org/s/...` link still finds its gallery; a gated page says *members only*
     instead of "carried nothing new".
 19. Batch counters (#47 #49): start an extract or a batch re-fetch and watch the job
@@ -203,6 +208,25 @@ the board's *In review* column is the current list.
     thumbnail made* and the viewer shows the real preview-size art (59 478 bytes of
     AVIF in the measured thread). Items clipped before #52, or clipped with this
     build, already hold the original.
+23. Login-walled fetches mark the cookie that failed (#55): paste an e-hentai cookie
+    under *Sources* (and later make it dead, or wait for the session to expire). Clip an
+    `e-hentai.org/g/…` link → the item says the gate was hit **and** the Sources line
+    for e-hentai turns red by itself, with the time. Exhentai keeps its own separate
+    verdict: one site dying must not mark the other stale, and a site with **no** cookie
+    saved is never shown as refused (there is no cookie there to be stale). f95 has worked
+    this way since #38; the EH pair did not until now.
+24. Search privacy (#56): with no f95 cookie saved, *Find online matches* must not
+    contact f95zone.to at all — the report carries one line, *f95: search skipped — no
+    login cookie saved (Sources)*, and the run is faster because no f95 lane slot is spent
+    on a request that cannot work. With a cookie, f95 suggestions appear (live probe:
+    `f95 hits with cookie: 3`). A refused cookie now says so differently from having none.
+25. Clips obey the politeness lane (#57): set e-hentai's rate high (its default is
+    10 500 ms) and clip two gallery links in a row → the second waits roughly 10 s before
+    the site is touched at all, instead of firing immediately while a re-fetch job queues
+    politely behind it. Press **Lock** during that wait → no item appears and the strip
+    says *the vault was locked before ehentai could answer — the link was not clipped*.
+    A **first** clip to a quiet site never waits, and clipping the same link twice costs no
+    lane slot (the dedup answers before the queue is asked).
 
 ## 4. House rules that prevent whole classes of damage
 
@@ -211,9 +235,11 @@ the board's *In review* column is the current list.
   UTF-8 (em dashes become ` E`, newlines get swallowed). Use a node script or the
   editor's tools; audit with `node tools\char-audit.js`, repair with
   `node tools\restore-nonascii.js`.
-- Nothing vault-shaped may be committed: `flow.cfg`, `chrome.cfg`, `*.db`,
-  `tools\*.log` are gitignored — keep it that way, and never print cookie or
-  passphrase values into logs or issue comments.
+- Nothing vault-shaped may be committed. `.gitignore` covers `flow.cfg` (the plaintext
+  pointer beside the exe), `chrome.cfg` (the plaintext decoy title, also beside the exe),
+  `goonflow-vault/`, `*.db` / `*.db-wal` / `*.db-shm`, `*-journal`, `*.log`, `tools/*.log`
+  and `tools/last-build.lock`. Check with `git check-ignore -v <path>` rather than trusting
+  this sentence, and never print cookie or passphrase values into logs or issue comments.
 - `gh` needs `C:\Program Files\Git\cmd` on PATH; `npx` only works through
   `cmd /c` (the `.ps1` shim will not load); `cargo` only after `tools\dev-env.ps1`.
 - A finished increment means: tests green → commit → push → comment on the issue

@@ -34,7 +34,7 @@ Closest pieces worth stealing ideas from (see §3). Build custom.
 | # | Decision | Choice | Notes |
 |---|---|---|---|
 | D1 | Custom vs adapt existing | **Custom** | Nothing unifies game sites + boorus + crypto-wipe. |
-| D2 | Browser integration | **Both** | MV3 extension for daily browser + embedded WebView2 tabs in-app. |
+| D2 | Browser integration | **MV3 extension now** | Extension for daily browser work (shipped, #19). The *embedded WebView2 tabs in-app* half is unbuilt (#20) and drags the profile-location problem with it (#61). |
 | D3 | Scope | **Track + download** | Metadata/thumbnails AND manage downloads (DLsite, booru full-res, mirrors). |
 | D4 | Stack | **Tauri 2 + Rust backend, Svelte 5 frontend** | Tiny, portable-folder-friendly, SQLCipher/age in Rust. |
 | D5 | License | **MIT** | Least conspicuous code license. |
@@ -103,7 +103,10 @@ TheGoonFlow/
 - **Companion API:** app listens on `127.0.0.1` only, random port, per-session bearer token, strict CORS (extension ID). Extension talks to it; embedded webviews use IPC directly.
 
 ### 4.1 Vault & portability
-- One folder = everything: DB (SQLCipher) + WAL, thumbnails (DB BLOBs), encrypted download containers, WebView2 profile, logs.
+- One folder = everything except the web engine's own profile: DB (SQLCipher) + WAL,
+  thumbnails (DB BLOBs), logs. **Not** the WebView2 profile: Tauri defaults it to
+  `%LOCALAPPDATA%\<identifier>\EBWebView` (measured: 75 MB, 326 files) and nothing here
+  sets `data_directory` - #61 is the open decision.
 - Vault root chosen on first run (default beside exe; browse to USB/partition).
 - App dir holds only `flow.cfg` pointer: volume label + relative path (no sensitive data). Locked/absent vault → neutral "insert drive / pick vault" prompt (deniability: nothing revealed).
 - Setup allows renaming exe/folder; locked state renders as a boring utility window.
@@ -111,25 +114,50 @@ TheGoonFlow/
 ### 4.2 Encryption & nuke
 - Master key: Argon2id(passphrase) → wraps random data key (key hierarchy so passphrase changes don't re-encrypt everything).
 - DB via SQLCipher. Downloaded content in XChaCha20-Poly1305 chunked containers (plain-folder mode possible with shred fallback — decide at M3 by perf).
-- **Nuke:** global hotkey — tap = instant lock; hold 3 s = crypto-erase: destroy key material → overwrite DB+WAL+keyfile+webview profile → push wipe to extension storage. <2 s, no admin rights.
-- Scrubber: best-effort sweep of Windows artifacts (Jump Lists, Recent, Prefetch for tracked game exes) + docs checklist.
+- **Nuke:** global hotkey - tap = instant lock; hold 3 s = crypto-erase: destroy key
+  material → overwrite DB+WAL+keyfile+`flow.cfg`, stop every job, clear the rate lanes,
+  wipe job history, then scrub the web session and Explorer's thumbnail caches. The
+  extension's own browser storage is out of reach from here: its saved port+token survive
+  a nuke, and removing them is the manual step in `extensions/goonflow-clip/README.md`.
+- Scrubber (`lib.rs::do_scrub`): clears the WebView2 browsing data and deletes
+  `%LOCALAPPDATA%\Microsoft\Windows\Explorer\thumbcache_*.db` - files Explorer is holding
+  are counted (`thumbcache_locked`) and reported, never forced. Runs on Lock when
+  *scrub on every lock* is ticked, and always on hold-to-erase. A sweep of Jump Lists,
+  Recent and Prefetch is **not built**.
 
 ---
 
 ## 5. Data model
 
-- `items` — ULID, kind (`Game` | `Gallery` | `Post`), normalized + original title, circle/dev, pipeline `status` (`Seen → Tracking → Wishlist → Downloaded → Played`), DNF flag, notes, rating, created/updated.
+**Schema of record: `crates/goon-core/src/db.rs::init_schema`.** The live tables are
+`meta`, `items`, `sources`, `tag_types`, `tags`, `item_tags`, `media`, `site_settings`,
+`updates`, `match_suggestions`, `mods` and `pair_dismissals`. Anything marked *planned*
+below is design intent, not schema.
+
+- `items` — ULID, kind (`Game` | `Gallery` | `Post`), normalized + original title,
+  circle/dev, pipeline `status` (`Seen → Tracking → Wishlist → Downloaded → Played`),
+  DNF flag, notes (the user's own field - no fetch ever writes into it), rating,
+  created/updated, and **one `version` column**.
   - Note: "Complete" is **not** here — it's a tag (D9). A completed game still re-surfaces on updates.
-- `sources` — many→one with items. Per-site identity: url, source id, fetched_at, **raw JSON/HTML snapshot** (selector-rot recovery), dead-mirror flag.
+- `sources` — many→one with items. Per-site identity: url, source id, fetched_at,
+  dead-mirror flag. A `raw` column exists in the table but **no code ever writes it**, so
+  the "raw JSON/HTML snapshot (selector-rot recovery)" half is *planned*, not built.
   - Auto-pairing across sites (DLsite origin ↔ f95 thread ↔ repack mirrors) via circle+title fuzzy match; manual merge/unmerge UI.
-- `versions` — parsed version strings (f95 `[v0.12]` titles, DLsite updated_date), changelog watches → "updated" feed.
+- `versions` — *planned as a table*; today a version is one column on `items` and update
+  detections go to `updates` (which is what the update feed reads). Changelog watches: unbuilt.
 - `tags` + `tag_types` — tag kinds with display attributes:
   - `user_status` — personal state: **Complete (green, high priority)**, Wishlist, DNF, Replay… shown as colored chips on cards, sorted first.
   - `site_flag` — developer/site facts imported from sources (f95 `[Completed]` prefix, engine tags like Ren'Py/RPGM/Unity).
-  - `content` — normal tags; `tag_aliases` translate booru tags ↔ DLsite genres ↔ f95 prefixes into one facet. Also serves as the blocklist mechanism.
+  - `content` — normal tags. `tag_aliases` (booru tags ↔ DLsite genres ↔ f95 prefixes in
+    one facet, doubling as the blocklist) is *planned*: nothing translates between site
+    vocabularies today, and the blocklist is a plain tag filter.
 - `media` — thumbnails as encrypted BLOBs in DB, content-hash keyed (dedup + trivial wipe). Previews/local paths for downloaded galleries.
-- `downloads` — job queue: mirrors, resume state, extraction, final path linkback.
-- `tools`, `mods`, `attachments` — see §7.
+- `downloads` — *planned* (M3): no download-queue table and nothing downloads by itself.
+  Jobs live in memory (`jobs.rs`); a video is stored in the vault only on request.
+- `mods` exists (table + deploy/rollback in `mods.rs`); `tools` and `attachments` as tables
+  are *planned* (§7). Related gap, same shape: an f95 clip finds 15 images and stores one
+  cover, and a `+Images` gallery stores every original but `media::best_for` reads one back
+  (#53, #62).
 - `site_settings` — per-source enable/credentials/rate limit/proxy override.
 
 ---
@@ -200,7 +228,7 @@ milestone below M6 shipped; what happens next is decided on the board, not here.
 | M2.5 | D14/D15: separate **Games** and **Media** views, shared `TileGrid`/`ItemEditor` only; observable job queue with per-item locking and clean cancel | shipped |
 | M2.6 | Trust & cleanup round: site naming + idempotent migrations, booru CDN links through the site API, `+ Video` by link, dupe suggestions, batch delete/re-fetch, in-app confirm dialogs, deep game-folder import fixes | shipped |
 | M3 | Downloader: DLsite library sync, booru full-res storage, mirror picker, archive extract, local game folder linking + launch, container-encryption perf decision | shipped in pieces (#15 #17 #16 #24 #25), full-res storage per site is open work |
-| M4 | MV3 extension (Chrome + Firefox) with per-site clip extractors, token pairing, embedded WebView2 tabs | shipped (#19); cookie hand-off is #38 |
+| M4 | MV3 extension (Chrome + Firefox) with per-site clip extractors, token pairing | shipped (#19); cookie hand-off is #38. **Embedded WebView2 tabs: not started** (#20) |
 | M5 | Panic hotkey + crypto-erase, scrubber, deniability (rename, decoy chrome), proxy/Tor, mods/MTool layer, packaging | shipped (#23 #27 #24 #25) |
 | M6+ | Artifact radar (D11, experimental), site-pack ecosystem hardening, Stash export bridge | backlog |
 
@@ -209,7 +237,8 @@ Build order note: extension codegen depends on site-packs (§6).
 ---
 ## 11. Risks & mitigations
 
-- **No official APIs** (f95/DLsite) → selector/endpoint rot → fixture tests + raw snapshots + site-packs.
+- **No official APIs** (f95/DLsite) → selector/endpoint rot → fixture tests + site-packs.
+  The raw-response snapshots this line relied on are not written (#59).
 - **e-hentai** rate/IP limits → strict limiter, manual gates, APIDB auth.
 - **Repack site link rot** (kimochi/ryuu/otomi) → mirrors not primaries; dead-mirror flags.
 - **Legal:** metadata/link tracking fine; downloading repacks of paid works is user-jurisdiction responsibility → README disclaimer mirroring f95 community tools.

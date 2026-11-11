@@ -30,13 +30,22 @@ non-sensitive pointer file (`flow.cfg`) that says which drive the vault is on.
 ### Running from USB
 Put the app executable *and* choose a vault folder on the same stick (or any
 reachable drive). Carry the stick; plug into any Windows 10/11 machine; the app
-asks for the passphrase and nothing else. It writes nothing outside its folder.
+asks for the passphrase and nothing else. Your **content** stays in that folder. One
+exception, and it is not secret: the web engine keeps its own profile at
+`%LOCALAPPDATA%\dev.goonflow.desktop\EBWebView` (measured: 75 MB, 326 files, and the
+folder name is the app identifier). Nothing of yours is stored as readable art there, and
+**Scrub now** clears its browsing data, but a copy of the app on a stick leaves that
+profile behind on whatever machine it runs on. #61 tracks moving it next to the exe.
 
 ## 2. Lock, unlock, and the nuke
 
-- **Lock** (top-bar) closes the database and wipes the key from memory. Any
-  running import, clip or update check is cancelled first — nothing keeps
-  fetching or writing after you lock. Reopen with the passphrase.
+- **Lock** (top-bar) closes the database and wipes the key from memory. Every running
+  **job** (import, enrich, update check, batch re-fetch, extract, match search, video
+  store) is cancelled first, and a clip that is *waiting its turn* in a site's queue
+  gives up rather than fetching into a closed vault (#57) - nothing keeps writing after
+  you lock. One honest gap: the **+ Clip URL** button starts no job, so a clip that is
+  already mid-fetch is not something Lock can interrupt; it finishes the request and then
+  finds the vault gone (#58). Reopen with the passphrase.
 - **Panic key** (global hotkey, works from any other app): `Ctrl+Alt+L` by
   default — a short press does a Lock *and* hides the window entirely; press
   again to bring the locked window back. **Hold the key down for 3 seconds
@@ -70,12 +79,14 @@ asks for the passphrase and nothing else. It writes nothing outside its folder.
 - **Forget pointer** (reconnect screen): deletes only the app's `flow.cfg`
   pointer — touches no vault files. The escape hatch when the pointer points
   at a moved/deleted folder and you just want the app working again.
-- **Scrubber** (Sources tab): the vault is encrypted, but *outside* it the OS
-  keeps traces — the app's web session (thumbnails it fetched) and Windows
-  Explorer's thumbnail caches (previews of game/video files on any drive).
-  **Scrub now** clears both; files Explorer is actively holding are reported,
-  not forced. Tick *scrub on every lock* and the same cleanup runs whenever
-  you Lock or hit the panic key — so "locked" really means cleared.
+- **Scrubber** (Sources tab): the vault is encrypted, but *outside* it there are traces.
+  **Scrub now** clears two things: the app's web session (its own browsing data - note
+  that every picture the app downloads is fetched in Rust, never through that web view,
+  so fetched art is not what sits there) and **Windows Explorer's thumbnail caches**,
+  which *do* hold previews of game and video files on any drive. Files Explorer is
+  actively holding are reported, not forced. Tick *scrub on every lock* and the same
+  cleanup runs whenever you Lock or hit the panic key - so "locked" really means cleared.
+  Sweep of Jump Lists, Recent and Prefetch is designed but **not built**.
 - Forgotten passphrase ≠ lost content forever only via backups: without it the
   vault is a brick. That's the point.
 - **Making it boring (deniability):** the app is built to sit on a drive
@@ -176,9 +187,12 @@ Already know the exact game? Pick its `.exe` and its containing folder is
 imported as one game entry. Handy for one-offs without browsing a whole tree.
 
 ### + Images
-Pick image files (PNG/JPG/WebP/GIF/BMP). They are **stored inside the encrypted
-vault** (originals + thumbnail) as a single Gallery item. A delete in the app
-removes the vault copy only.
+Pick image files. The dialog offers PNG/JPG/JPEG/WebP/GIF/BMP; what the vault *keeps* is
+decided by the bytes, not the name, so an AVIF in that selection stores fine too
+(`media::detect_mime` - #52 also decodes it into a tile). They are **stored inside the
+encrypted vault** (every original + one thumbnail) as a single Gallery item, and a delete
+in the app removes the vault copy only. One caveat worth knowing before you import 500
+files: the viewer currently reaches only one of the stored originals (#62).
 
 ### + Video
 Pick video files (MP4/WebM/MKV/MOV/AVI). Videos are **tracked by path, not
@@ -197,11 +211,17 @@ never touched either way. Nuke destroys stored videos with everything else.
 ### + Bookmarks
 Import a browser bookmarks export (Firefox: *Bookmarks → Export Bookmarks to
 HTML*; Chrome: *Bookmarks Manager → Export*). Each bookmark is classified the
-same way *+ Clip URL* classifies one link: gelbooru, rule34, e621 and other
-known boorus, e-hentai/exhentai, DLsite, f95zone, **direct image/video file
-URLs**, and **`file:///` links to media already on this machine** — so a
-bookmark to `file:///D:/Videos/clip.mp4` becomes a media item, not an error.
-Anything else counts as *unrecognized* and is listed in the report.
+same way *+ Clip URL* classifies one link. The Sites the *Sources* tab lists come from
+`ingest::KNOWN_SITES` - 21 rows, including `local` (files on this machine): gelbooru,
+rule34, e621, danbooru, safebooru, yande.re, konachan, rule34hentai, realbooru, hypnohub,
+e-hentai, exhentai, DLsite, f95zone, the five repack mirrors and 4chan. A separate host
+table folds mirror and CDN names into those rows (e926→e621, 4cdn/4channel→4chan) and
+also recognises `booru.allthefallen.moe`, which has no row to toggle yet.
+**Direct image/video file URLs** and **`file:///` links to media already on this machine**
+are media items, not errors - a bookmark to `file:///D:/Videos/clip.mp4` imports.
+Being recognised is not being understood: only **gelbooru, rule34 and e621** have a
+metadata API wired, and any other booru is stored as a bare link with the reason in the
+report. Anything unrecognised is listed in the report rather than imported.
 
 **Enrich online** (checkbox, on by default): when checked, the app politely
 (one request per site at a time, honouring that site's rate) fetches
@@ -266,7 +286,8 @@ sees the `HttpOnly` session keys a hand-copy misses) and posts it to
 `127.0.0.1:port`, into the same encrypted vault the *Sources* box writes to. The
 extension never sends anything to those sites and keeps no copy — the only things
 it stores are the pairing port and token. If you would rather not grant it, the
-extension's README names the two manifest lines to delete; clipping keeps working
+extension's README names the lines to delete - the `cookies` permission and the three
+`https://…` host entries, four lines; clipping keeps working
 and the cookie hand-off then simply fails, with the popup saying so.
 
 The extension has no other network access: every request it makes goes to
@@ -387,7 +408,9 @@ proxy if you set one).
   pairing*, and a *Getting a cookie* how-to. Per site: turn it on or off, set how
   polite it should be (ms between requests), paste a **cookie** for sites that
   need a login, and see how many items each site currently accounts for. The
-  rate box starts at that site's own default (e-hentai's ~10 s, boorus' 1–2 s),
+  rate box starts at that site's own default - 10 500 ms for e-hentai and Exhentai,
+  1 200 ms for the five repack mirrors, 700 ms for everything else including every
+  booru -
   and enabling a site for the first time keeps that default instead of resetting
   it to one shared number.
   - **Getting a cookie** (f95 threads, E-hentai/Exhentai). Only these need one —
@@ -435,8 +458,9 @@ proxy if you set one).
     keeps the cookie inside the encrypted vault, never in a plain config file,
     and it never goes looking through your browser's cookie store on its own —
     the extension hand-off is a copy you chose to make, and the extension's
-    README names the two manifest lines to delete if you would rather not grant
-    it. Cookies expire; when a session goes stale the fetch says so out loud, in the
+    README names the lines to delete if you would rather not grant them - the
+    `cookies` permission plus three `https://…` host entries, four lines. Cookies expire;
+    when a session goes stale the fetch says so out loud, in the
     strip under the tabs
     (*"f95 answered, but this page shows its art to members only — save your f95
     cookie under Sources and re-fetch this item to pull the images"*) instead of

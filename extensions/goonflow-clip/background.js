@@ -2,8 +2,13 @@
 //
 // One job: right-click → send a URL to the local GoonFlow companion API
 // (http://127.0.0.1:<port>/api/clip, bearer token from the app's Sources
-// panel). No analytics, no remote calls — host_permissions are localhost
-// only, and the extension works while the desktop app is running.
+// panel). Every network call this extension makes goes to that loopback API
+// — no analytics, no remote fetching, nothing behind your back. The manifest
+// also names three https hosts (f95zone.to, e-hentai.org, exhentai.org) for one
+// purpose: reading *this browser's* own sign-in cookie when you press
+// "Send this page's sign-in cookie". It never sends anything to those hosts, and
+// companion.rs::extension_sends_to_loopback_only_and_its_cookie_hosts_match_the_app
+// fails the build if either half of that sentence stops being true.
 
 const MENUS = [
   { id: "gf-clip-page", title: "Clip this page to GoonFlow", contexts: ["page", "editable"] },

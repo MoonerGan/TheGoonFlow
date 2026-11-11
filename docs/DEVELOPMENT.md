@@ -247,7 +247,8 @@ tools/
   with the item.
 - `sources` — many→one to items; `UNIQUE(site, url)`; `site='local'` +
   `file:///…` url for imported games, **local media bookmarks and `+ Video`
-  entries**; raw snapshot column reserved for M3 selector recovery. Because of
+   entries**; the `raw` column exists in the table but **no code writes it**, so the
+   selector-rot snapshot recovery is planned (M3), not available.
   that unique key, `merge_items` moves sources with `UPDATE OR IGNORE` (a copy
   would collide with the keeper's own rows). `delete_source(item_id, row_id)`
   detaches one link from the item editor.
@@ -306,9 +307,14 @@ tools/
    DB connection — close it first (Windows file locks).
 4. **Companion API**: 127.0.0.1 only, random port, bearer token per session;
    `handshake` is the only unauthenticated route and returns no secrets.
-5. **Portable state**: no writes outside the vault folder and `flow.cfg`
-   beside the exe. No registry, no %APPDATA% (WebView2 profile lives in the
-   vault dir — verify when M4 adds embedded tabs).
+5. **Portable state**: content stays in the vault folder; the only other write is
+   `flow.cfg` beside the exe. No registry, no `%APPDATA%`. **The WebView2 profile is the
+   exception** and it is not in the vault dir: tauri 2.12.5 defaults `data_directory` to
+   `path().app_local_data_dir()` (`manager/webview.rs:561-569`), so this build writes
+   `%LOCALAPPDATA%\<identifier>\EBWebView` - measured 75 MB / 326 files after a normal
+   run, and the smoke test finds the window as `dev.goonflow.desktop-siw`. Moving it
+   beside the exe is the open decision (#61); until then anything that claims otherwise
+   in these docs is wrong.
 6. **Frontend types mirror Rust serde** (`rename_all = "camelCase"`) — keep
    `src/lib/api.ts` in sync with command structs.
 7. Importers are **best-effort, user-correctable**: never overwrite user edits
@@ -338,8 +344,12 @@ tools/
     protection kills. `JobInfo.finished_at` exists so the ActivityBar can
     expire finished rows; don't remove it.
 11. **One politeness ledger (`queue::SiteQueue`, #15).** Every network fetch —
-    bookmark enrich, re-fetch, update checks, and the future M3 downloader —
+    bookmark enrich, **clips** (#57), re-fetch, update checks, match search, the cookie
+    probe, and the future M3 downloader -
     claims its slot with `state.queue.reserve(site, rate_ms, cancel).await`
+    One slot covers a whole clip, not one request per clip (an f95 clip fetches its page
+    plus up to three cover candidates) - the same compromise as enrich, and closing it
+    means counting requests inside the fetchers.
     instead of tracking a private "last request per site" and sleeping inline.
     That guarantees spacing *across* concurrent jobs (two jobs hammering one
     booru was the old bug), keeps different sites progressing in parallel, and
