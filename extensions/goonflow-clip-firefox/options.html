@@ -18,6 +18,14 @@
     #status { margin-top: 1rem; min-height: 1.2em; }
     #status.ok { color: #7fd08a; } #status.bad { color: #e57373; }
     code { background: #1e1817; padding: 0 .3rem; border-radius: 4px; }
+    h2 { font-size: 1rem; margin: 1.75rem 0 .25rem; }
+    table.cookies { width: 100%; border-collapse: collapse; margin-top: .5rem; }
+    table.cookies td { padding: .4rem .25rem; border-bottom: 1px solid #2a2321; vertical-align: top; }
+    td.cookie-site { white-space: nowrap; }
+    td.cookie-keys, td.cookie-state { color: #9b918a; font-size: .9rem; }
+    td.cookie-state.ok { color: #7fd08a; } td.cookie-state.bad { color: #e57373; }
+    td.cookie-action { white-space: nowrap; text-align: right; }
+    span.hint { color: #9b918a; font-size: .85rem; }
   </style>
 </head>
 <body>
@@ -40,6 +48,43 @@
       <button id="test">Test connection</button>
     </div>
     <p id="status"></p>
+
+    <h2>Sign-in cookies</h2>
+    <p class="hint">
+      Only f95, E-hentai and Exhentai need a login cookie, and the app keeps it inside the
+      encrypted vault. This list is what the app recorded for each site - the extension keeps
+      no copy, stores nothing in browser storage, and never shows the value. To hand one over:
+      open the site while logged in, click the toolbar icon, and use
+      <em>Send this page's sign-in cookie</em>.
+    </p>
+    <table class="cookies">
+      <tbody>
+        <tr>
+          <td class="cookie-site">f95 <span class="hint">(<code>f95</code>)</span></td>
+          <td class="cookie-keys">wants <code>xf_session</code> and <code>xf_user</code></td>
+          <td class="cookie-state" id="state-f95">not asked yet</td>
+          <td class="cookie-action"><button data-check="f95">Check</button></td>
+        </tr>
+        <tr>
+          <td class="cookie-site">E-hentai <span class="hint">(<code>ehentai</code>)</span></td>
+          <td class="cookie-keys">wants <code>ipb_member_id</code> and <code>ipb_pass_hash</code></td>
+          <td class="cookie-state" id="state-ehentai">not asked yet</td>
+          <td class="cookie-action"><button data-check="ehentai">Check</button></td>
+        </tr>
+        <tr>
+          <td class="cookie-site">Exhentai <span class="hint">(<code>exhentai</code>)</span></td>
+          <td class="cookie-keys">wants <code>ipb_member_id</code> and <code>ipb_pass_hash</code></td>
+          <td class="cookie-state" id="state-exhentai">not asked yet</td>
+          <td class="cookie-action"><button data-check="exhentai">Check</button></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="hint">
+      <em>Check</em> asks the app what it has recorded and what its own probe concluded
+      (<code>GET /api/cookie</code>) - it does not send a cookie and the app never answers with
+      one. Whether a cookie really works is the app's call: it probes the site and reports which
+      keys it found. No <code>xf_session</code> means you were logged out when it was taken.
+    </p>
   </main>
   <script src="options.js"></script>
 </body>

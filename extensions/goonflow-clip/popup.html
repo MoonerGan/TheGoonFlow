@@ -29,6 +29,8 @@
       .ok { color: #4ade80; }
       .bad { color: #f87171; }
       .muted { color: #9aa3b2; }
+      /* .row is display:flex, which would beat the hidden attribute */
+      [hidden] { display: none !important; }
       a { color: #4ade80; }
     </style>
   </head>
@@ -39,13 +41,23 @@
       <div class="row">
         <button class="primary" id="clip">Clip this page</button>
       </div>
+      <div class="row" id="cookie-row" hidden>
+        <button id="cookie" disabled>Send this page's sign-in cookie</button>
+      </div>
+      <div class="status muted" id="cookie-needs" hidden></div>
       <div class="status" id="status">checking…</div>
+      <div class="status" id="cookie-status" hidden></div>
       <div class="row">
         <button id="options">Pairing / options</button>
       </div>
       <p class="status muted">
         Right-click any link, image or page → <em>Clip … to GoonFlow</em>. The app
         must be running and unlocked.
+      </p>
+      <p class="status muted">
+        On f95, E-hentai and Exhentai the popup also offers to hand this browser's own
+        sign-in cookie to the app, by one deliberate click. It goes to 127.0.0.1 and into
+        the encrypted vault; the extension keeps no copy.
       </p>
     </div>
     <script src="popup.js"></script>

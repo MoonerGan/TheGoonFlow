@@ -3,8 +3,14 @@
   "name": "GoonFlow Clip",
   "version": "0.1.0",
   "description": "Clip links and images from your browser straight into The Goon Flow vault. Talks only to the local app.",
-  "permissions": ["contextMenus", "storage", "notifications", "activeTab"],
-  "host_permissions": ["http://127.0.0.1/*", "http://localhost/*"],
+  "permissions": ["contextMenus", "storage", "notifications", "activeTab", "cookies"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "https://f95zone.to/*",
+    "https://e-hentai.org/*",
+    "https://exhentai.org/*"
+  ],
   "action": {
     "default_popup": "popup.html",
     "default_title": "GoonFlow Clip"
