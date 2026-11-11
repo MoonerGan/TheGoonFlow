@@ -94,7 +94,7 @@ pub struct Source {
     pub dead: bool,
 }
 
-/// Tag kinds with display attributes (PLAN.md D9). `user_status` tags are the
+/// Tag kinds with display attributes (DESIGN D9). `user_status` tags are the
 /// personal state chips — e.g. Complete (green, highest priority).
 #[derive(Clone, Debug, Serialize)]
 pub struct TagType {

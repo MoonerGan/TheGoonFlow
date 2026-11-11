@@ -1,6 +1,6 @@
 //! #16: first-frame thumbnails for videos.
 //!
-//! The decoder decision (PLAN D18): no vendored FFmpeg and no pure-Rust
+//! The decoder decision (DESIGN D18): no vendored FFmpeg and no pure-Rust
 //! decoder gamble. Windows itself ships decoders for everything this library
 //! meets (H.264/HEVC MP4, VP8/VP9 WebM), so we ask the Shell's thumbnail
 //! provider (Media Foundation) — the exact path Explorer uses — and copy the

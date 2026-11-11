@@ -1,4 +1,4 @@
-//! Companion HTTP API (PLAN §4) — the browser extension's door into the app.
+//! Companion HTTP API (DESIGN §4, D20) — the browser extension's door into the app.
 //!
 //! Binds 127.0.0.1 only, random port, bearer-token auth. `handshake` is the
 //! unauthenticated pairing probe (returns no secrets); everything else needs

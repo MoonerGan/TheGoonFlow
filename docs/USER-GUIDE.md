@@ -6,7 +6,7 @@ already browse and own. Everything stays on your machine. Nothing phones home.
 **Current state: M1/M2** — encrypted vault, portable folder, importers, separate
 Games and Media library views, URL clipping, tags, update tracking, live import
 progress with Stop. Downloads and the browser extension are on the roadmap (see
-[PLAN.md](../PLAN.md)).
+[DESIGN.md](DESIGN.md)).
 
 ---
 

@@ -1,7 +1,7 @@
 # The Goon Flow — Developer Guide
 
 Milestone plan, architecture rationale, and the decision log all live in
-[PLAN.md](../PLAN.md). This doc is the practical "how to build, where the code
+[DESIGN.md](DESIGN.md) and the [project board](https://github.com/MoonerGan/TheGoonFlow/projects/1). This doc is the practical "how to build, where the code
 is, what invariants matter" companion.
 
 ## 1. Prerequisites (Windows)
@@ -63,7 +63,7 @@ crates/
   vault/        crypto core: Argon2id KDF → XChaCha20-Poly1305-wrapped data key
                 → SQLCipher PRAGMA key; nuke = shred keyfile first, then files
   locator/      flow.cfg pointer + volume-label resolution (drive-letter agnostic)
-  goon-core/    domain model, SQLite schema (v6), media pipeline (thumbnail gen,
+  goon-core/    domain model, SQLite schema (v8), media pipeline (thumbnail gen,
                 sha256 dedup, BLOB storage)
 apps/desktop/
   src/          Svelte 5 (runes) + Vite frontend
@@ -83,7 +83,7 @@ apps/desktop/
       video.rs      #16: opt-in vault video storage (cap, job, first-frame)
       videothumb.rs #16: first-frame grabs via the Windows Shell thumbnail handler
       companion.rs  127.0.0.1 axum API: handshake + ping + real /api/clip (#19)
-      ingest.rs     PLAN §6: one clip pipeline — classify(url) → fetch_meta → store
+      ingest.rs     DESIGN §6: one clip pipeline — classify(url) → fetch_meta → store
       importer.rs   D13: game-folder scan, engine fingerprinting, image import
       bookmarks.rs  D13: Netscape bookmark parse + polite per-site enrichment
     capabilities/   Tauri 2 permission sets (core + dialog)
@@ -139,6 +139,15 @@ tools/
   stored canonically (smaller id first) so `dismiss_pair` is symmetric and
   `pairing_suggestions` can skip a pair the user already judged. Deleting/
   merging either item drops the row; the items themselves are never touched.
+- **Game dupe suggestions** are `pairing_key(title)` equality (brackets and
+  punctuation stripped, so `Summer Witch` matches `Summer Witch [v0.12] [renpy]`)
+  with two guards from #47: `title_is_placeholder` skips titles that name the
+  *tool* rather than the game (`mmnz-game` — what RPG Maker's `System.json`
+  `gameTitle` and repack installers leave behind — plus `game`, `demo`, `sample`,
+  `untitled`, `new folder`), and a bucket emits cross-site pairs before same-site
+  ones and stops at 12 rows, so one shared title cannot produce N·(N-1)/2 noise.
+  If you really do have more than a dozen games under one title, the rest are
+  paired by hand from the item editor.
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
   `if v < N` steps up to `SCHEMA_VERSION` (v8). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
@@ -147,7 +156,7 @@ tools/
   change is a new numbered step — never edit the `CREATE TABLE` batch for
   existing columns.
 
-## 4. Invariants (do not break without updating PLAN.md)
+## 4. Invariants (do not break without updating DESIGN.md)
 
 1. **`PRAGMA key` before any query** on a SQLCipher connection (see
    `vault::open_db`); wrong key must surface as `InvalidPassphrase`, never as
@@ -309,7 +318,7 @@ tools/
     hotkey — instead of forking a second app that could never own the key.
     Closing the window does quit the process (verified live,
     `tools/close-exit-test.ps1`); there is no tray icon on purpose, because
-    permanent chrome contradicts PLAN §9 deniability.
+    permanent chrome contradicts DESIGN §9 deniability.
 
 ## 5. Testing
 
@@ -353,7 +362,7 @@ manually.
   Also list it in `ingest::KNOWN_SITES` so the Sources panel can enable/disable
   it, set its cookie and its `rate_ms`. Bookmark import and "+ Clip URL" both
   go through this one path — that's deliberate, so the M4 extension needs no new
-  logic. PLAN §6 keeps the split: Rust ingestors for API-backed sites,
+  logic. DESIGN §6 keeps the split: Rust ingestors for API-backed sites,
   declarative site-packs (M3) for selector-based ones.
 - **Media policy**: images get stored in the vault (`put_full_image` +
   `put_thumbnail`); **videos stay links** (note on the item), because a 400 MB
@@ -378,9 +387,12 @@ manually.
   **One writer per job.** `JobHandle::set_progress` overwrites `done`/`total`
   unconditionally, so a nested worker that reuses the parent's handle destroys the
   parent's counts (#49: batch re-enrich showed `0/1` forever because
-  `ingest::reenrich_item` set progress per *source*). Either the owner is the only
-  caller, or nesting becomes explicit (`job.scope(i, n)` → a sub-view the UI can
-  render as `item 12/85 · source 1/3`).
+  `ingest::reenrich_item` set progress per *source*). The job's owner is the only
+  caller of `set_progress`; anything working *inside* the current item takes
+  `job.child()`, which writes `sub_done`/`sub_total`/`sub_current` instead and
+  shares the cancel flag. The owner's next `set_progress` clears the nested detail
+  (it belonged to the previous item), and a nested `set_note` is ignored so a
+  worker cannot rewrite the job's summary line.
 - **Thumbnails**: always through `goon_core::media::put_thumbnail` (hash,
   dedup, size cap in one place).
 - **Probe the site, then write the parser.** Every ingest bug so far came from
@@ -413,7 +425,7 @@ manually.
 
 ## 7. Release-ish notes for contributors
 
-- MIT licensed (PLAN D5).
+- MIT licensed (DESIGN D5).
 - Keep `cargo test --workspace` green and `npm run build` warning-free
   (svelte a11y warnings count).
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).

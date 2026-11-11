@@ -4,12 +4,13 @@ A local-first, open source tracker + manager for adult games and imageboard cont
 Browse freely, clip anything, keep one organized flow across sites — encrypted at rest,
 nukeable in one action, zero cloud, zero telemetry.
 
-**Status:** M0–M3 shipped, M4 backlog open, M5 hardening underway — the
-[project board](https://github.com/MoonerGan/TheGoonFlow/projects) and
-[PLAN.md §13](PLAN.md) carry the live state. Everything below already works.
+**Status:** M0–M5 shipped and in daily use; what lands next lives on the
+[project board](https://github.com/MoonerGan/TheGoonFlow/projects) with the
+manual checks in [docs/TESTING.md](docs/TESTING.md). Everything below already works.
 
 - **Users:** start at [docs/USER-GUIDE.md](docs/USER-GUIDE.md)
 - **Developers:** see [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+- **Why it is built this way:** [docs/DESIGN.md](docs/DESIGN.md) — decisions D1–D21
 
 ## What it does today
 
@@ -65,4 +66,4 @@ No telemetry, no cloud calls, works fully offline. Metadata and links you choose
 store stay on your disk, encrypted. You are responsible for what you download and for
 your local laws; this tool stores what you tell it and nothing else.
 
-MIT licensed — see [PLAN.md](PLAN.md) §2 (D5) for the rationale.
+MIT licensed — see [docs/DESIGN.md](docs/DESIGN.md) §2 (D5) for the rationale.
