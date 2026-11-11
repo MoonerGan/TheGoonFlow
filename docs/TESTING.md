@@ -120,6 +120,22 @@ the board's *In review* column is the current list.
     the same window returns and Task Manager still shows one GoonFlow; close it with
     the X and confirm the process is gone; if another program owns `Ctrl+Alt+L`, the
     top bar shows the red *panic key NOT armed* pill and says why.
+16. Item dialog (#43 #45): open a game → it opens read-only with collapsed sections,
+    counts in the headers; *Edit* turns fields into inputs, changing Notes then *Save*
+    returns to view mode showing what the vault holds; leaving with unsaved edits asks
+    first; in a 560 px window nothing scrolls sideways and Save stays reachable.
+17. Media memory (#44): hold `→` through a hundred images and watch the GoonFlow
+    working set in Task Manager - it should plateau near 200 MB, not climb; press the
+    panic key mid-load, tap again, re-unlock → the viewer refetches and shows nothing
+    from the previous vault session.
+18. f95 and e-hentai art (#46 #50): with the f95 cookie set under *Sources*, *Re-fetch
+    metadata* on a thread stores the post-#1 cover and the note names the attachment
+    count (and says so if the cover is AVIF and cannot be thumbnailed); an
+    `e-hentai.org/s/...` link still finds its gallery; a gated page says *members only*
+    instead of "carried nothing new".
+19. Batch counters (#47 #49): start an extract or a batch re-fetch and watch the job
+    row - `done` climbs while files appear, and the *Possible dupes* list holds no
+    `mmnz-game` pairs.
 
 ## 4. House rules that prevent whole classes of damage
 
