@@ -303,6 +303,7 @@ pub async fn import_bookmarks(
             };
             let ctx = ingest::FetchCtx {
                 cookie: cookie.as_deref(),
+                core: Some(state),
             };
             let meta = match ingest::fetch_meta(&client, &p.reference, &p.url, &ctx).await {
                 Ok(m) => m,

@@ -426,6 +426,23 @@ pub struct Meta {
 #[derive(Default)]
 pub struct FetchCtx<'a> {
     pub cookie: Option<&'a str>,
+    /// #38: the running app, so a fetch that comes back showing the site's login
+    /// wall can mark the cookie we just sent as stale. `None` for the live probe
+    /// tests, which have no vault.
+    pub core: Option<&'a Core>,
+}
+
+/// A logged-in fetch was answered by the site's login wall: the cookie in the
+/// vault is stale, and that is worth recording instead of leaving the user to
+/// deduce it from a string in an item's note.
+///
+/// Never call this while holding the inner lock (it takes the lock itself).
+pub fn mark_cookie_gate(core: Option<&Core>, site: &str) {
+    let Some(core) = core else { return };
+    let mut inner = core.inner.lock().unwrap();
+    if let Some(o) = inner.opened.as_mut() {
+        let _ = crate::cookies::note_gate(&o.conn, site, &crate::now_epoch());
+    }
 }
 
 async fn get_text(
@@ -558,7 +575,7 @@ async fn fetch_meta_with(
         Mode::Ehentai => eh_gallery(client, url, ctx.cookie).await,
         Mode::DlSite => dl_product(client, url).await,
         Mode::Offsite => offsite_product(client, url).await,
-        Mode::F95 => f95_thread(client, url, ctx.cookie, want_images).await,
+        Mode::F95 => f95_thread(client, url, ctx, want_images).await,
         Mode::DirectMedia => direct_media(client, url, Some(&s.site)).await,
         Mode::LocalFile => local_file(url),
     }
@@ -1029,10 +1046,10 @@ pub fn parse_f95_thread(html: &str) -> (Option<String>, Vec<String>) {
 async fn f95_thread(
     client: &reqwest::Client,
     url: &str,
-    cookie: Option<&str>,
+    ctx: &FetchCtx<'_>,
     want_images: bool,
 ) -> Result<Meta, String> {
-    let html = get_text(client, url, "https://f95zone.to", cookie).await?;
+    let html = get_text(client, url, "https://f95zone.to", ctx.cookie).await?;
     let (raw_title, tags) = parse_f95_thread(&html);
     let (title, version) = match raw_title {
         Some(t) => {
@@ -1053,8 +1070,14 @@ async fn f95_thread(
     if !want_images {
         return Ok(m);
     }
-    let images = match f95_art(&html, cookie, &found) {
+    let images = match f95_art(&html, ctx.cookie, &found) {
         F95Art::NeedsLogin => {
+            // #38: we sent a cookie and f95 still showed the wall, so that cookie
+            // is dead. Say so where the user can see it (Sources), not only in
+            // this item's note.
+            if ctx.cookie.is_some() {
+                mark_cookie_gate(ctx.core, "f95");
+            }
             m.note = Some(
                 "f95 answered, but this page shows its art to members only — save your f95 \
                  cookie under Sources and re-fetch this item to pull the images"
@@ -1077,7 +1100,7 @@ async fn f95_thread(
     // links, and the note says that out loud.
     let mut why = String::new();
     for cand in images.iter().take(3) {
-        let bytes = match get_bytes(client, cand, "https://f95zone.to", cookie).await {
+        let bytes = match get_bytes(client, cand, "https://f95zone.to", ctx.cookie).await {
             Ok(b) => b,
             Err(e) => {
                 why = e;
@@ -1421,6 +1444,7 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     };
     let ctx = FetchCtx {
         cookie: cookie.as_deref(),
+        core: Some(state),
     };
     let mut meta = match fetch_meta(&client, &s, &url, &ctx).await {
         Ok(m) => m,
@@ -1603,6 +1627,7 @@ pub async fn check_updates(state: &Core, job: &JobHandle) -> Result<UpdateReport
         };
         let ctx = FetchCtx {
             cookie: cookie.as_deref(),
+            core: Some(state),
         };
         match fetch_meta_with(&client, &s, &t.url, &ctx, false).await {
             Ok(m) => {
@@ -1785,6 +1810,7 @@ pub async fn reenrich_item(
         };
         let ctx = FetchCtx {
             cookie: cookie.as_deref(),
+            core: Some(state),
         };
         let meta = match fetch_meta(&client, &cls, url, &ctx).await {
             Ok(m) => m,
@@ -2716,9 +2742,17 @@ mod tests {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .unwrap();
-        let meta = f95_thread(&client, url, Some(cookie), true)
-            .await
-            .expect("f95 thread with a cookie");
+        let meta = f95_thread(
+            &client,
+            url,
+            &FetchCtx {
+                cookie: Some(cookie),
+                core: None,
+            },
+            true,
+        )
+        .await
+        .expect("f95 thread with a cookie");
         println!("title   = {:?}", meta.title);
         println!("version = {:?}", meta.version);
         println!("tags    = {}", meta.tags.len());
@@ -2733,17 +2767,25 @@ mod tests {
             "a logged-in f95 thread must expose lazy attachment images"
         );
         // the same page as a guest, to show what the cookie is worth
-        let guest = f95_thread(&client, url, None, true)
-            .await
-            .unwrap_or_else(|e| Meta {
-                title: None,
-                store_bytes: None,
-                thumb_bytes: None,
-                images: Vec::new(),
-                tags: Vec::new(),
-                version: None,
-                note: Some(e),
-            });
+        let guest = f95_thread(
+            &client,
+            url,
+            &FetchCtx {
+                cookie: None,
+                core: None,
+            },
+            true,
+        )
+        .await
+        .unwrap_or_else(|e| Meta {
+            title: None,
+            store_bytes: None,
+            thumb_bytes: None,
+            images: Vec::new(),
+            tags: Vec::new(),
+            version: None,
+            note: Some(e),
+        });
         println!(
             "guest   = images {}, note {:?}",
             guest.images.len(),

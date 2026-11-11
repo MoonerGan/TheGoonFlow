@@ -653,6 +653,21 @@ textarea:focus {
   min-width: 0;
 }
 
+.cookie-state {
+  margin: 0.1rem 0 0.55rem;
+  padding-left: 0.8rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.cookie-state.good {
+  color: var(--accent);
+}
+
+.cookie-state.bad {
+  color: var(--danger);
+}
+
 .proxy-input {
   flex: 1;
   min-width: 0;

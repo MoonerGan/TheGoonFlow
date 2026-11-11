@@ -17,8 +17,10 @@
     setProxy,
     setScrubOnLock,
     setSiteSetting,
+    checkSiteCookie,
     siteStats,
     type CompanionStatus,
+    type CookieVerdict,
     type PanicInfo,
     type ChromeInfo,
     type SiteCount,
@@ -29,6 +31,10 @@
   let siteInfos = $state<SiteInfo[]>([]);
   let siteSettings = $state<Record<string, SiteSetting>>({});
   let cookieDraft = $state<Record<string, string>>({});
+  // #38: the cookie answer belongs next to the box it belongs to, per site, and
+  // a check costs one page fetch so the button must say when it is busy.
+  let cookieVerdict = $state<Record<string, CookieVerdict>>({});
+  let checking = $state<Record<string, boolean>>({});
   let counts = $state<SiteCount[]>([]);
   let note = $state<string | null>(null);
 
@@ -206,13 +212,55 @@
   async function saveSite(site: string, patch: { enabled?: boolean; rateMs?: number; cookie?: string }) {
     note = null;
     try {
-      await setSiteSetting(site, patch.enabled, patch.cookie, patch.rateMs);
+      const verdict = await setSiteSetting(site, patch.enabled, patch.cookie, patch.rateMs);
       const rows = await getSiteSettings();
       siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
       cookieDraft[site] = "";
+      if (verdict) cookieVerdict[site] = verdict;
     } catch (e) {
+      // #38: the app now refuses a paste that cannot be a session, and says why
+      // ("not a session cookie: missing xf_session") instead of storing it and
+      // failing later in a note about some other item.
       note = `could not save ${site}: ${e}`;
     }
+  }
+
+  /** #38: one page fetch against the site, on the polite lane. */
+  async function checkCookie(site: string) {
+    if (checking[site]) return;
+    checking[site] = true;
+    note = null;
+    try {
+      cookieVerdict[site] = await checkSiteCookie(site);
+      const rows = await getSiteSettings();
+      siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
+    } catch (e) {
+      note = `could not check ${site}: ${e}`;
+    } finally {
+      checking[site] = false;
+    }
+  }
+
+  /** The line under a cookie box. "never checked" must read as unknown, never
+   * as broken, and a stale cookie must read as stale. */
+  function cookieLine(s: SiteInfo): { text: string; cls: string } {
+    if (checking[s.site]) return { text: "asking the site once…", cls: "" };
+    const fresh = cookieVerdict[s.site];
+    if (fresh) return { text: fresh.note, cls: fresh.ok ? "good" : "bad" };
+    const cur = siteSettings[s.site];
+    if (!cur?.cookieSet)
+      return { text: "no cookie saved — this site shows its art to logged-in members only", cls: "" };
+    const when = cur.cookieCheckedAt
+      ? new Date(Number(cur.cookieCheckedAt) * 1000).toLocaleString()
+      : "";
+    if (cur.cookieOk === true)
+      return { text: `the site accepted this cookie${when ? ` · ${when}` : ""}`, cls: "good" };
+    if (cur.cookieOk === false)
+      return {
+        text: `the site refused this cookie${when ? ` · ${when}` : ""} — re-copy it from a logged-in window`,
+        cls: "bad",
+      };
+    return { text: "cookie saved — never checked against the site", cls: "" };
   }
 </script>
 
@@ -380,15 +428,26 @@
         />
         <span class="hint">ms between hits</span>
       </div>
-      <div class="site-cookie">
-        <input
-          type="text"
-          placeholder={cur?.cookieSet ? "cookie saved — paste to replace" : "cookie (optional)"}
-          bind:value={cookieDraft[s.site]}
-          onkeydown={(e) => e.key === "Enter" && cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}
-        />
-        <button onclick={() => cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}>Set</button>
-      </div>
+      {#if s.needsCookie}
+        <div class="site-cookie">
+          <input
+            type="text"
+            placeholder={cur?.cookieSet ? "cookie saved — paste to replace" : "cookie (optional)"}
+            bind:value={cookieDraft[s.site]}
+            onkeydown={(e) => e.key === "Enter" && cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}
+          />
+          <button onclick={() => cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}>Set</button>
+          <button
+            class="ghost"
+            disabled={!cur?.cookieSet || checking[s.site]}
+            title="one page fetch, same polite delay as every other hit on this site"
+            onclick={() => checkCookie(s.site)}
+          >
+            {checking[s.site] ? "Checking…" : "Check"}
+          </button>
+        </div>
+        <p class="cookie-state {cookieLine(s).cls}">{cookieLine(s).text}</p>
+      {/if}
     </div>
   {/each}
 {/snippet}
@@ -452,8 +511,8 @@
       header.</li>
   </ol>
   <p class="hint">
-    <strong>Only f95, E-hentai and Exhentai need one.</strong> DLsite and every imageboard work without it, so
-    leave those boxes empty.
+    <strong>Only f95, E-hentai and Exhentai need one.</strong> DLsite and every imageboard work without it, so they
+    get no cookie box at all — a credential nobody asked for is just something to explain later.
   </p>
   <p class="hint">
     How to tell the paste is real: an <strong>f95</strong> cookie must contain <code>xf_session</code> and
@@ -464,8 +523,18 @@
     f95 link gives you a title and nothing else.
   </p>
   <p class="hint">
-    The cookie is just a saved copy of what your browser already sends — the app never reads your browser's own
-    cookie store. If a fetch starts failing after you log out or the site rotates the session, re-copy it; f95 says
-    so out loud (<em>"f95 wants a login…"</em>) instead of quietly importing nothing.
+    You no longer have to eyeball that: the app checks the paste before storing it and refuses one that cannot be a
+    session, naming the key that is missing. Then press <em>Check</em> and it asks the site once, on the same polite
+    lane as every other request, and reports whether the site recognised the session. A clip that later hits the
+    login wall marks that cookie stale here, so a dead cookie is something the app knows instead of something you
+    deduce from failed clips.
+  </p>
+  <p class="hint">
+    The cookie is just a saved copy of what your browser already sends, and the app never goes looking through your
+    browser's cookie store on its own. The optional browser extension (under <em>Browser pairing</em> below) can hand
+    over the cookie for the page you are looking at — one deliberate click, straight to 127.0.0.1, into the same
+    encrypted vault. If a fetch starts failing after you log out or the site rotates the session, re-copy it; f95 says
+    so out loud (<em>"f95 answered, but this page shows its art to members only…"</em>) instead of quietly importing
+    nothing.
   </p>
 </details>

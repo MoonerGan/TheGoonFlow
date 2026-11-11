@@ -175,6 +175,8 @@ export type SiteInfo = {
   kind: string;
   mirror: boolean;
   defaultRateMs: number;
+  /** #38: f95, e-hentai and exhentai ask for a login; nothing else does. */
+  needsCookie: boolean;
 };
 
 export type SiteSetting = {
@@ -182,6 +184,23 @@ export type SiteSetting = {
   enabled: boolean;
   cookieSet: boolean;
   rateMs: number;
+  /** #38: what the last cookie check said. null = never checked, which the UI
+   * must show as unknown rather than as a failure. */
+  cookieOk: boolean | null;
+  cookieCheckedAt: string | null;
+  /** Whether this site asks for a login at all (f95, e-hentai, exhentai). */
+  needsCookie: boolean;
+};
+
+/** #38: one named yes/no about a pasted cookie, plus the overall verdict. */
+export type CookieCheck = { name: string; ok: boolean };
+export type CookieVerdict = {
+  site: string;
+  ok: boolean;
+  checks: CookieCheck[];
+  /** null = the site was not asked (the paste was refused first). */
+  live: boolean | null;
+  note: string;
 };
 
 export type UpdateRow = {
@@ -301,12 +320,15 @@ export const setSiteSetting = (
   cookie?: string,
   rateMs?: number,
 ) =>
-  invoke<void>("set_site_setting", {
+  invoke<CookieVerdict | null>("set_site_setting", {
     site,
     enabled: enabled ?? null,
     cookie: cookie ?? null,
     rateMs: rateMs ?? null,
   });
+/** #38: re-check the cookie already in the vault (one page fetch, polite lane). */
+export const checkSiteCookie = (site: string) =>
+  invoke<CookieVerdict>("check_site_cookie", { site });
 export const checkUpdates = () => invoke<UpdateReport>("check_updates");
 export const listUpdates = (limit = 100) => invoke<UpdateRow[]>("list_updates", { limit });
 export const pairingSuggestions = (kind?: "game" | "media") =>

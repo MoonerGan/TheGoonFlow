@@ -37,7 +37,12 @@ pub const FILE_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
 /// Examples: `http://127.0.0.1:7890`, `socks5://127.0.0.1:9150` (Tor Browser).
 /// Honest UA: use for APIs, metadata pages and search.
 pub fn client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, String> {
-    build_client(state, timeout_secs, crate::ingest::UA)
+    build_client(
+        state,
+        timeout_secs,
+        crate::ingest::UA,
+        reqwest::redirect::Policy::default(),
+    )
 }
 
 /// Same proxy/timeout policy as [`client_for`], browser UA (#50): use for image
@@ -45,10 +50,33 @@ pub fn client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, St
 /// `attachments.f95zone.to`, `img.dlsite.jp`, e-hentai thumbs). Never use it for
 /// a site's API or search endpoint.
 pub fn file_client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, String> {
-    build_client(state, timeout_secs, FILE_UA)
+    build_client(
+        state,
+        timeout_secs,
+        FILE_UA,
+        reqwest::redirect::Policy::default(),
+    )
 }
 
-fn build_client(state: &Core, timeout_secs: u64, ua: &str) -> Result<reqwest::Client, String> {
+/// #38: the cookie probe client. Page identity (honest UA, it is a page fetch)
+/// but **redirects are not followed**, because for Exhentai the redirect to the
+/// forums login hop *is* the answer: following it hides the fact that the vault's
+/// cookie is not being accepted.
+pub fn probe_client_for(state: &Core, timeout_secs: u64) -> Result<reqwest::Client, String> {
+    build_client(
+        state,
+        timeout_secs,
+        crate::ingest::UA,
+        reqwest::redirect::Policy::none(),
+    )
+}
+
+fn build_client(
+    state: &Core,
+    timeout_secs: u64,
+    ua: &str,
+    redirect: reqwest::redirect::Policy,
+) -> Result<reqwest::Client, String> {
     let proxy = {
         let inner = state.inner.lock().unwrap();
         match inner.opened.as_ref() {
@@ -58,7 +86,8 @@ fn build_client(state: &Core, timeout_secs: u64, ua: &str) -> Result<reqwest::Cl
     };
     let mut b = reqwest::Client::builder()
         .user_agent(ua)
-        .timeout(Duration::from_secs(timeout_secs));
+        .timeout(Duration::from_secs(timeout_secs))
+        .redirect(redirect);
     if let Some(p) = proxy
         .map(|p| p.trim().to_string())
         .filter(|p| !p.is_empty())

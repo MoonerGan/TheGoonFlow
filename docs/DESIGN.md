@@ -229,8 +229,15 @@ Build order note: extension codegen depends on site-packs (§6).
    warnings included.
 4. ~~f95 account cookie storage~~ → decided in M2: cookies live in `site_settings`
    **inside the encrypted vault** (so a nuke takes them with it), pasted by the
-   user under *Sources*. Still open: how the cookie gets *in* without a
-   copy/paste ritual (#38) and what the app says when it goes stale.
+   user under *Sources*. #38 closed the other half: the paste is checked **before**
+   it is stored (`cookies.rs` wants `xf_session` on f95 and the `ipb_member_id` +
+   `ipb_pass_hash` pair on e-hentai / Exhentai, and refuses a site that never asked
+   for a cookie), one page fetch answers whether the site recognises the session,
+   the verdict is recorded in `meta` (`cookie_ok:<site>`, `cookie_checked_at:<site>`)
+   so "never checked" stays visibly unknown rather than green, and any later fetch
+   that hits the login wall marks the cookie stale. The browser extension can hand
+   over that browser's own sign-in cookie, by one deliberate click; the app never
+   reads a cookie store by itself.
 5. Stack tutorial (Tauri/Rust/Svelte) for the user — still owed; `docs/DEVELOPMENT.md`
    is the closest thing to it today.
 

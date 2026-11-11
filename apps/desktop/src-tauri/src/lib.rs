@@ -1,5 +1,6 @@
 mod bookmarks;
 mod companion;
+mod cookies;
 mod extract;
 mod http;
 mod importer;
@@ -1069,6 +1070,10 @@ struct SiteInfo {
     kind: &'static str,
     mirror: bool,
     default_rate_ms: i64,
+    /// #38: does this site ask for a login at all. The UI hides the cookie box
+    /// where this is false, so a site that never asked for one never collects a
+    /// credential nobody needed.
+    needs_cookie: bool,
 }
 
 #[tauri::command]
@@ -1080,42 +1085,119 @@ fn known_sites() -> Vec<SiteInfo> {
             kind,
             mirror: ingest::is_mirror_site(site),
             default_rate_ms: ingest::default_rate_ms(site),
+            needs_cookie: cookies::needs_cookie(site),
         })
         .collect()
 }
 
-#[tauri::command]
-fn get_site_settings(
-    state: tauri::State<'_, AppState>,
-) -> Result<Vec<goon_core::db::SiteSetting>, String> {
-    let inner = state.inner.lock().unwrap();
-    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::get_site_settings(&opened.conn).map_err(err)
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SiteRow {
+    site: String,
+    enabled: bool,
+    cookie_set: bool,
+    rate_ms: i64,
+    /// #38: what the last cookie check said, or None when the saved cookie has
+    /// never been checked. Unknown must not be drawn as a failure.
+    cookie_ok: Option<bool>,
+    cookie_checked_at: Option<String>,
+    /// Whether this site asks for a login at all, so the UI does not offer a
+    /// cookie box for a site that would only store junk.
+    needs_cookie: bool,
 }
 
 #[tauri::command]
-fn set_site_setting(
+fn get_site_settings(state: tauri::State<'_, AppState>) -> Result<Vec<SiteRow>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let rows = goon_core::db::get_site_settings(&opened.conn).map_err(err)?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let verdict = cookies::recorded(&opened.conn, &r.site);
+            SiteRow {
+                site: r.site.clone(),
+                enabled: r.enabled,
+                cookie_set: r.cookie_set,
+                rate_ms: r.rate_ms,
+                cookie_ok: verdict.as_ref().map(|(ok, _)| *ok),
+                cookie_checked_at: verdict.and_then(|(_, at)| if at.is_empty() { None } else { Some(at) }),
+                needs_cookie: cookies::needs_cookie(&r.site),
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+async fn set_site_setting(
     state: tauri::State<'_, AppState>,
     site: String,
     enabled: Option<bool>,
     cookie: Option<String>,
     rate_ms: Option<i64>,
-) -> Result<(), String> {
-    let site = site.trim().to_lowercase();
+) -> Result<Option<cookies::Verdict>, String> {
+    let site = cookies::canonical_site(&site);
     if site.is_empty() {
         return Err("no site".into());
     }
-    let mut inner = state.inner.lock().unwrap();
-    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
-    goon_core::db::set_site_setting(
-        conn,
-        &site,
-        enabled,
-        cookie.as_deref().map(str::trim),
-        rate_ms.map(|r| r.clamp(0, 600_000)),
-        ingest::default_rate_ms(&site),
-    )
-    .map_err(err)
+    // #38: validate the paste BEFORE it is stored. A paste that cannot be a
+    // session used to sit in the vault until some later fetch failed, described
+    // in a note about an unrelated item.
+    let incoming = cookie.as_deref().map(str::trim);
+    if let Some(c) = incoming.filter(|c| !c.is_empty()) {
+        if !cookies::needs_cookie(&site) {
+            return Err(format!("{site} does not ask for a login cookie"));
+        }
+        let v = cookies::structural(&site, c);
+        if !v.ok {
+            return Err(v.note);
+        }
+    }
+    let probe_with = {
+        let mut inner = state.inner.lock().unwrap();
+        let conn = &mut inner.opened.as_mut().ok_or("vault is locked")?.conn;
+        goon_core::db::set_site_setting(
+            conn,
+            &site,
+            enabled,
+            incoming,
+            rate_ms.map(|r| r.clamp(0, 600_000)),
+            ingest::default_rate_ms(&site),
+        )
+        .map_err(err)?;
+        // A saved verdict describes the cookie that was just replaced.
+        if incoming.is_some() {
+            let _ = cookies::forget(conn, &site);
+        }
+        incoming
+            .filter(|c| !c.is_empty())
+            .and_then(|_| goon_core::db::site_cookie(conn, &site))
+    };
+    let Some(saved) = probe_with else {
+        return Ok(None);
+    };
+    Ok(Some(cookies::check(&state.core, &site, &saved).await))
+}
+
+/// #38: re-check the cookie that is already in the vault.
+#[tauri::command]
+async fn check_site_cookie(
+    state: tauri::State<'_, AppState>,
+    site: String,
+) -> Result<cookies::Verdict, String> {
+    let site = cookies::canonical_site(&site);
+    if !cookies::needs_cookie(&site) {
+        return Err(format!("{site} does not ask for a login cookie"));
+    }
+    let saved = {
+        let inner = state.inner.lock().unwrap();
+        let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+        goon_core::db::site_cookie(&opened.conn, &site)
+    };
+    let saved = saved
+        .filter(|c| !c.is_empty())
+        .ok_or(format!("no cookie saved for {site}"))?;
+    Ok(cookies::check(&state.core, &site, &saved).await)
 }
 
 // ---------- update feed (M2) ----------
@@ -2020,6 +2102,7 @@ pub fn run() {
             known_sites,
             get_site_settings,
             set_site_setting,
+            check_site_cookie,
             check_updates,
             list_updates,
             pairing_suggestions,

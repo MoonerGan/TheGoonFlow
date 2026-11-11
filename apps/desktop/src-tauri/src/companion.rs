@@ -74,6 +74,7 @@ pub fn router(locked: Arc<AtomicBool>, core: Core, info: Arc<CompanionInfo>) -> 
     let protected = Router::new()
         .route("/api/ping", get(ping))
         .route("/api/clip", post(clip))
+        .route("/api/cookie", get(cookie_state).post(save_cookie))
         .route_layer(middleware::from_fn_with_state(
             shared.clone(),
             require_token,
@@ -152,6 +153,151 @@ async fn clip(
     }
 }
 
+#[derive(Deserialize)]
+struct CookieBody {
+    site: String,
+    /// Empty means "do not store anything, just re-check the cookie already in
+    /// the vault" — that is what the extension's *Check* button sends, and it
+    /// keeps the contract to one route.
+    #[serde(default)]
+    cookie: String,
+}
+
+/// #38: the browser extension's cookie hand-off. The same code path as the
+/// in-app paste (`cookies::check`), so a handed-over cookie and a typed-in one
+/// get the same verdict and the same record. The cookie is never echoed back in
+/// any response, and a site that does not ask for one is refused.
+///
+/// `{"site":"f95","cookie":"…"}` stores then probes; `{"site":"f95"}` (empty
+/// cookie) probes what the vault already holds and stores nothing.
+async fn save_cookie(
+    State(shared): State<Shared>,
+    body: Result<Json<CookieBody>, JsonRejection>,
+) -> Response {
+    let Json(CookieBody { site, cookie }) = match body {
+        Ok(b) => b,
+        Err(e) => return (
+            StatusCode::BAD_REQUEST,
+            Json(
+                json!({ "error": format!("expected {{\"site\": \"…\", \"cookie\": \"…\"}}: {e}") }),
+            ),
+        )
+            .into_response(),
+    };
+    let site = crate::cookies::canonical_site(&site);
+    let cookie = cookie.trim().to_string();
+    if !crate::cookies::needs_cookie(&site) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": format!("{site} does not ask for a login cookie") })),
+        )
+            .into_response();
+    }
+    if shared.locked.load(Ordering::Relaxed) {
+        return (
+            StatusCode::LOCKED,
+            Json(json!({ "error": "vault is locked" })),
+        )
+            .into_response();
+    }
+    if cookie.is_empty() {
+        // No cookie in the body means "re-check what the vault already holds" —
+        // the extension's Check button. It never stores, and it never returns
+        // the cookie, only the verdict.
+        let saved = {
+            let inner = shared.core.inner.lock().unwrap();
+            match inner.opened.as_ref() {
+                Some(o) => goon_core::db::site_cookie(&o.conn, &site),
+                None => None,
+            }
+        };
+        let Some(saved) = saved.filter(|c| !c.is_empty()) else {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": format!("no cookie saved for {site}") })),
+            )
+                .into_response();
+        };
+        let verdict = crate::cookies::check(&shared.core, &site, &saved).await;
+        return Json(json!({
+            "saved": false,
+            "recheck": true,
+            "ok": verdict.ok,
+            "verdict": verdict,
+        }))
+        .into_response();
+    }
+    let verdict = crate::cookies::structural(&site, &cookie);
+    if !verdict.ok {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(json!({ "saved": false, "ok": false, "verdict": verdict })),
+        )
+            .into_response();
+    }
+    // Store before probing: the paste is only useful inside the encrypted vault,
+    // and a probe that fails because a site is slow must not lose it.
+    let stored = {
+        let mut inner = shared.core.inner.lock().unwrap();
+        match inner.opened.as_mut() {
+            None => Err("vault is locked".to_string()),
+            Some(o) => goon_core::db::set_site_setting(
+                &o.conn,
+                &site,
+                None,
+                Some(&cookie),
+                None,
+                ingest::default_rate_ms(&site),
+            )
+            .map_err(|e| e.to_string())
+            .and_then(|_| crate::cookies::forget(&o.conn, &site).map_err(|e| e.to_string())),
+        }
+    };
+    if let Err(e) = stored {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": e })),
+        )
+            .into_response();
+    }
+    let verdict = crate::cookies::check(&shared.core, &site, &cookie).await;
+    Json(json!({ "saved": true, "ok": verdict.ok, "verdict": verdict })).into_response()
+}
+
+/// #38: what the app knows about a saved cookie, without ever returning it.
+async fn cookie_state(
+    State(shared): State<Shared>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let Some(site) = params
+        .get("site")
+        .map(|s| crate::cookies::canonical_site(s))
+    else {
+        return (StatusCode::BAD_REQUEST, Json(json!({ "error": "site=…" }))).into_response();
+    };
+    let inner = shared.core.inner.lock().unwrap();
+    let opened = match inner.opened.as_ref() {
+        Some(o) => o,
+        None => {
+            return (
+                StatusCode::LOCKED,
+                Json(json!({ "error": "vault is locked" })),
+            )
+                .into_response()
+        }
+    };
+    let saved = goon_core::db::site_cookie(&opened.conn, &site).unwrap_or_default();
+    let verdict = crate::cookies::recorded(&opened.conn, &site);
+    Json(json!({
+        "site": site,
+        "set": !saved.is_empty(),
+        // None must stay null: "never checked" is not "broken"
+        "ok": verdict.as_ref().map(|(ok, _)| *ok),
+        "checkedAt": verdict.as_ref().map(|(_, at)| at.clone()).filter(|at| !at.is_empty()),
+    }))
+    .into_response()
+}
+
 async fn require_token(State(shared): State<Shared>, req: Request, next: Next) -> Response {
     let wanted = format!("Bearer {}", shared.info.token);
     let authorized = req
@@ -175,7 +321,13 @@ mod tests {
     use crate::{Inner, Jobs};
 
     fn temp_core(tag: &str, unlocked: bool) -> (Core, std::path::PathBuf) {
-        let tmp = std::env::temp_dir().join(format!("goonflow-cp-{tag}-{}", std::process::id()));
+        // Tests run in parallel inside one process, so the pid alone does not keep
+        // two vaults apart: #38 hit exactly that, one test deleting the directory
+        // another was still using ("file is not a database").
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp =
+            std::env::temp_dir().join(format!("goonflow-cp-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
         let vault = tmp.join("vault");
@@ -315,5 +467,97 @@ mod tests {
         let v: serde_json::Value = r.json().await.unwrap();
         assert_eq!(v["report"]["created"], false);
         assert_eq!(v["report"]["note"], "already in the flow");
+    }
+
+    #[tokio::test]
+    async fn cookie_hand_off_refuses_junk_and_never_shows_the_cookie() {
+        let (client, info) = serve(false, true).await;
+        let base = format!("http://127.0.0.1:{}", info.port);
+        let auth = format!("Bearer {}", info.token);
+
+        // a site that never asks for a login is refused outright
+        let r = client
+            .post(format!("{base}/api/cookie"))
+            .header("Authorization", auth.clone())
+            .json(&json!({ "site": "dlsite", "cookie": "ipb_member_id=1" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert!(v["error"].as_str().unwrap().contains("does not ask"), "{v}");
+
+        // a paste that cannot be a session is rejected before any request is made
+        // to the site, and nothing is stored
+        let r = client
+            .post(format!("{base}/api/cookie"))
+            .header("Authorization", auth.clone())
+            .json(&json!({ "site": "f95", "cookie": "session=deadbeef" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = r.text().await.unwrap_or_default();
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["saved"], false);
+        assert_eq!(v["ok"], false);
+        assert!(
+            v["verdict"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("xf_session"),
+            "the note names what is missing: {v}"
+        );
+        assert!(
+            !body.contains("deadbeef"),
+            "the response must never echo the cookie back: {body}"
+        );
+
+        // the state route answers about the vault's cookie without returning it
+        let r = client
+            .get(format!("{base}/api/cookie?site=f95"))
+            .header("Authorization", auth.clone())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::OK);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert_eq!(v["set"], false, "the refused paste must not have stuck");
+        assert_eq!(v["ok"], serde_json::Value::Null, "never checked ≠ broken");
+
+        // an empty body asks the app to re-check what the vault holds, and this
+        // vault holds nothing: the paste above was refused, not stored
+        let r = client
+            .post(format!("{base}/api/cookie"))
+            .header("Authorization", auth.clone())
+            .json(&json!({ "site": "f95" }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = r.json().await.unwrap();
+        assert!(
+            v["error"].as_str().unwrap().contains("no cookie saved"),
+            "{v}"
+        );
+
+        // and it is still a protected route
+        let r = client
+            .get(format!("{base}/api/cookie?site=f95"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::UNAUTHORIZED);
+
+        // locked vault: unknown, not "no cookie stored"
+        let (client, info) = serve(true, false).await;
+        let base = format!("http://127.0.0.1:{}", info.port);
+        let r = client
+            .get(format!("{base}/api/cookie?site=f95"))
+            .header("Authorization", format!("Bearer {}", info.token))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(r.status(), StatusCode::LOCKED);
     }
 }

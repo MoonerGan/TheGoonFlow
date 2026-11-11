@@ -142,6 +142,14 @@ the board's *In review* column is the current list.
 19. Batch counters (#47 #49): start an extract or a batch re-fetch and watch the job
     row - `done` climbs while files appear, and the *Possible dupes* list holds no
     `mmnz-game` pairs.
+20. Cookie truth (#38): *Sources* has a cookie box only for f95, E-hentai and
+    Exhentai (no box anywhere else). Paste something with no `xf_session` → the app
+    refuses it, names the missing key, and the vault keeps the cookie it had. Paste
+    a live one → the line under the box says the site answered as a signed-in
+    member, with the time. Press **Check** after logging out in the browser → that
+    line goes red and says the site answered as a guest. Clip an f95 thread while
+    the cookie is dead → the item's note says *members only* and the Sources line
+    marks the cookie stale without being asked.
 
 ## 4. House rules that prevent whole classes of damage
 
