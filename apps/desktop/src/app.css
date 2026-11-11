@@ -426,6 +426,53 @@ button.link {
   white-space: nowrap;
 }
 
+/* #45: the editor is a three-part grid - header and footer stay put, only the
+   body scrolls. The old sticky action row painted itself over the fields, and
+   its four nowrap buttons were wider than the card, so the card scrolled
+   sideways. */
+.modal-editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(560px, calc(100vw - 2rem));
+  /* #32's cap still holds: never taller than the window, and nothing of the
+   * body escapes the card */
+  max-height: calc(100vh - 2rem);
+  overflow: hidden;
+  padding: 1.5rem 1.5rem 0;
+}
+
+.modal-editor .modal-head .sub {
+  margin-bottom: 0.5rem;
+}
+
+.modal-editor .modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding-right: 0.4rem;
+}
+
+.modal-editor .modal-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 1.25rem -1.5rem 0;
+  padding: 0.75rem 1.5rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--panel);
+}
+
+.modal-editor .modal-foot button {
+  white-space: nowrap;
+}
+
+/* the destructive action keeps its own corner even once the row wraps */
+.modal-editor .modal-foot .foot-danger {
+  margin-left: auto;
+}
+
 select {
   font: inherit;
   width: 100%;
@@ -874,6 +921,8 @@ textarea:focus {
 
 .viewer-stage {
   flex: 1;
+  /* #42: notes float over the picture instead of stealing space from it */
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -882,12 +931,34 @@ textarea:focus {
 }
 
 .viewer-stage img,
-.viewer-stage video {
+.viewer-stage video,
+.viewer-stage canvas {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
   transition: transform 0.08s ease-out;
   image-rendering: auto;
+}
+
+/* #44: the full-res frame is painted into this canvas by bitmaprenderer (the
+   decode happens off the main thread). It only joins the layout once a bitmap
+   has actually been transferred, so the stored thumbnail keeps holding the
+   space and the swap is progressive rather than a spinner. */
+.viewer-frame {
+  display: none;
+}
+
+.viewer-frame.shown {
+  display: block;
+}
+
+.viewer-stage .stage-note {
+  position: absolute;
+  left: 50%;
+  bottom: 1.25rem;
+  transform: translateX(-50%);
+  color: var(--muted);
+  font-size: 0.85rem;
 }
 
 .viewer-note {
@@ -913,6 +984,42 @@ textarea:focus {
   flex-wrap: wrap;
 }
 
+/* #42: fullscreen is the picture, all of it. The bar leaves the layout, floats
+   over the bottom edge, and slides away after 2 s without pointer or keys.
+   (Esc is untouched by any of this - the Fullscreen API keeps that key.) */
+.viewer.fullscreen {
+  background: #000;
+}
+
+.viewer.fullscreen .viewer-stage {
+  padding: 0;
+}
+
+.viewer.fullscreen .viewer-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--border);
+  background: linear-gradient(to top, rgba(4, 4, 4, 0.92), rgba(4, 4, 4, 0.45));
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+
+.viewer.fullscreen.chrome-down .viewer-bar {
+  opacity: 0;
+  transform: translateY(100%);
+  pointer-events: none;
+}
+
+.viewer.fullscreen .poster-note {
+  position: absolute;
+  left: 50%;
+  bottom: 1rem;
+  transform: translateX(-50%);
+  margin-top: 0;
+}
+
 .viewer-info {
   display: flex;
   flex-direction: column;
@@ -929,3 +1036,80 @@ button.active {
   border-color: var(--accent);
   color: var(--accent);
 }
+
+/* #43: the editor opens as a read-only view and its fields fold into sections.
+   Native details/summary carries the toggle, so all this styling needs is the
+   count: while a section is open its contents already state what is inside, so
+   the header stops repeating it. No script, and Escape is left for the dialog. */
+.ed-section {
+  border-top: 1px solid var(--border);
+  margin-top: 1.1rem;
+}
+
+.ed-section:first-child {
+  border-top: 0;
+  margin-top: 0;
+}
+
+.ed-section > summary {
+  cursor: pointer;
+  padding: 0.5rem 0;
+  font-weight: 700;
+  font-size: 0.9rem;
+  letter-spacing: 0.02em;
+}
+
+.ed-count,
+.ed-hint {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.ed-hint {
+  font-size: 0.78rem;
+}
+
+.ed-section[open] > summary .ed-count {
+  display: none;
+}
+
+.ed-body {
+  padding: 0.1rem 0 0.75rem;
+}
+
+/* facts in view mode: a muted key column, values free to wrap (#29 rules) */
+.fact-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.6rem;
+  margin: 0.3rem 0;
+}
+
+.fact-key {
+  color: var(--muted);
+  font-size: 0.8rem;
+  flex: none;
+  width: 7rem;
+}
+
+.fact-val {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
+.note-block {
+  /* notes are free text from importers: keep its line breaks, keep it readable */
+  white-space: pre-wrap;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+/* #43: an unsaved draft has to be visible, because leaving the form with one
+   open is the mistake this mode split exists to prevent */
+.dirty-flag {
+  margin: 0.25rem 0 0;
+  color: var(--accent);
+  font-size: 0.8rem;
+}
+

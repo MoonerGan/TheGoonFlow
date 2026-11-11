@@ -2,17 +2,35 @@
   // #21: full in-app viewer for media items. Clicking a media card opens this
   // instead of the editor (edit is one button away). Full-res image bytes come
   // straight from the encrypted vault — never from a re-download.
-  import { onMount } from "svelte";
-  import { getMediaView, type ItemSummary, type MediaView as MediaBlob } from "../lib/api";
+  // #42: fullscreen means the picture only. The bar floats over it, hides after
+  // 2 s without the pointer, and Esc still leaves fullscreen before it closes.
+  // #44: navigation is served from a bounded in-memory cache, a i-2..i+2 window
+  // is warmed in both directions, a jump drops the queued speculative reads,
+  // the stored thumbnail is the stand-in, and the full copy is decoded off the
+  // main thread (createImageBitmap -> bitmaprenderer) instead of a base64 <img>.
+  import { onDestroy, onMount } from "svelte";
+  import { type ItemSummary } from "../lib/api";
+  import {
+    cancelOutsideWindow,
+    hasMedia,
+    isCancelled,
+    loadMedia,
+    mediaCache,
+    PREFETCH_RADIUS,
+    type MediaEntry,
+  } from "../lib/mediacache.svelte";
 
   let {
     items,
     index,
+    thumbs = {},
     onClose,
     onEdit,
   }: {
     items: ItemSummary[];
     index: number;
+    /** the tile thumbnails, so the first frame is already in memory (#44) */
+    thumbs?: Record<string, string>;
     onClose: () => void;
     onEdit: (item: ItemSummary) => void;
   } = $props();
@@ -20,11 +38,13 @@
   // The viewer is mounted per click, so capturing the initial index is intended.
   // svelte-ignore state_referenced_locally
   let idx = $state(index);
-  let blob = $state<MediaBlob | null>(null);
+  // $state.raw: a 10-40 MB payload must not be walked by the deep proxy
+  let entry = $state.raw<MediaEntry | null>(null);
   let loading = $state(false);
   let err = $state<string | null>(null);
   let zoom = $state(1); // 1 = fit-to-window
   let slideshow = $state(false);
+  let frameReady = $state(false);
 
   const item = $derived(items[idx]);
 
@@ -33,25 +53,73 @@
   // picture" never re-triggers a fetch (that was the flicker), and the old
   // frame stays visible while the next one loads.
   const itemId = $derived(item?.id ?? null);
-  const nextId = $derived(items[(idx + 1) % items.length]?.id ?? null);
 
-  function load(id: string, prefetch: string | null) {
+  // #44: the card's stored thumbnail is already in memory, so it stands in for
+  // the full copy instead of a spinner, and is replaced when the real bytes land.
+  const poster = $derived(itemId ? thumbs[itemId] ?? null : null);
+
+  const isVideo = $derived(!!entry && entry.mime.startsWith("video/"));
+  // animated gifs stay on the plain <img> path: createImageBitmap decodes frame
+  // one only, and gif payloads are small enough for a data: url.
+  const isGif = $derived(!!entry && entry.mime === "image/gif");
+  const isStill = $derived(!!entry && !!entry.bytes && !isVideo && !isGif);
+  const elementSrc = $derived(entry?.raw ? `data:${entry.mime};base64,${entry.raw}` : null);
+  const isPoster = $derived(!!entry && entry.kind === "thumb" && entry.tooBig !== null);
+
+  // #44: bumped on every navigation. A payload that lands after the user moved
+  // on is dropped by this token; queued speculative reads are cancelled before
+  // they are issued at all (an invoke already on the wire cannot be aborted).
+  let nav = 0;
+
+  function openItem(id: string) {
+    const mine = ++nav;
     loading = true;
     err = null;
     zoom = 1;
-    getMediaView(id)
-      .then((b) => (blob = b))
-      .catch((e) => {
-        blob = null;
-        err = String(e);
+    loadMedia(id, { urgent: true })
+      .then((e) => {
+        if (mine !== nav) return;
+        entry = e;
       })
-      .finally(() => (loading = false));
-    // warm the next one so arrow-through-library feels instant
-    if (prefetch) void getMediaView(prefetch).catch(() => {});
+      .catch((x) => {
+        if (mine !== nav || isCancelled(x)) return;
+        entry = null;
+        err = String(x);
+      })
+      .finally(() => {
+        if (mine === nav) loading = false;
+      });
   }
 
   $effect(() => {
-    if (itemId) load(itemId, nextId);
+    if (itemId) openItem(itemId);
+  });
+
+  // #44: warm a window on both sides, so backwards is as instant as forwards.
+  const windowIds = $derived.by(() => {
+    const n = items.length;
+    if (n === 0) return [];
+    const ids: string[] = [];
+    for (let d = -PREFETCH_RADIUS; d <= PREFETCH_RADIUS; d += 1) {
+      if (d === 0) continue;
+      const at = (((idx + d) % n) + n) % n;
+      const id = items[at]?.id;
+      if (id && id !== itemId && !ids.includes(id)) ids.push(id);
+    }
+    return ids;
+  });
+
+  $effect(() => {
+    const current = itemId;
+    if (!current) return;
+    const wanted = windowIds;
+    // arrow spam / slideshow skip: anything queued outside the new window dies
+    // before it can cost a 40 MB read
+    cancelOutsideWindow(new Set([current, ...wanted]));
+    for (const id of wanted) {
+      if (hasMedia(id)) continue;
+      loadMedia(id).catch(() => {});
+    }
   });
 
   function move(d: number) {
@@ -60,8 +128,14 @@
   }
 
   function onkey(e: KeyboardEvent) {
+    if (full) showChrome();
     switch (e.key) {
       case "Escape":
+        // #35 + #42: the first Esc belongs to the Fullscreen API (WebView2
+        // leaves fullscreen before this handler sees the key); a second Esc —
+        // arriving with no fullscreenElement — closes the viewer. The chrome
+        // autohide below never touches Escape.
+        if (document.fullscreenElement) return;
         onClose();
         break;
       case "ArrowRight":
@@ -117,24 +191,149 @@
     return () => document.removeEventListener("fullscreenchange", h);
   });
 
-  const src = $derived(blob?.data ? `data:${blob.mime};base64,${blob.data}` : null);
-  const isVideo = $derived(!!blob && blob.mime.startsWith("video/"));
-  const isPoster = $derived(!!blob && blob.kind === "thumb" && !!blob.tooBig);
+  // #42: the bar is an overlay in fullscreen and hides itself again after two
+  // seconds of no pointer and no key. Any movement brings it back.
+  const CHROME_HIDE_MS = 2000;
+  let chromeUp = $state(true);
+  let barHover = $state(false);
+  let chromeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function hideChromeSoon() {
+    clearTimeout(chromeTimer);
+    chromeTimer = setTimeout(() => {
+      if (barHover) hideChromeSoon(); // pointer is on the bar: keep it usable
+      else chromeUp = false;
+    }, CHROME_HIDE_MS);
+  }
+
+  function showChrome() {
+    chromeUp = true;
+    hideChromeSoon();
+  }
+
+  $effect(() => {
+    if (!full) {
+      clearTimeout(chromeTimer);
+      chromeUp = true;
+      return;
+    }
+    showChrome();
+    return () => clearTimeout(chromeTimer);
+  });
+
+  // ---------- image frames (#44) ----------
+  let frame = $state<HTMLCanvasElement | null>(null);
+  let paintSeq = 0;
+  /** the canvas element that currently holds a transferred bitmap */
+  let painted: HTMLCanvasElement | null = null;
+
+  $effect(() => {
+    const current = entry;
+    const cv = frame;
+    if (!current || !cv || !isStill || !current.bytes) return;
+    const ctx = cv.getContext("bitmaprenderer");
+    if (!ctx) return; // no bitmaprenderer: the stand-in stays on screen
+    if (cv !== painted) frameReady = false; // fresh element: nothing on it yet
+    const mine = ++paintSeq;
+    // createImageBitmap wants a Blob (the standard source, and the decode runs
+    // off the main thread). The Blob is born and dies inside this call: it
+    // never gets an object URL, and the cache itself stays a plain Uint8Array.
+    const source = new Blob([current.bytes], { type: current.mime });
+    createImageBitmap(source)
+      .then((bmp) => {
+        if (mine !== paintSeq || frame !== cv) {
+          bmp.close(); // a newer navigation won while this was decoding
+          return;
+        }
+        cv.width = bmp.width;
+        cv.height = bmp.height;
+        ctx.transferFromImageBitmap(bmp);
+        painted = cv;
+        frameReady = true;
+      })
+      .catch(() => {
+        // decoder refused this image: keep the stand-in rather than a spinner
+      });
+  });
+
+  /** Lets go of whatever the canvas is showing (TS lib has no reset() on the
+   * bitmaprenderer context; a 0x0 backing store drops the frame). */
+  function dropFrame() {
+    paintSeq += 1;
+    if (frame) {
+      frame.width = 0;
+      frame.height = 0;
+    }
+    painted = null;
+    frameReady = false;
+  }
+
+  // #44 privacy: if the cache is wiped under this view (Lock, Nuke, panic-hidden
+  // window), the frame it holds goes with it. Asking again is correct either
+  // way: a locked vault answers "vault is locked", a merely minimised one just
+  // refills from the still-open vault.
+  let cacheEpoch = mediaCache.epoch;
+  $effect(() => {
+    if (mediaCache.epoch === cacheEpoch) return;
+    cacheEpoch = mediaCache.epoch;
+    dropFrame();
+    entry = null;
+    err = null;
+    if (itemId) openItem(itemId);
+  });
+
+  onDestroy(() => {
+    clearTimeout(chromeTimer);
+    dropFrame();
+    entry = null;
+  });
 </script>
 
 <svelte:window onkeydown={onkey} />
 
-<div class="viewer" class:fullscreen={full} bind:this={root} tabindex="-1" role="dialog" aria-label="media viewer">
+<div
+  class="viewer"
+  class:fullscreen={full}
+  class:chrome-down={full && !chromeUp}
+  bind:this={root}
+  tabindex="-1"
+  role="dialog"
+  aria-label="media viewer"
+  onpointermove={() => full && showChrome()}
+>
   <div class="viewer-stage">
-    {#if src && isVideo}
+    {#if isVideo && elementSrc}
       <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={src} controls loop autoplay></video>
-    {:else if src}
-      <img src={src} alt={item?.title ?? ""} style="transform: scale({zoom})" />
-    {:else if loading}
-      <div class="viewer-note">loading…</div>
+      <video src={elementSrc} controls loop autoplay></video>
+    {:else if isGif && elementSrc}
+      <img src={elementSrc} alt={item?.title ?? ""} style="transform: scale({zoom})" />
+    {:else if isStill}
+      {#if poster && !frameReady}
+        <img class="frame-poster" src={poster} alt={item?.title ?? ""} style="transform: scale({zoom})" />
+      {/if}
+      <canvas
+        class="viewer-frame"
+        class:shown={frameReady}
+        bind:this={frame}
+        style="transform: scale({zoom})"
+      ></canvas>
+      {#if loading}
+        <div class="viewer-note stage-note">loading…</div>
+      {/if}
     {:else if err}
       <div class="viewer-note">{err}</div>
+    {:else if poster}
+      <img class="frame-poster" src={poster} alt={item?.title ?? ""} style="transform: scale({zoom})" />
+      {#if loading}
+        <div class="viewer-note stage-note">loading…</div>
+      {:else if !entry || (!entry.bytes && !entry.raw)}
+        <div class="viewer-note poster-note">
+          nothing viewable is stored for this item — it is tracked by link.
+          (Open its editor to see the source, or use *Store copy in vault* for videos.)
+        </div>
+      {/if}
+    {:else if loading}
+      <div class="viewer-note">loading…</div>
     {:else}
       <div class="viewer-note">
         nothing viewable is stored for this item — it is tracked by link.
@@ -149,12 +348,22 @@
     {/if}
   </div>
 
-  <div class="viewer-bar">
+  <div
+    class="viewer-bar"
+    role="group"
+    aria-label="viewer controls"
+    onpointerenter={() => (barHover = true)}
+    onpointerleave={() => {
+      barHover = false;
+      if (full) hideChromeSoon();
+    }}
+  >
     <div class="viewer-info">
       <strong>{item?.title ?? ""}</strong>
       <span class="hint">
         {idx + 1}/{items.length}
-        {#if blob?.kind === "full"}· full-res in vault{:else if blob?.kind === "video"}· stored video{:else if blob}· preview only{/if}
+        {#if entry?.kind === "full"}· full-res in vault{:else if entry?.kind === "video"}· stored video{:else if entry}· preview only{/if}
+        {#if mediaCache.entries > 0}· {mediaCache.entries} in cache · {Math.round(mediaCache.bytes / 1048576)} MB{/if}
       </span>
     </div>
     <div class="row">

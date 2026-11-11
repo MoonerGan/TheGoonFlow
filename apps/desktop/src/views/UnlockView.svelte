@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { nukeVault, unlockVault, type AppStatus } from "../lib/api";
+  import { unlockVault, type AppStatus } from "../lib/api";
+  import { nukeVaultWithErase } from "../lib/session";
 
   let { status, refresh }: { status: AppStatus; refresh: () => Promise<void> } = $props();
 
@@ -40,7 +41,7 @@
     nukeBusy = true;
     nukeError = null;
     try {
-      await nukeVault(nukeConfirm);
+      await nukeVaultWithErase(nukeConfirm);
       await refresh();
     } catch (e) {
       nukeError = String(e);

@@ -28,6 +28,7 @@
     type SourceStats,
     type TagCount,
   } from "../lib/api";
+  import { evictMedia } from "../lib/mediacache.svelte";
   import { jobState, onActivityChange } from "../lib/activity.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
   import ItemEditor from "../components/ItemEditor.svelte";
@@ -138,6 +139,7 @@
     if (ids.length === 0) return;
     try {
       await deleteItems(ids);
+      evictMedia(ids);
       selectedIds = new Set();
       selectMode = false;
       await load();
@@ -484,6 +486,7 @@
   <Viewer
     items={items}
     index={viewerIndex}
+    {thumbs}
     onClose={() => (viewerIndex = null)}
     onEdit={(it) => {
       viewerIndex = null;

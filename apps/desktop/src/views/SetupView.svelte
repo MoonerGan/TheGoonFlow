@@ -4,9 +4,9 @@
     attachVault,
     createVault,
     getDefaultVaultDir,
-    nukeVault,
     resetPointer,
   } from "../lib/api";
+  import { nukeVaultWithErase } from "../lib/session";
 
   let { mode, refresh }: { mode: "create" | "attach"; refresh: () => Promise<void> } = $props();
 
@@ -61,7 +61,7 @@
   async function doNuke() {
     nukeError = null;
     try {
-      await nukeVault(nukeConfirm, dir || undefined);
+      await nukeVaultWithErase(nukeConfirm, dir || undefined);
       dir = "";
       nukeConfirm = "";
       await refresh();

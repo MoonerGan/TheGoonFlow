@@ -18,6 +18,9 @@ export type AppStatus = {
   unlocked: boolean;
   vaultRoot: string | null;
   companion: CompanionStatus | null;
+  /** Bumped by the backend on lock / nuke / attach. Anything caching decrypted
+   * vault material in the page must be dropped when this changes (#44). */
+  generation: number;
 };
 
 export type StatusCount = {
@@ -258,7 +261,10 @@ export const updateItem = (
   circle: string | null,
   status: string,
   version: string | null,
-) => invoke<void>("update_item", { id, title, circle, status, version });
+  // omitted/undefined keeps the stored note; "" clears it (the Rust command
+  // distinguishes the two, which is why this is not just `string`)
+  notes?: string,
+) => invoke<void>("update_item", { id, title, circle, status, version, notes });
 export const deleteItem = (id: string) => invoke<void>("delete_item", { id });
 export const deleteItems = (ids: string[]) => invoke<number>("delete_items", { ids });
 export const setComplete = (id: string, complete: boolean) =>

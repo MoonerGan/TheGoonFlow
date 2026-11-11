@@ -1,6 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getStatus, lockVault, type AppStatus } from "./lib/api";
+  import { getStatus, type AppStatus } from "./lib/api";
+  // #44 privacy: lock/nuke/panic all end the vault session through one place,
+  // and that place is what wipes the viewer's decrypted media cache.
+  import { lockVaultWithErase, noteVaultUnlocked, watchVaultSession } from "./lib/session";
   import SetupView from "./views/SetupView.svelte";
   import UnlockView from "./views/UnlockView.svelte";
   import LibraryView from "./views/LibraryView.svelte";
@@ -10,7 +13,9 @@
 
   async function refresh() {
     try {
-      status = await getStatus();
+      const s = await getStatus();
+      status = s;
+      noteVaultUnlocked(s.unlocked, s.generation);
       error = null;
     } catch (e) {
       error = String(e);
@@ -18,11 +23,15 @@
   }
 
   async function doLock() {
-    await lockVault();
+    await lockVaultWithErase();
     await refresh();
   }
 
-  onMount(refresh);
+  onMount(() => {
+    void refresh();
+    // the panic hotkey locks from Rust without telling us; this notices
+    return watchVaultSession(() => void refresh());
+  });
 </script>
 
 {#if !status}
