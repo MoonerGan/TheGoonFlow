@@ -989,6 +989,58 @@ textarea:focus {
   color: var(--muted);
 }
 
+/* #62: the pictures one item holds. Chips rather than thumbnails, because the
+   vault keeps one tile per item (#54) - 40 real tiles would mean decoding 40
+   full-res copies to paint 40 small squares. It scrolls sideways for long
+   galleries, and in fullscreen it floats just above the bar so the chrome hides
+   them together. */
+.viewer-strip {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.55rem 1rem 0.15rem;
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.strip-tile {
+  flex: 0 0 auto;
+  min-width: 2.2rem;
+  padding: 0.25rem 0.45rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.strip-tile.here {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.strip-hint {
+  flex: 0 0 auto;
+  padding-left: 0.6rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+.viewer.fullscreen .viewer-strip {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 3.4rem;
+  padding: 0.5rem 1rem;
+  background: linear-gradient(to top, rgba(4, 4, 4, 0.85), rgba(4, 4, 4, 0));
+  transition: opacity 0.18s ease-out, transform 0.18s ease-out;
+}
+
+.viewer.fullscreen.chrome-down .viewer-strip {
+  opacity: 0;
+  transform: translateY(120%);
+  pointer-events: none;
+}
+
 .viewer-bar {
   display: flex;
   align-items: center;

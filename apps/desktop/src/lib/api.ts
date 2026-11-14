@@ -265,15 +265,30 @@ export const sourceStats = (kind?: "game" | "media") =>
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
 
-// ---------- full viewer (#21) ----------
-export type MediaView = {
+// ---------- full viewer (#21, and many frames per item #62) ----------
+/** One row of an item's filmstrip: metadata only, no bytes (#62). An item can
+ * hold several originals - a `+Images` import stores one per file, and #53's
+ * stored attachments do the same. A "thumb" kind only appears when it is the
+ * item's only media, which is every single-picture item written before #62. */
+export type MediaFrame = {
+  id: number;
+  kind: "full" | "video" | "thumb";
+  mime: string;
+  /** bytes the vault holds for this frame, so the strip can label it cheaply */
+  size: number;
+};
+export const getFrames = (itemId: string) => invoke<MediaFrame[]>("media_for_item", { itemId });
+/** One frame's bytes, asked for by the id `getFrames` handed out. `tooBig` is the
+ * stored size when the bytes were not inlined (an oversized stored video); the
+ * frame keeps its own kind rather than being quietly relabelled as a thumbnail. */
+export type MediaFrameBytes = {
   kind: "full" | "video" | "thumb";
   mime: string;
   data: string | null;
   tooBig: number | null;
 };
-export const getMediaView = (itemId: string) =>
-  invoke<MediaView | null>("media_view", { itemId });
+export const getFrameBytes = (id: number) =>
+  invoke<MediaFrameBytes | null>("media_frame_bytes", { id });
 export const updateItem = (
   id: string,
   title: string,
@@ -304,6 +319,35 @@ export const importBookmarks = (path: string, fetchOnline: boolean) =>
 // ---------- M1: clip + tags ----------
 export const clipUrl = (url: string) => invoke<ClipReport>("clip_url", { url });
 export const getItem = (id: string) => invoke<ItemDetail | null>("get_item", { id });
+
+// ---------- pictures the page offered (#53) ----------
+/** A candidate picture on an item: the attachment url a fetch found, and whether
+ * the user has stored it. Nothing here was downloaded - the list is the feature,
+ * and each row can be stored one picture at a time. No mime field on purpose:
+ * a candidate's type is only knowable once its bytes arrive (#46 - f95zone serves
+ * `image/avif` from a `.jpg` url), so advertising one would be always-empty. */
+export type CandidateImage = {
+  url: string;
+  /** epoch seconds, as text, like every other timestamp on this wire */
+  foundAt: string;
+  storedAt: string | null;
+};
+export const getSourceImages = (itemId: string) =>
+  invoke<CandidateImage[]>("source_images", { itemId });
+export type StorePictureReport = {
+  url: string;
+  mime: string;
+  bytes: number;
+  /** media rows the item holds now, so the viewer can re-list its strip */
+  frames: number;
+  /** the vault already had these exact bytes (content-hash dedup) */
+  already: boolean;
+  /** this picture also became the item's grid tile */
+  tile: boolean;
+  note: string | null;
+};
+export const storeSourceImage = (itemId: string, url: string) =>
+  invoke<StorePictureReport>("store_source_image", { itemId, url });
 export const topTags = (limit = 40, kind?: "game" | "media") =>
   invoke<TagCount[]>("top_tags", { limit, kind: kind ?? null });
 export const addItemTag = (id: string, name: string, kind?: "content" | "site" | "status") =>

@@ -94,7 +94,7 @@ export function jobState(kind: string): "running" | "cancelled" | "finished" | "
  * What the activity strip prints for a job. Every kind the backend starts is
  * listed here: `bookmarks`, `games`, `images`, `videos`, `enrich`, `updates`
  * (lib.rs), plus `clip` (both clip doors: lib.rs `clip_url` and the companion API),
- * `matches`, `video` and `extract` (lib.rs).
+ * `matches`, `video`, `extract` and `image` (lib.rs; #53's one-picture store).
  *
  * An unknown kind falls back to its own name, never to a label that belongs to a
  * different job - that is what made an extension clip read as `updates: clipped …`.
@@ -110,6 +110,7 @@ const JOB_LABELS: Record<string, string> = {
   matches: "match search",
   video: "video store",
   extract: "extract",
+  image: "picture store",
 };
 
 export function jobLabel(j: JobInfo): string {

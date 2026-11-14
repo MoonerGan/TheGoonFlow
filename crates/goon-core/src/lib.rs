@@ -5,7 +5,7 @@ pub mod media;
 pub mod model;
 
 /// Storage schema version, tracked in `meta.schema_version`.
-pub const SCHEMA_VERSION: i64 = 8;
+pub const SCHEMA_VERSION: i64 = 9;
 
 /// True when a game's self-reported title identifies the *tool* rather than the
 /// game. Repack installers and RPG Maker / NW.js projects ship placeholder

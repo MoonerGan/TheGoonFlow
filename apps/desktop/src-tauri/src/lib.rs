@@ -932,52 +932,157 @@ fn get_thumbs(
         .collect())
 }
 
-// ---------- full viewer (#21) ----------
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct MediaView {
-    /// "full" | "video" | "thumb" — what the inline copy actually is
-    kind: String,
-    mime: String,
-    /// base64 inline bytes; None when a stored video is too big to ship whole
-    data: Option<String>,
-    /// true when the viewer should offer to open the original link instead
-    too_big: Option<u64>,
-}
+// ---------- full viewer (#21, many frames per item #62) ----------
 
 /// Biggest blob we inline into the webview for preview. Beyond this (rare,
 /// opt-in stored videos) we show the poster and let the OS player handle it.
 const INLINE_MAX: u64 = 96 * 1024 * 1024;
 
+/// One row of the viewer's filmstrip (#62). An item can hold several originals -
+/// a `+Images` folder import stores one per file, and #53's stored attachments do
+/// the same - and the old single-picture read (`media_view`, `best_for` with a
+/// `LIMIT 1`) could only ever reach one of them, so a 40-picture import showed one
+/// picture. Listing frames separately from their bytes is the point: the strip
+/// must not pull every BLOB to paint a row of tiles.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaFrame {
+    id: i64,
+    /// "full" | "video" | "thumb". A `thumb` appears only when it is the item's
+    /// only media, which is every single-picture item written before #62.
+    kind: String,
+    mime: String,
+    /// bytes the vault holds for this frame, so the viewer can label and plan
+    /// without pulling anything
+    size: i64,
+}
+
 #[tauri::command]
-fn media_view(
+fn media_for_item(
     state: tauri::State<'_, AppState>,
     item_id: String,
-) -> Result<Option<MediaView>, String> {
+) -> Result<Vec<MediaFrame>, String> {
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    let Some(b) = goon_core::media::best_for(&opened.conn, &item_id) else {
+    Ok(goon_core::media::frames_for(&opened.conn, &item_id)
+        .into_iter()
+        .map(|f| MediaFrame {
+            id: f.id,
+            kind: f.kind,
+            mime: f.mime,
+            size: f.size,
+        })
+        .collect())
+}
+
+/// One frame's bytes, asked for by id.
+///
+/// `media_view` used to quietly relabel an oversized stored video as its item's
+/// thumbnail so the viewer still showed something. That substitution is gone:
+/// the tile is now a frame the strip can show honestly, and presenting a video
+/// frame as a thumbnail is the kind of white lie #60 was about. The viewer keeps
+/// the tile it already has and says the picture is too big to inline.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MediaFrameBytes {
+    kind: String,
+    mime: String,
+    /// base64 inline bytes; None when a stored video is too big to ship whole
+    data: Option<String>,
+    /// the stored size when the bytes were not inlined
+    too_big: Option<u64>,
+}
+
+#[tauri::command]
+fn media_frame_bytes(
+    state: tauri::State<'_, AppState>,
+    id: i64,
+) -> Result<Option<MediaFrameBytes>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let Some(b) = goon_core::media::bytes_for_id(&opened.conn, id) else {
         return Ok(None);
     };
     let size = b.data.len() as u64;
     if b.kind == "video" && size > INLINE_MAX {
-        // fall back to the poster image so the viewer still shows something
-        if let Some((tmime, tbytes)) = goon_core::media::get_thumb(&opened.conn, &item_id) {
-            return Ok(Some(MediaView {
-                kind: "thumb".into(),
-                mime: tmime,
-                data: Some(B64.encode(tbytes)),
-                too_big: Some(size),
-            }));
-        }
+        return Ok(Some(MediaFrameBytes {
+            kind: b.kind,
+            mime: b.mime,
+            data: None,
+            too_big: Some(size),
+        }));
     }
-    Ok(Some(MediaView {
+    Ok(Some(MediaFrameBytes {
         kind: b.kind,
         mime: b.mime,
         data: Some(B64.encode(b.data)),
         too_big: None,
     }))
+}
+
+// ---------- pictures the page offered (#53) ----------
+
+/// A candidate picture on an item: the url the fetch found, and whether the user
+/// has stored it yet. Nothing here was downloaded - the list is the feature.
+///
+/// No `mime` on the wire: the type of a candidate is not knowable until its bytes
+/// arrive (#46 - f95zone serves `image/avif` from a `.jpg` url, and a blocked
+/// hotlink answers with HTML at status 200), so advertising one would be a column
+/// that is always empty. The core row keeps the column for the day a site tells us.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateImage {
+    url: String,
+    /// epoch seconds, as text, the way every other timestamp crosses to the UI
+    found_at: String,
+    stored_at: Option<String>,
+}
+
+#[tauri::command]
+fn source_images(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+) -> Result<Vec<CandidateImage>, String> {
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    Ok(goon_core::db::source_images_for(&opened.conn, &item_id)
+        .into_iter()
+        .map(|s| CandidateImage {
+            url: s.url,
+            found_at: s.found_at.to_string(),
+            stored_at: s.stored_at.map(|v| v.to_string()),
+        })
+        .collect())
+}
+
+/// Store one picture the user picked out of that list. It is a job, exactly like
+/// a clip (#58's lesson): a line in the activity strip, a Stop button, and
+/// something Lock or Nuke can actually give up on.
+#[tauri::command]
+async fn store_source_image(
+    state: tauri::State<'_, AppState>,
+    item_id: String,
+    url: String,
+) -> Result<ingest::StorePictureReport, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("url is empty".into());
+    }
+    let job = state
+        .jobs
+        .start("image", &url)
+        .ok_or("a picture fetch is still running \u{2014} the activity strip shows where it got to")?;
+    let report = ingest::store_picture(&state, item_id, url).await;
+    match &report {
+        Ok(r) => job.finish(&format!(
+            "{} ({} frames on the item){}",
+            r.mime,
+            r.frames,
+            if r.already { ", already stored" } else { "" }
+        )),
+        Err(e) => job.finish(&format!("picture failed: {e}")),
+    }
+    report
 }
 
 /// #37: the vault refuses a nameless row. The library search matches on title,
@@ -2154,7 +2259,10 @@ pub fn run() {
             list_items,
             source_stats,
             get_thumbs,
-            media_view,
+            media_for_item,
+            media_frame_bytes,
+            source_images,
+            store_source_image,
             update_item,
             delete_item,
             set_complete,

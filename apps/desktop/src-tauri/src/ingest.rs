@@ -1165,7 +1165,7 @@ fn keep_f95_cover(m: &mut Meta, bytes: Vec<u8>, found: usize) -> Result<(), Stri
     if media::thumbnailable(mime) {
         m.note = Some(format!(
             "cover stored from post #1 as {mime}; {found} attachment image(s) on the page — \
-             they stay links, only the cover was downloaded"
+             listed under Sources, where any one of them can be stored"
         ));
     } else {
         // No decoder for this format in this build (HEIF/HEIC, anything `image`
@@ -1174,13 +1174,180 @@ fn keep_f95_cover(m: &mut Meta, bytes: Vec<u8>, found: usize) -> Result<(), Stri
         m.note = Some(format!(
             "cover is {mime} from post #1 — the original is stored, but this build cannot \
              decode {mime} into a thumbnail, so the grid tile stays missing; {found} \
-             attachment image(s) on the page, only the cover was downloaded"
+             attachment image(s) on the page, listed under Sources"
         ));
     }
     Ok(())
 }
 
+// ---------- one picture at a time (#53) ----------
+
+/// What storing one candidate picture did, in the same honest shape as a clip
+/// report: how many bytes, whether the vault already had them, and what the item
+/// can now show.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StorePictureReport {
+    pub url: String,
+    pub mime: String,
+    pub bytes: usize,
+    /// media rows the item holds now, so the viewer knows to re-list its strip
+    pub frames: usize,
+    /// true when the vault already had these exact bytes (content-hash dedup)
+    pub already: bool,
+    /// true when this picture also became the item's grid tile
+    pub tile: bool,
+    pub note: Option<String>,
+}
+
+/// May these bytes become a stored picture? Decided by **sniffing**, never by the
+/// URL suffix (#46: f95zone serves `image/avif` from a URL ending `.jpg`, and a
+/// blocked hotlink answers with an HTML page at status 200), under the same
+/// ceiling a cover gets. Split out of [`store_picture`] so the rule is testable
+/// without a network.
+fn storable_picture(bytes: &[u8]) -> Result<&'static str, String> {
+    let mime = match media::sniff_media(bytes) {
+        media::Sniffed::Image(mime) => mime,
+        media::Sniffed::Video(mime) => return Err(format!("that link is {mime}, not a picture")),
+        media::Sniffed::Unknown => return Err("was not a recognizable image".into()),
+    };
+    if bytes.len() > MAX_COVER_BYTES {
+        return Err(format!(
+            "is {} bytes, over the {} MB picture ceiling",
+            bytes.len(),
+            MAX_COVER_BYTES / (1024 * 1024)
+        ));
+    }
+    Ok(mime)
+}
+
+/// Which polite lane a picture fetch belongs to when the item has no source row
+/// to borrow a site from: the host it was fetched from, so a repeat visit to the
+/// same host still waits for the same lane.
+fn host_lane(url: &str) -> String {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    rest.split('/').next().unwrap_or(rest).to_string()
+}
+
+/// Unix seconds, for the `source_images` bookkeeping columns (the rest of the
+/// schema keeps epoch seconds as text; [`crate::now_epoch`] is that string).
+fn now_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// #53: remember the pictures a page offered, as candidates on the item. Nothing
+/// is fetched here: the default stays one downloaded cover per clip, because
+/// pulling every attachment on enrich would turn a polite fetch into a mirror of
+/// the thread. What lands in `source_images` is the list the item's Sources
+/// section shows and what [`store_picture`] acts on.
+pub fn remember_candidates(conn: &rusqlite::Connection, item_id: &str, images: &[String]) -> usize {
+    if images.is_empty() {
+        return 0;
+    }
+    db::remember_source_images(conn, item_id, images, now_secs())
+}
+
+/// #53: fetch **one** picture the user picked and store it on the item.
+///
+/// Same guarantees as a clip, because it is the same machinery: the site's rate
+/// box is honoured through the queue lane (#57), the cookie comes from the same
+/// per-site store, the bytes are typed by sniffing (#46), the size ceiling is the
+/// cover ceiling, and a Lock or Nuke mid-fetch gives the picture up instead of
+/// writing into a closing vault. This is the deliberate alternative to downloading
+/// a whole thread: the user chose this image, so it is the only one fetched.
+pub async fn store_picture(core: &Core, item_id: String, url: String) -> Result<StorePictureReport, String> {
+    let url = url.trim().to_string();
+    if url.is_empty() {
+        return Err("no url".into());
+    }
+
+    // Phase 1 (sync): the item, the site whose rate box and cookie govern this
+    // fetch, and the page to name as referer (attachment hosts gate hotlinks).
+    let (site, rate_ms, cookie, referer) = {
+        let inner = core.inner.lock().unwrap();
+        let conn = &inner.opened.as_ref().ok_or("vault is locked")?.conn;
+        let d = db::get_item(conn, &item_id)
+            .map_err(|e| e.to_string())?
+            .ok_or("no such item in this vault")?;
+        let site = d
+            .sources
+            .first()
+            .map(|s| s.site.clone())
+            .unwrap_or_else(|| host_lane(&url));
+        (
+            site.clone(),
+            db::site_rate_ms(conn, &site, default_rate_ms(&site)),
+            db::site_cookie(conn, &site),
+            d.sources
+                .first()
+                .map(|s| s.url.clone())
+                .unwrap_or_else(|| url.clone()),
+        )
+    };
+
+    // #57: one lane slot, and the same give-up-if-the-vault-closed rule as clip().
+    let gone = || match core.inner.try_lock() {
+        Ok(guard) => guard.opened.is_none(),
+        Err(_) => false,
+    };
+    if !core.queue.reserve(&site, rate_ms, gone).await {
+        return Err(format!(
+            "the vault was locked before {site} could answer - the picture was not stored"
+        ));
+    }
+
+    // Phase 2 (async): the bytes. get_bytes carries the file UA per request and
+    // refuses the empty 204 a guest gets back, so a gated host says so here.
+    let client = crate::http::client_for(core, 25)?;
+    let bytes = get_bytes(&client, &url, &referer, cookie.as_deref()).await?;
+    let mime = storable_picture(&bytes)?;
+
+    // Phase 3 (sync): store, mark the candidate stored, and report.
+    let mut inner = core.inner.lock().unwrap();
+    let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    let fresh = media::put_full_image(conn, &item_id, &bytes);
+    db::mark_source_image_stored(conn, &item_id, &url, now_secs());
+    // An item with no tile yet gets one from this picture, so the grid stops
+    // showing a nameless card; an item that already has its cover keeps it.
+    let mut tile = false;
+    let mut note = None;
+    if media::get_thumb(conn, &item_id).is_none() {
+        match media::make_thumbnail(&bytes) {
+            Some(t) => tile = media::set_thumbnail(conn, &item_id, &t),
+            None if media::thumbnailable(mime) => {
+                note = Some(format!(
+                    "stored as {mime}; the picture would not decode into a tile, so the grid \
+                     tile stays missing"
+                ))
+            }
+            None => note = Some(format!(
+                "stored as {mime}; this build cannot decode {mime} into a tile, so the grid \
+                 tile stays missing"
+            )),
+        }
+    }
+    if !fresh {
+        note = note_with(
+            note.take(),
+            Some("the vault already had these exact bytes (stored once, deduped by content hash)".into()),
+        );
+    }
+    Ok(StorePictureReport {
+        url,
+        mime: mime.to_string(),
+        bytes: bytes.len(),
+        frames: media::media_count(conn, &item_id),
+        already: !fresh,
+        tile,
+        note,
+    })
+}
+
 // ---- direct media & local files ----
+
 
 async fn direct_media(
     client: &reqwest::Client,
@@ -1558,6 +1725,11 @@ pub async fn clip(state: &Core, url: String) -> Result<ClipReport, String> {
     // lands here now is HEIF and anything else `image` cannot read).
     let missing = undecodable_note(&meta, thumb);
     meta.note = note_with(meta.note.take(), missing);
+    // #53: whatever else the page offered is kept as a candidate list on the item,
+    // so its Sources section can offer them one picture at a time. Still exactly
+    // one download per clip: remembering 15 urls costs nothing, mirroring a thread
+    // costs the site.
+    remember_candidates(conn, &id, &meta.images);
     let mut tags = 0usize;
     for t in meta.tags.iter().take(40) {
         if db::add_item_tag(conn, &id, t, db::TYPE_CONTENT).is_ok() {
@@ -2794,6 +2966,11 @@ mod tests {
         assert!(note.contains("image/avif"), "{note}");
         assert!(note.contains("15 attachment image(s)"), "{note}");
         assert!(
+            note.contains("listed under Sources"),
+            "#53: the other attachments must be named as storable candidates, not as dead \
+             links: {note}"
+        );
+        assert!(
             !note.contains("cannot"),
             "a thumbnailable format must not be described as a missing capability: {note}"
         );
@@ -2822,6 +2999,108 @@ mod tests {
             m3.store_bytes.is_none() && m3.thumb_bytes.is_none(),
             "nothing may be stored from a rejected candidate"
         );
+    }
+
+    /// #53, offline: the store-one-picture rule decides from the **bytes**, never
+    /// from the url, under the same ceiling a cover gets. This is the whole safety
+    /// story of the feature: a picture is fetched only because the user picked it,
+    /// and what arrives is still type-checked before it can enter the vault.
+    #[test]
+    fn a_chosen_picture_is_sniffed_and_capped() {
+        const AVIF: &[u8] =
+            include_bytes!("../../../../crates/goon-core/src/fixtures/avif-tiny.avif");
+        assert_eq!(
+            storable_picture(AVIF).expect("a real avif is a picture"),
+            "image/avif",
+            "the type comes from the bytes, not the url"
+        );
+
+        // f95zone answers a blocked hotlink with an HTML body at status 200.
+        // Storing that is how a vault fills with error pages.
+        let why = storable_picture(b"<html>Access denied</html>".as_slice())
+            .expect_err("an html body is not a picture");
+        assert!(why.contains("recognizable"), "{why}");
+
+        // A `.jpg` link carrying video (the #50 shape) is refused, in words that
+        // say what it is.
+        let mut mp4 = vec![0u8, 0, 0, 0x18];
+        mp4.extend_from_slice(b"ftypisom");
+        mp4.extend_from_slice(&[9u8; 24]);
+        let why = storable_picture(&mp4).expect_err("a video link is not a picture");
+        assert!(why.contains("video/mp4"), "{why}");
+
+        let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
+        big.resize(MAX_COVER_BYTES + 1, b'x');
+        let why = storable_picture(&big).expect_err("the ceiling stays the cover ceiling");
+        assert!(why.contains("picture ceiling"), "{why}");
+    }
+
+    /// #53: an item with no source row still gets a named polite lane - the host
+    /// the picture came from - so a second click on the same host waits for it.
+    #[test]
+    fn a_picture_lane_is_named_by_host() {
+        assert_eq!(
+            host_lane("https://attachments.f95zone.to/2024/05/tiny.avif"),
+            "attachments.f95zone.to"
+        );
+        assert_eq!(host_lane("not a url"), "not a url");
+    }
+
+    /// #53, offline: the candidate list survives the fetch, dedups by url and
+    /// keeps page order - the three things the Sources section depends on. Run
+    /// against a real scratch vault so the unique index and the FK cascade are the
+    /// ones the app actually uses.
+    #[test]
+    fn candidate_pictures_are_kept_once_each_in_page_order() {
+        let (core, tmp) = crate::scratch_core("cands", true);
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            let now = now_epoch();
+            let item = Item {
+                id: "c-cands-1".into(),
+                kind: ItemKind::Game,
+                title: "candidate probe".into(),
+                original_title: None,
+                circle: None,
+                status: Status::Seen,
+                dnf: false,
+                rating: None,
+                notes: String::new(),
+                version: None,
+                created_at: now.clone(),
+                updated_at: now,
+            };
+            db::insert_item(conn, &item).unwrap();
+
+            let urls: Vec<String> = ["https://x/a.jpg", "https://x/b.jpg", "https://x/a.jpg"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect();
+            assert_eq!(
+                remember_candidates(conn, "c-cands-1", &urls),
+                2,
+                "the repeat url must not become a second row"
+            );
+            assert_eq!(
+                remember_candidates(conn, "c-cands-1", &urls),
+                0,
+                "remembering the same page twice adds nothing"
+            );
+            let rows = db::source_images_for(conn, "c-cands-1");
+            assert_eq!(rows.len(), 2, "{rows:?}");
+            assert_eq!(rows[0].url, "https://x/a.jpg", "page order, not sorted");
+            assert!(
+                rows.iter().all(|r| r.stored_at.is_none()),
+                "a candidate is not yet a stored picture"
+            );
+            assert_eq!(
+                remember_candidates(conn, "c-cands-1", &[]),
+                0,
+                "a page that offered nothing writes nothing"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -3182,6 +3461,95 @@ mod tests {
                 !media_rows.iter().any(|i| i.id == report.item_id),
                 "an f95 thread is a game, not a media item"
             );
+
+            // #53: the rest of the page's attachments must survive the fetch as
+            // candidates. If they are thrown away here the Sources section has
+            // nothing to offer and the parser's work is lost - so it is measured.
+            let cands = db::source_images_for(conn, &report.item_id);
+            println!(
+                "sources  = {} candidate picture(s) kept for the item, first {}",
+                cands.len(),
+                cands.first().map(|c| c.url.as_str()).unwrap_or("-")
+            );
+            assert!(
+                cands.len() >= 10,
+                "the attachment urls must be kept as candidates, not dropped (#53)"
+            );
+            assert!(
+                cands.iter().all(|c| c.stored_at.is_none()),
+                "a clip stores one cover; no candidate may claim to be stored"
+            );
+            assert_eq!(
+                media::media_count(conn, &report.item_id),
+                2,
+                "cover + tile only, until the user asks for another picture"
+            );
+        }
+
+        // #53 end to end: the user picks ONE of those candidates. It goes through
+        // the same polite lane as a clip (#57) and the same sniffed-type rule
+        // (#46), and it is the only extra download this does - chosen, not scraped.
+        let target = {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            db::source_images_for(conn, &report.item_id)
+                .last()
+                .expect("a candidate to store")
+                .url
+                .clone()
+        };
+        let stored = store_picture(&core, report.item_id.clone(), target.clone())
+            .await
+            .expect("storing one chosen picture");
+        println!(
+            "store    = {} bytes {} already {} tile {} frames {} note {:?}",
+            stored.bytes, stored.mime, stored.already, stored.tile, stored.frames, stored.note
+        );
+        assert!(
+            !stored.already,
+            "the last attachment is not the cover, so these are new bytes"
+        );
+        // The type must come from the bytes, not the file name (#46). f95zone
+        // serves avif/webp/jpeg from urls that all end in `.jpg`, so pinning one
+        // mime here only measures which format the site happened to serve today.
+        // What stays true next week is: the mime is one the sniffer can produce.
+        assert!(
+            matches!(
+                stored.mime.as_str(),
+                "image/png"
+                    | "image/jpeg"
+                    | "image/gif"
+                    | "image/webp"
+                    | "image/bmp"
+                    | "image/avif"
+                    | "image/heif"
+            ),
+            "the stored picture must carry a sniffer-known image mime, got {:?}",
+            stored.mime
+        );
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            let frames = media::frames_for(conn, &report.item_id);
+            println!(
+                "strip    = {} frame(s): {}",
+                frames.len(),
+                frames
+                    .iter()
+                    .map(|f| format!("{} {} B", f.kind, f.size))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+            assert_eq!(
+                frames.len(),
+                2,
+                "the cover and the chosen picture; the tile is not a second frame (#62)"
+            );
+            let me = db::source_images_for(conn, &report.item_id)
+                .into_iter()
+                .find(|c| c.url == target)
+                .expect("the candidate is still listed");
+            assert!(me.stored_at.is_some(), "and it must be marked stored");
         }
         let _ = std::fs::remove_dir_all(&tmp);
 

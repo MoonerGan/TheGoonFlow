@@ -124,6 +124,16 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             PRIMARY KEY (a_id, b_id)
         );
 
+        CREATE TABLE IF NOT EXISTS source_images (
+            id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            item_id   TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+            url       TEXT NOT NULL,
+            mime      TEXT,
+            found_at  INTEGER NOT NULL,
+            stored_at INTEGER
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS source_image_url_idx ON source_images (item_id, url);
+
         COMMIT;",
     )?;
 
@@ -228,6 +238,19 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
         conn.execute_batch(
             "BEGIN;
             UPDATE meta SET value = '8' WHERE key = 'schema_version';
+            COMMIT;",
+        )?;
+    }
+    if v < 9 {
+        // #53: the candidate images a source page offered, kept whether or not
+        // we ever downloaded them, so "what was on that page" survives a
+        // re-fetch and a half-finished gallery can be finished later. Like
+        // #14/#25/#31, the table is in the base batch (CREATE TABLE IF NOT
+        // EXISTS), so existing vaults pick it up there - this step only records
+        // the version.
+        conn.execute_batch(
+            "BEGIN;
+            UPDATE meta SET value = '9' WHERE key = 'schema_version';
             COMMIT;",
         )?;
     }
@@ -597,6 +620,91 @@ pub fn delete_source(conn: &Connection, item_id: &str, source_id: i64) -> rusqli
         params![source_id, item_id],
     )?;
     Ok(n > 0)
+}
+
+// ---------- candidate images on a source page (#53) ----------
+
+/// One image a source page listed, stored or not. The page's attachment list is
+/// what a re-fetch would otherwise lose (threads renumber, galleries get
+/// trimmed), and `stored_at` records whether we ever pulled the bytes.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceImage {
+    pub url: String,
+    /// only known after a fetch sniffs the bytes, so a plain candidate has none
+    pub mime: Option<String>,
+    /// when this url was first seen; a re-fetch never rewrites it, because the
+    /// row for a known url is never touched
+    pub found_at: i64,
+    /// set once the bytes are in `media`; None = still only a candidate
+    pub stored_at: Option<i64>,
+}
+
+const SOURCE_IMAGE_COLS: &str = "url, mime, found_at, stored_at";
+
+/// Remember the image urls a page offered. UNIQUE (item_id, url) makes this
+/// idempotent, which is the whole point: re-fetching a thread lists the same
+/// attachments again and again, and that must not grow the vault. Returns how
+/// many rows were new, so the caller can report "12 new images" honestly.
+pub fn remember_source_images(
+    conn: &Connection,
+    item_id: &str,
+    urls: &[String],
+    found_at: i64,
+) -> usize {
+    let mut added = 0;
+    for url in urls {
+        // OR IGNORE is the point: a page that lists one image twice, and the
+        // same page re-fetched next week, both stay one row.
+        let n = conn.execute(
+            "INSERT OR IGNORE INTO source_images (item_id, url, found_at)
+             VALUES (?1, ?2, ?3)",
+            params![item_id, url, found_at],
+        );
+        added += n.unwrap_or(0);
+    }
+    added
+}
+
+/// The item's candidates, oldest sighting first - the order the page showed
+/// them, which is how the reader expects the gallery to read.
+pub fn source_images_for(conn: &Connection, item_id: &str) -> Vec<SourceImage> {
+    let mut stmt = match conn.prepare(&format!(
+        "SELECT {SOURCE_IMAGE_COLS} FROM source_images WHERE item_id = ?1 ORDER BY id",
+    )) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    if let Ok(rows) = stmt.query_map(params![item_id], |r| {
+        Ok(SourceImage {
+            url: r.get(0)?,
+            mime: r.get(1)?,
+            found_at: r.get(2)?,
+            stored_at: r.get(3)?,
+        })
+    }) {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    out
+}
+
+/// Mark one candidate as stored (its bytes are in `media` now). False when the
+/// url is not one of this item's candidates: the caller invented a link the
+/// page never listed, and that should be visible instead of silent.
+pub fn mark_source_image_stored(
+    conn: &Connection,
+    item_id: &str,
+    url: &str,
+    stored_at: i64,
+) -> bool {
+    let n = conn.execute(
+        "UPDATE source_images SET stored_at = ?3 WHERE item_id = ?1 AND url = ?2",
+        params![item_id, url, stored_at],
+    );
+    n.unwrap_or(0) > 0
 }
 
 // ---------- mods / tools (#25, D10) ----------
@@ -1491,6 +1599,12 @@ mod tests {
             })
             .unwrap();
         assert!(tags >= 3);
+        // v9 (#53): the candidate table is part of a fresh vault too, not only
+        // an upgrade artifact, or a new install would have nowhere to put them.
+        let candidates: i64 = conn
+            .query_row("SELECT count(*) FROM source_images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(candidates, 0);
     }
 
     #[test]
@@ -2145,5 +2259,133 @@ mod tests {
             .map(|(id, _)| id)
             .collect();
         assert_eq!(ids, vec!["g1".to_string()]);
+    }
+
+    /// #53: opening a vault written before this table gives it one, unique index
+    /// and all, so a re-fetch of an old item still cannot double-list an image.
+    #[test]
+    fn v9_migration_adds_the_candidate_table() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('p1','post','art','0','1')",
+            [],
+        )
+        .unwrap();
+        // rewind it: a v8 vault has no candidate table at all
+        conn.execute("DROP TABLE source_images", []).unwrap();
+        conn.execute(
+            "UPDATE meta SET value = '8' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap(); // simulate re-opening an old vault
+        assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
+        let urls = vec!["https://booru/x/1.jpg".to_string()];
+        assert_eq!(
+            remember_source_images(&conn, "p1", &urls, 7),
+            1,
+            "the table came back from the upgrade"
+        );
+        assert_eq!(
+            remember_source_images(&conn, "p1", &urls, 40),
+            0,
+            "and its unique index came with it"
+        );
+    }
+
+    /// #53: a page's attachment list is remembered once per url. Re-fetching a
+    /// thread lists the same images again, and that must not grow the vault.
+    #[test]
+    fn source_image_candidates_are_remembered_once_per_url() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        for id in ["p1", "p2"] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post','art','0','1')",
+                [id],
+            )
+            .unwrap();
+        }
+        let urls: Vec<String> = [
+            "https://booru/x/1.jpg",
+            "https://booru/x/2.jpg",
+            "https://booru/x/1.jpg", // the page double-lists one of them
+        ]
+        .iter()
+        .map(|u| u.to_string())
+        .collect();
+        assert_eq!(remember_source_images(&conn, "p1", &urls, 7), 2);
+        assert_eq!(
+            remember_source_images(&conn, "p1", &urls, 40),
+            0,
+            "a re-fetch of the same page adds nothing"
+        );
+
+        let rows = source_images_for(&conn, "p1");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].url, "https://booru/x/1.jpg");
+        assert_eq!(rows[1].url, "https://booru/x/2.jpg");
+        assert_eq!(rows[0].found_at, 7, "the first sighting is the one kept");
+
+        // the same url on another item is that item's own candidate (#53's
+        // unique key is per item, so reposts stay countable)
+        assert_eq!(remember_source_images(&conn, "p2", &urls[..1], 8), 1);
+        assert_eq!(source_images_for(&conn, "p2").len(), 1);
+        assert_eq!(source_images_for(&conn, "p1").len(), 2);
+    }
+
+    /// #53: candidates keep their mime and stamps, turn "stored" once the bytes
+    /// land, and disappear with the item (ON DELETE CASCADE).
+    #[test]
+    fn source_image_rows_roundtrip_and_follow_their_item() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('p1','post','art','0','1')",
+            [],
+        )
+        .unwrap();
+        let urls = vec!["https://booru/x/1.jpg".to_string()];
+        let already = "https://booru/x/2.jpg";
+        assert_eq!(remember_source_images(&conn, "p1", &urls, 1), 1);
+        // only a fetch can fill mime/stored_at, so that row is written by hand:
+        // the columns still have to round-trip in the order they were inserted
+        conn.execute(
+            "INSERT INTO source_images (item_id, url, mime, found_at, stored_at) VALUES ('p1',?1,'image/avif',2,3)",
+            params![already],
+        )
+        .unwrap();
+
+        let rows = source_images_for(&conn, "p1");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].url, urls[0], "insertion order, not url order");
+        assert!(rows[0].mime.is_none(), "a plain candidate has no mime yet");
+        assert_eq!(rows[0].found_at, 1);
+        assert_eq!(rows[0].stored_at, None);
+        assert_eq!(rows[1].mime.as_deref(), Some("image/avif"));
+        assert_eq!(rows[1].found_at, 2);
+        assert_eq!(rows[1].stored_at, Some(3));
+
+        assert!(
+            !mark_source_image_stored(&conn, "p1", "https://booru/x/never-listed.jpg", 9),
+            "an url the page never listed is not this item's candidate"
+        );
+        assert!(mark_source_image_stored(&conn, "p1", &urls[0], 9));
+        assert_eq!(source_images_for(&conn, "p1")[0].stored_at, Some(9));
+        // scoped to the item: another post cannot mark this row
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('p2','post','art','0','1')",
+            [],
+        )
+        .unwrap();
+        assert!(!mark_source_image_stored(&conn, "p2", &urls[0], 9));
+
+        delete_item(&conn, "p1").unwrap();
+        assert!(
+            source_images_for(&conn, "p1").is_empty(),
+            "deleting the item takes its candidates with it"
+        );
     }
 }

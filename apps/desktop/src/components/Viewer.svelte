@@ -8,12 +8,17 @@
   // is warmed in both directions, a jump drops the queued speculative reads,
   // the stored thumbnail is the stand-in, and the full copy is decoded off the
   // main thread (createImageBitmap -> bitmaprenderer) instead of a base64 <img>.
+  // #62: an item can hold several pictures - a `+Images` folder import stores one
+  // per file, #53's stored attachments do the same - so the viewer now walks
+  // *inside* an item first: ←/→ step through its frames, and only at the edge do
+  // they move to the next item. A strip under the stage shows where you are.
   import { onDestroy, onMount } from "svelte";
-  import { type ItemSummary } from "../lib/api";
+  import { type ItemSummary, type MediaFrame } from "../lib/api";
   import {
     cancelOutsideWindow,
     hasMedia,
     isCancelled,
+    loadFrames,
     loadMedia,
     mediaCache,
     PREFETCH_RADIUS,
@@ -40,6 +45,11 @@
   let idx = $state(index);
   // $state.raw: a 10-40 MB payload must not be walked by the deep proxy
   let entry = $state.raw<MediaEntry | null>(null);
+  // #62: the pictures this item holds, and which one is on screen. `frames` is
+  // metadata only (id, kind, mime, size), so a 40-picture gallery lists cheaply
+  // and pulls one frame's bytes at a time.
+  let frames = $state<MediaFrame[]>([]);
+  let f = $state(0);
   let loading = $state(false);
   let err = $state<string | null>(null);
   let zoom = $state(1); // 1 = fit-to-window
@@ -53,6 +63,7 @@
   // picture" never re-triggers a fetch (that was the flicker), and the old
   // frame stays visible while the next one loads.
   const itemId = $derived(item?.id ?? null);
+  const shown = $derived(frames[f] ?? null);
 
   // #44: the card's stored thumbnail is already in memory, so it stands in for
   // the full copy instead of a spinner, and is replaced when the real bytes land.
@@ -64,19 +75,24 @@
   const isGif = $derived(!!entry && entry.mime === "image/gif");
   const isStill = $derived(!!entry && !!entry.bytes && !isVideo && !isGif);
   const elementSrc = $derived(entry?.raw ? `data:${entry.mime};base64,${entry.raw}` : null);
-  const isPoster = $derived(!!entry && entry.kind === "thumb" && entry.tooBig !== null);
+  // #62: an oversized stored video now keeps its own kind and reports the size it
+  // could not inline, instead of being relabelled a thumbnail by the backend.
+  const isTooBig = $derived(!!entry && entry.tooBig !== null);
 
   // #44: bumped on every navigation. A payload that lands after the user moved
   // on is dropped by this token; queued speculative reads are cancelled before
   // they are issued at all (an invoke already on the wire cannot be aborted).
   let nav = 0;
 
-  function openItem(id: string) {
-    const mine = ++nav;
-    loading = true;
-    err = null;
-    zoom = 1;
-    loadMedia(id, { urgent: true })
+  /** Pull one frame's bytes. `mine` is the navigation token that still owns the
+   * screen; a payload answering an older token is thrown away. */
+  function openFrame(frameId: number | undefined, mine: number): Promise<void> {
+    if (frameId === undefined) {
+      entry = null; // the item holds no media at all: the link-only note shows
+      loading = false;
+      return Promise.resolve();
+    }
+    return loadMedia(frameId, { urgent: true })
       .then((e) => {
         if (mine !== nav) return;
         entry = e;
@@ -88,6 +104,27 @@
       })
       .finally(() => {
         if (mine === nav) loading = false;
+      });
+  }
+
+  function openItem(id: string) {
+    const mine = ++nav;
+    loading = true;
+    err = null;
+    zoom = 1;
+    f = 0;
+    frames = [];
+    loadFrames(id)
+      .then((list) => {
+        if (mine !== nav) return;
+        frames = list;
+        return openFrame(list[0]?.id, mine);
+      })
+      .catch((x) => {
+        if (mine !== nav || isCancelled(x)) return;
+        entry = null;
+        err = String(x);
+        loading = false;
       });
   }
 
@@ -109,22 +146,78 @@
     return ids;
   });
 
+  /** #62: the frames next to this one, inside the same item. Cheap to know (the
+   * list is already in memory) and the ones a step is most likely to want. */
+  const nearFrames = $derived.by(() => {
+    const here = shown?.id;
+    const out: number[] = [];
+    for (let i = Math.max(0, f - PREFETCH_RADIUS); i <= Math.min(frames.length - 1, f + PREFETCH_RADIUS); i += 1) {
+      const fr = frames[i];
+      if (fr && fr.id !== here) out.push(fr.id);
+    }
+    return out;
+  });
+
+  /** #62: warm a neighbour item's frame list (one small metadata read) and only
+   * then its first frame, so the item next door costs one BLOB, not forty. */
+  function warmItems(itemIds: string[]) {
+    for (const id of itemIds) {
+      loadFrames(id)
+        .then((list) => {
+          const first = list[0];
+          if (!first || hasMedia(first.id)) return;
+          return loadMedia(first.id).catch(() => {});
+        })
+        .catch(() => {});
+    }
+  }
+
   $effect(() => {
     const current = itemId;
     if (!current) return;
-    const wanted = windowIds;
+    const inside = nearFrames;
     // arrow spam / slideshow skip: anything queued outside the new window dies
     // before it can cost a 40 MB read
-    cancelOutsideWindow(new Set([current, ...wanted]));
-    for (const id of wanted) {
+    cancelOutsideWindow(new Set(inside.map(String)));
+    for (const id of inside) {
       if (hasMedia(id)) continue;
       loadMedia(id).catch(() => {});
     }
+    warmItems(windowIds);
   });
 
   function move(d: number) {
     if (d > 0) idx = idx + 1 < items.length ? idx + 1 : 0; // slideshow wraps
     else idx = idx - 1 >= 0 ? idx - 1 : items.length - 1;
+  }
+
+  /** #62: ←/→ walk the pictures inside this item first, and only at the edge do
+   * they leave for the next item - which starts at its first picture, because
+   * guessing its last frame would mean reading a list we do not have yet. */
+  function step(d: number) {
+    const next = f + d;
+    if (next >= 0 && next < frames.length) {
+      f = next;
+      const mine = ++nav;
+      loading = true;
+      err = null;
+      zoom = 1;
+      void openFrame(frames[next].id, mine);
+      return;
+    }
+    move(d);
+  }
+
+  /** #62: jump straight to one picture of this item - the strip is clickable, so
+   * a 40-picture gallery does not need 40 arrow presses. */
+  function gotoFrame(i: number) {
+    if (i === f || i < 0 || i >= frames.length) return;
+    f = i;
+    const mine = ++nav;
+    loading = true;
+    err = null;
+    zoom = 1;
+    void openFrame(frames[i].id, mine);
   }
 
   function onkey(e: KeyboardEvent) {
@@ -139,10 +232,10 @@
         onClose();
         break;
       case "ArrowRight":
-        move(1);
+        step(1);
         break;
       case "ArrowLeft":
-        move(-1);
+        step(-1);
         break;
       case " ":
         e.preventDefault();
@@ -167,10 +260,11 @@
     }
   }
 
-  // slideshow: 4 s per item, stops at the end… by wrapping (library loop)
+  // slideshow: 4 s per picture (#62: per picture, not per item), wrapping through
+  // the library - step() leaves the item at its last frame, so nothing is skipped
   $effect(() => {
     if (!slideshow) return;
-    const t = setInterval(() => move(1), 4000);
+    const t = setInterval(() => step(1), 4000);
     return () => clearInterval(t);
   });
 
@@ -326,7 +420,7 @@
       <img class="frame-poster" src={poster} alt={item?.title ?? ""} style="transform: scale({zoom})" />
       {#if loading}
         <div class="viewer-note stage-note">loading…</div>
-      {:else if !entry || (!entry.bytes && !entry.raw)}
+      {:else if !entry || (!entry.bytes && !entry.raw && entry.tooBig === null)}
         <div class="viewer-note poster-note">
           nothing viewable is stored for this item — it is tracked by link.
           (Open its editor to see the source, or use *Store copy in vault* for videos.)
@@ -334,6 +428,18 @@
       {/if}
     {:else if loading}
       <div class="viewer-note">loading…</div>
+    {:else if shown}
+      <!-- #62: a frame the bytes exist for but this branch cannot paint - an
+           oversized stored video the backend refused to inline, or a format with
+           no decoder here (HEIF). Which of the two it is stays in the sentence. -->
+      <div class="viewer-note">
+        this frame is stored as {shown.mime}
+        {#if entry?.tooBig !== null}
+          (too big to preview here — open it from its source link)
+        {:else}
+          (this build cannot display it)
+        {/if}
+      </div>
     {:else}
       <div class="viewer-note">
         nothing viewable is stored for this item — it is tracked by link.
@@ -341,12 +447,33 @@
         (Open its editor to see the source, or use *Store copy in vault* for videos.)
       </div>
     {/if}
-    {#if isPoster}
+    {#if isTooBig}
       <div class="viewer-note poster-note">
         stored video is too big to preview here — open it from its source link
       </div>
     {/if}
   </div>
+
+  {#if frames.length > 1}
+    <!-- #62: every picture this item holds. Chips rather than real thumbnails on
+         purpose: the vault keeps one tile per item (#54), so 40 tiles would mean
+         decoding 40 full-res copies to paint 40 small squares. The title says what
+         each frame is, including its size in the vault. -->
+    <div class="viewer-strip" role="group" aria-label="pictures in this item">
+      {#each frames as fr, i (fr.id)}
+        <button
+          class="strip-tile"
+          class:here={i === f}
+          onclick={() => gotoFrame(i)}
+          title={`${fr.kind} · ${fr.mime} · ${Math.max(1, Math.round(fr.size / 1024))} KB in the vault`}
+          aria-label={`picture ${i + 1} of ${frames.length}`}
+        >{i + 1}</button>
+      {/each}
+      <span class="strip-hint">
+        {frames.length} pictures in this item — ← / → step through them, then the next item
+      </span>
+    </div>
+  {/if}
 
   <div
     class="viewer-bar"
@@ -362,13 +489,14 @@
       <strong>{item?.title ?? ""}</strong>
       <span class="hint">
         {idx + 1}/{items.length}
-        {#if entry?.kind === "full"}· full-res in vault{:else if entry?.kind === "video"}· stored video{:else if entry}· preview only{/if}
+        {#if frames.length > 1}· picture {f + 1}/{frames.length}{/if}
+        {#if shown?.kind === "full"}· full-res in vault{:else if shown?.kind === "video"}· stored video{:else if shown}· preview only{/if}
         {#if mediaCache.entries > 0}· {mediaCache.entries} in cache · {Math.round(mediaCache.bytes / 1048576)} MB{/if}
       </span>
     </div>
     <div class="row">
-      <button onclick={() => move(-1)} title="previous (←)">◀</button>
-      <button onclick={() => move(1)} title="next (→)">▶</button>
+      <button onclick={() => step(-1)} title="previous picture, then the previous item (←)">◀</button>
+      <button onclick={() => step(1)} title="next picture, then the next item (→)">▶</button>
       <button class:active={slideshow} onclick={() => (slideshow = !slideshow)} title="slideshow (space)">
         ▶▶ {slideshow ? "Stop" : "Slideshow"}
       </button>

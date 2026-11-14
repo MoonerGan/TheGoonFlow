@@ -22,6 +22,7 @@
     deleteItem,
     deleteMod,
     getItem,
+    getSourceImages,
     launchItem,
     launchMod,
     listMods,
@@ -35,9 +36,11 @@
     revertMod,
     extractGame,
     extractPlan,
+    storeSourceImage,
     storeVideo,
     updateItem,
     videoInfo,
+    type CandidateImage,
     type EnrichReport,
     type ExtractPlan,
     type ItemDetail,
@@ -118,6 +121,17 @@
   let enrichReport = $state<EnrichReport | null>(null);
   let enrichError = $state<string | null>(null);
 
+  // #53: the pictures a source page offered, kept as candidates. Nothing was
+  // downloaded to build this list - the default stays one cover per clip - and
+  // each row has its own Store action, so pulling the art the user actually wants
+  // is one polite fetch per chosen picture instead of a mirror of the thread.
+  let images = $state<CandidateImage[]>([]);
+  let storingImage = $state<string | null>(null);
+  let imageMsg = $state<string | null>(null);
+  let showAllImages = $state(false);
+  // a page can offer 100+ attachments; the section shows a screenful and says so
+  const IMAGE_PAGE = 24;
+
   // launch (#18, games only)
   let launchPlan = $state<LaunchPlan | null>(null);
   let launching = $state(false);
@@ -197,6 +211,9 @@
           notes: d.notes ?? "",
         };
       }
+      // #53: what pictures the source pages offered. Games too - an f95 thread
+      // clip is a game item whose art lives in attachments.
+      await loadImages();
       if (isGame) {
         try {
           launchPlan = await previewLaunch(item.id);
@@ -353,12 +370,56 @@
     try {
       enrichReport = await reEnrichItem(item.id);
       detail = await getItem(item.id);
+      // #53: a re-fetch is also how the candidate list gets refreshed - threads
+      // gain attachments over time, and a stale list would hide the newest one.
+      await loadImages();
       onChanged();
     } catch (e) {
       enrichError = String(e);
     } finally {
       enriching = false;
     }
+  }
+
+  /** #53: what the last fetch found for this item. Advisory: a vault that locks
+   * mid-load just leaves the list empty. */
+  async function loadImages() {
+    try {
+      images = await getSourceImages(item.id);
+    } catch {
+      images = [];
+    }
+  }
+
+  /** #53: store one chosen picture. The backend runs this as a job - a line in
+   * the activity strip, a Stop button, given up on by Lock or Nuke - through the
+   * site's rate lane, and it types the bytes by sniffing them, so a blocked
+   * hotlink page never enters the vault pretending to be a jpg. */
+  async function storeImage(url: string) {
+    if (storingImage) return;
+    storingImage = url;
+    imageMsg = null;
+    try {
+      const r = await storeSourceImage(item.id, url);
+      imageMsg = r.already
+        ? "the vault already had these exact bytes — stored once, deduped by content hash"
+        : `stored ${r.mime}, ${Math.max(1, Math.round(r.bytes / 1024))} KB${r.tile ? ", and it became the grid tile" : ""}`;
+      evictMedia([item.id]);
+      detail = await getItem(item.id);
+      await loadImages();
+      onChanged();
+    } catch (e) {
+      imageMsg = String(e);
+    } finally {
+      storingImage = null;
+    }
+  }
+
+  /** #53: attachment urls are long, and their tail is what identifies them. The
+   * full url stays on the element for hover and for the store call itself. */
+  function shortUrl(url: string): string {
+    const tail = url.split("/").pop() ?? url;
+    return tail.length > 46 ? `…${tail.slice(-45)}` : tail;
   }
 
   async function doLaunch() {
@@ -720,6 +781,44 @@
           {#each enrichReport.notes as n}
             <p class="hint">{n}</p>
           {/each}
+        {/if}
+        {#if images.length > 0}
+          <!-- #53: the attachments the last fetch found. They are candidates, not
+               vault contents: the clip still downloaded one cover, and every
+               picture here costs one deliberate, polite fetch when it is pressed. -->
+          <p class="hint">
+            {images.length} picture{images.length === 1 ? "" : "s"} this page offered
+            — storing one fetches only that one
+          </p>
+          {#each images.slice(0, showAllImages ? images.length : IMAGE_PAGE) as im (im.url)}
+            <div class="source-row">
+              <code title={im.url}>{shortUrl(im.url)}</code>
+              {#if im.storedAt}
+                <span class="chip">stored {when(im.storedAt)}</span>
+              {:else}
+                <button
+                  onclick={() => storeImage(im.url)}
+                  disabled={storingImage !== null}
+                  title="fetch this one picture through the site's polite lane"
+                >
+                  {storingImage === im.url ? "Storing…" : "Store"}
+                </button>
+              {/if}
+            </div>
+          {/each}
+          {#if images.length > IMAGE_PAGE}
+            <div class="row">
+              <button class="ghost" onclick={() => (showAllImages = !showAllImages)}>
+                {showAllImages ? "Show fewer" : `Show all ${images.length}`}
+              </button>
+              <span class="hint">
+                {images.filter((i) => i.storedAt).length} of {images.length} stored
+              </span>
+            </div>
+          {/if}
+          {#if imageMsg}
+            <p class="report-inline">{imageMsg}</p>
+          {/if}
         {/if}
         {#if enrichError}
           <p class="error">{enrichError}</p>

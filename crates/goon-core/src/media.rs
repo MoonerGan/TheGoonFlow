@@ -353,6 +353,86 @@ pub fn thumbs_for(conn: &Connection, item_ids: &[String]) -> Vec<(String, String
     out
 }
 
+/// One media row without its bytes: what the viewer's filmstrip lists (#62).
+/// An item can carry a dozen originals, and a strip that pulled every BLOB to
+/// draw one row of thumbnails would load the vault to paint 200 px squares.
+pub struct MediaMeta {
+    pub id: i64,
+    pub kind: String,
+    pub mime: String,
+    /// bytes in the row, straight from `length(data)`: enough to size and label
+    /// the frame without touching it
+    pub size: i64,
+}
+
+/// Every viewable frame the item holds, oldest first (#62). [`best_for`] answers
+/// "which single copy is the best one to show"; the strip wants all of them, and
+/// `video` rows need no special case - they are frames with kind "video".
+///
+/// The generated `thumb` row is dropped as soon as a real original exists: it is
+/// that same picture at 360 px ([`put_thumbnail`]), so it would show up in the
+/// strip twice. An item whose only media is the tile - every single-image item
+/// written before #62 - still returns the tile, so those keep rendering.
+///
+/// `item_id` leads both the WHERE clause and media_hash_idx, so this walks one
+/// item's index range and `ORDER BY id` sorts a handful of rows.
+pub fn frames_for(conn: &Connection, item_id: &str) -> Vec<MediaMeta> {
+    let mut stmt = match conn
+        .prepare("SELECT id, kind, mime, length(data) FROM media WHERE item_id = ?1 ORDER BY id")
+    {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    if let Ok(rows) = stmt.query_map(params![item_id], |r| {
+        Ok(MediaMeta {
+            id: r.get(0)?,
+            kind: r.get(1)?,
+            mime: r.get(2)?,
+            size: r.get(3)?,
+        })
+    }) {
+        for row in rows.flatten() {
+            out.push(row);
+        }
+    }
+    if out.iter().any(|m| m.kind != "thumb") {
+        out.retain(|m| m.kind != "thumb");
+    }
+    out
+}
+
+/// One frame's bytes, by the id [`frames_for`] handed out (#62). No item_id
+/// argument on purpose: media.id is unique across the vault and the caller has
+/// already proven the item lives in this one.
+pub fn bytes_for_id(conn: &Connection, id: i64) -> Option<MediaBlob> {
+    conn.query_row(
+        "SELECT kind, mime, data FROM media WHERE id = ?1",
+        params![id],
+        |r| {
+            Ok(MediaBlob {
+                kind: r.get(0)?,
+                mime: r.get(1)?,
+                data: r.get(2)?,
+            })
+        },
+    )
+    .ok()
+}
+
+/// How many media rows the item holds - tile included, so this is what the
+/// vault *stores*, not what the strip shows (#62 reports and tests).
+pub fn media_count(conn: &Connection, item_id: &str) -> usize {
+    let rows = conn
+        .query_row(
+            "SELECT count(*) FROM media WHERE item_id = ?1",
+            params![item_id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0);
+    usize::try_from(rows).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -368,6 +448,24 @@ mod tests {
         img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
             .unwrap();
         buf
+    }
+
+    /// PNG-headed bytes that differ by one byte, for tests that need several
+    /// *distinct* originals on one item (#62). They are only ever sniffed and
+    /// stored, never decoded, so the payload stays synthetic.
+    fn fake_png(tag: u8) -> Vec<u8> {
+        let mut b = b"\x89PNG\r\n\x1a\n".to_vec();
+        b.extend_from_slice(&[tag; 24]);
+        b
+    }
+
+    /// One item row, inserted the way every test here does it.
+    fn insert_post(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post','t','0','0')",
+            [id],
+        )
+        .unwrap();
     }
 
     #[test]
@@ -585,5 +683,103 @@ mod tests {
         assert!(put_thumbnail(&conn, "m5", &png));
         assert_eq!(best_for(&conn, "m5").unwrap().kind, "thumb");
         assert!(best_for(&conn, "m1").is_none());
+    }
+
+    /// #62: one page carries many pictures, so the strip must list every stored
+    /// original in the order they arrived - and must not add the tile, which is
+    /// a copy of one of them, as a second frame.
+    #[test]
+    fn every_original_is_its_own_frame_in_insertion_order() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        insert_post(&conn, "f1");
+        let (a, b, c) = (fake_png(1), fake_png(2), fake_png(3));
+        for bytes in [&a, &b, &c] {
+            assert!(put_full_image(&conn, "f1", bytes));
+        }
+        assert!(put_thumbnail(&conn, "f1", &sample_png()));
+
+        let frames = frames_for(&conn, "f1");
+        assert_eq!(frames.len(), 3, "the tile is not a frame of its own");
+        let kinds: Vec<&str> = frames.iter().map(|f| f.kind.as_str()).collect();
+        assert!(
+            kinds.iter().all(|k| *k == "full"),
+            "the tile must not pose as a second frame: kinds={kinds:?}"
+        );
+        let ids: Vec<i64> = frames.iter().map(|f| f.id).collect();
+        assert!(ids.windows(2).all(|w| w[0] < w[1]), "ids ascend: {ids:?}");
+        let sizes: Vec<i64> = frames.iter().map(|f| f.size).collect();
+        assert_eq!(
+            sizes,
+            vec![a.len() as i64, b.len() as i64, c.len() as i64],
+            "sizes are the stored byte counts, in insertion order"
+        );
+        assert!(frames.iter().all(|f| f.mime == "image/png"));
+        assert!(get_thumb(&conn, "f1").is_some(), "the grid keeps its tile");
+        assert_eq!(media_count(&conn, "f1"), 4, "3 originals + the tile");
+    }
+
+    /// The back-compat guarantee for a vault written before #62: an item whose
+    /// only media is the generated tile still has exactly one frame to show.
+    #[test]
+    fn a_tile_only_item_still_yields_its_tile() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        insert_post(&conn, "f2");
+        assert!(put_thumbnail(&conn, "f2", &sample_png()));
+
+        let frames = frames_for(&conn, "f2");
+        assert_eq!(frames.len(), 1, "the tile is the item's one frame");
+        assert_eq!(frames[0].kind, "thumb");
+        let tile = bytes_for_id(&conn, frames[0].id).expect("the tile's bytes are there");
+        assert_eq!(tile.kind, "thumb");
+        assert_eq!(tile.data.len() as i64, frames[0].size);
+        // an item with no media at all is empty, not a phantom frame
+        assert!(frames_for(&conn, "never-seen").is_empty());
+        assert_eq!(media_count(&conn, "never-seen"), 0);
+    }
+
+    /// #62: listing frames is cheap, the bytes come one at a time by row id.
+    /// Exact bytes, and an id that is not in this vault is a miss, not a panic.
+    #[test]
+    fn frame_bytes_come_back_exact_by_row_id() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        insert_post(&conn, "f3");
+        let png = fake_png(7);
+        assert!(put_full_image(&conn, "f3", &png));
+        assert!(put_video(&conn, "f3", "video/mp4", b"ftypmp42"));
+
+        let frames = frames_for(&conn, "f3");
+        assert_eq!(frames.len(), 2, "a video row is just another frame kind");
+        assert_eq!(frames[1].kind, "video");
+        let full = bytes_for_id(&conn, frames[0].id).expect("frame 0");
+        assert_eq!(full.kind, "full");
+        assert_eq!(full.mime, "image/png");
+        assert_eq!(full.data, png, "the bytes are what we stored");
+        let movie = bytes_for_id(&conn, frames[1].id).expect("frame 1");
+        assert_eq!(movie.mime, "video/mp4");
+        assert_eq!(movie.data, b"ftypmp42".to_vec());
+        assert!(
+            bytes_for_id(&conn, 999_999).is_none(),
+            "no such row in this vault"
+        );
+    }
+
+    /// Content-hash dedup predates #62 and has to survive it: the same bytes
+    /// fetched twice for one item are one frame, not two in the strip.
+    #[test]
+    fn identical_bytes_are_one_frame_not_two() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        insert_post(&conn, "f4");
+        let png = fake_png(9);
+        assert!(put_full_image(&conn, "f4", &png));
+        assert!(put_full_image(&conn, "f4", &png));
+        assert_eq!(media_count(&conn, "f4"), 1, "one row for identical bytes");
+        let frames = frames_for(&conn, "f4");
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].kind, "full");
+        assert_eq!(frames[0].size, png.len() as i64);
     }
 }
