@@ -175,6 +175,10 @@ the board's *In review* column is the current list.
     counts in the headers; *Edit* turns fields into inputs, changing Notes then *Save*
     returns to view mode showing what the vault holds; leaving with unsaved edits asks
     first; in a 560 px window nothing scrolls sideways and Save stays reachable.
+    #43's second round: in Edit mode **Cancel** leaves the form and keeps the entry open
+    in view mode - it must not close the dialog - and it still asks before discarding a
+    field you changed. In the Sources section a 120-character url must not be laid over
+    its own *Store* / detach control: the row wraps instead.
 17. Media memory (#44): hold `→` through a hundred images and watch the GoonFlow
     working set in Task Manager - it should plateau near 200 MB, not climb; press the
     panic key mid-load, tap again, re-unlock → the viewer refetches and shows nothing
@@ -265,6 +269,15 @@ the board's *In review* column is the current list.
      `ipb_pass_hash` and to a real member id with that bad hash alike, so its verdict says
      the site could not tell them apart and the row stays un-green instead of claiming a
      working session.
+ 30. Viewer, the parts that used to move on their own: open a media card whose tile is
+     small and whose full copy is much larger → the filmstrip and the control bar must
+     not jump when the full picture lands (the media sits in a box that already fills
+     the stage). Press `a` (or **Actual**) → the picture shows at its own pixels and the
+     button's tooltip names them (`this frame is 1200x630`); `0` fits it again. A video
+     that exists only as a link, or as a file in a folder, says *"kept as a link or as a
+     path on this machine… not played here yet"*; a video stored in the vault past 96 MB
+     states its size; and neither sentence says "open it from its source link", because
+     for those items there is nothing to open.
 
 ## 4. House rules that prevent whole classes of damage
 
