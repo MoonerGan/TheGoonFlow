@@ -12,6 +12,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "GoonFlow"
 path = "src/main.rs"
 
+# The exe has to carry its own UI. tauri's own build script sets `dev = !custom_protocol`
+# (tauri-2.12.5 build.rs:253), and in `dev` mode the window loads `build.devUrl`
+# (http://localhost:1420) instead of the embedded assets - so without this feature a
+# `cargo build --release` binary shows WebView2's "can't reach this page /
+# ERR_CONNECTION_REFUSED" unless a vite dev server happens to be running. That is what
+# tools/verify-artifact.ps1 step 0 now proves, so it can never be silent again.
+[features]
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

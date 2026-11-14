@@ -8,6 +8,13 @@
 # Out-File threw, cargo never started, and $LASTEXITCODE/Get-FileHash happily
 # reported the *previous* build's numbers. A summary line that cannot be trusted
 # is worse than no summary, so every step that could fake a success is checked.
+#
+# Step 0 exists for the same reason: `cargo build --release` never runs tauri's
+# beforeBuildCommand, so the UI that gets embedded is whatever apps\desktop\dist
+# happens to hold. Two artifacts were shipped whose windows loaded
+# http://localhost:1420 instead (see invariant 23 in docs/DEVELOPMENT.md), so the
+# frontend is built here, the dist directory is touched so cargo re-embeds it, and
+# tools\webview-embedded-test.ps1 (verify-artifact step 0) proves the result.
 # Usage: powershell -ExecutionPolicy Bypass -File tools\run-release.ps1 -tag m11
 param([string]$tag = 'dev')
 $ErrorActionPreference = 'Continue'
@@ -39,6 +46,35 @@ try {
 }
 
 try {
+    # 0. the UI that will be embedded. A stale dist makes an exe that starts, answers
+    # the companion API, reacts to the panic key - and shows a screen that has nothing
+    # to do with the commit it is labelled with. So build it, and fail rather than
+    # build around an old one.
+    $root = (Get-Location).Path
+    $dist = Join-Path $root 'apps\desktop\dist'
+    $npm = Join-Path $env:ProgramFiles 'nodejs\npm.cmd'
+    $feLog = "$PSScriptRoot\last-frontend-build.log"
+    $feExit = 'no npm'
+    $feFiles = @()
+    if (Test-Path $npm) {
+        Push-Location (Join-Path $root 'apps\desktop')
+        & $npm run build 2>&1 | Out-File -Encoding utf8 $feLog
+        $feExit = $LASTEXITCODE
+        Pop-Location
+        if ($feExit -eq 0 -and (Test-Path $dist)) {
+            $feFiles = @(Get-ChildItem $dist -Recurse -File | ForEach-Object { $_.Name + ' ' + $_.Length })
+            # tauri-build only watches the dist directory itself
+            # (tauri-build-2.7.4 codegen/context.rs:96), so bump it: otherwise cargo
+            # reuses yesterday's embedded assets without noticing.
+            (Get-Item $dist).LastWriteTime = Get-Date
+        }
+    }
+    if ($feExit -ne 0) {
+        Write-Output "ABORT: frontend build failed (exit=$feExit), log: $feLog"
+        if (Test-Path $feLog) { Get-Content $feLog -Tail 20 | Out-String -Width 200 }
+        exit 1
+    }
+
     $pre = $null
     if (Test-Path $exe) {
         $preItem = Get-Item $exe
@@ -72,6 +108,8 @@ try {
 
     @(
         "tag: $tag"
+        "frontend build exit: $feExit"
+        "embedded frontend: $($feFiles -join ' | ')"
         "cargo build --release exit: $exit"
         "build ran to completion: $(if ($buildRan) { 'yes' } else { 'NO - the numbers below are the previous build' })"
         "log lines: $($lines.Count)"
@@ -87,7 +125,7 @@ try {
         "built-at: $(Get-Date -Format 's')"
     ) | Set-Content -Encoding utf8 "$PSScriptRoot\last-build-summary.txt"
 
-    Write-Output "exit=$exit buildRan=$buildRan sha=$sha"
+    Write-Output "exit=$exit buildRan=$buildRan feExit=$feExit sha=$sha"
     if (-not $buildRan) { exit 3 }
 } finally {
     $lock.Close()

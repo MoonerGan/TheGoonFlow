@@ -99,8 +99,9 @@ single-instance behaviour are the two things unit tests cannot cover.
 
 | script | what it proves |
 |---|---|
+| `tools\webview-embedded-test.ps1` | the window shows the UI **inside the exe**: it opens a WebView2 DevTools port and reads the page it really loaded, so `url = http://tauri.localhost/` + the app's title pass and `http://localhost:<port>` (a vite dev server, `ERR_CONNECTION_REFUSED` on screen) fails the artifact; it also insists the hashed asset names in `dist\index.html` are inside the binary, so yesterday's UI cannot ship as today's |
 | `tools\smoke-release.ps1` | release exe starts, companion answers on `127.0.0.1`, `/v1/status` handshake, window is findable |
-| `tools\verify-artifact.ps1` | the sha256 of the exe + the git tip it came from, then the smoke and the three checks below, so an artifact can be re-verified as a unit |
+| `tools\verify-artifact.ps1` | the sha256 of the exe + the git tip it came from, then step 0 (the row above) and the smoke and the checks below, so an artifact can be re-verified as a unit |
 | `tools\close-exit-test.ps1` | closing the window really exits; panic-tap hides and leaves the process alive; a second launch hands off to the running instance and reveals its window, leaving one process (D19) |
 | `tools\panic-tap-test.ps1` | tap hides the window, tap again brings it back, jobs stop |
 | `tools\panic-hold-test.ps1` | holding 3 s escalates to the crypto-erase path |

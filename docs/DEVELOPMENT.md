@@ -467,6 +467,22 @@ tools/
     `tools/close-exit-test.ps1`); there is no tray icon on purpose, because
     permanent chrome contradicts DESIGN §9 deniability.
 
+23. **The release exe must carry its own UI — measured, not assumed.** tauri's own
+    build script sets `dev = !custom_protocol` (tauri-2.12.5 `build.rs:253`), and a
+    window built in `dev` mode loads `build.devUrl` (`http://localhost:1420`) instead
+    of the embedded assets. A `cargo build --release` of an app that never declares the
+    `custom-protocol` feature therefore starts, gets its window, answers the companion
+    API and still reacts to the panic key, while the screen shows WebView2's "Hmmm...
+    can't reach this page / ERR_CONNECTION_REFUSED" — it only looks alive while a vite
+    dev server happens to listen. So `apps/desktop/src-tauri/Cargo.toml` declares
+    `default = ["custom-protocol"]`; `tools\run-release.ps1` builds the frontend before
+    cargo (cargo never runs tauri's `beforeBuildCommand`) and touches
+    `apps\desktop\dist` so cargo re-runs its codegen and re-embeds those bytes; and
+    `tools\webview-embedded-test.ps1` (= `verify-artifact.ps1` step 0) opens a WebView2
+    DevTools port, fails the artifact unless the page url is `http://tauri.localhost/`
+    with the app's title, and fails it again if the hashed asset names in
+    `dist\index.html` are not inside the binary.
+
 ## 5. Testing
 
 ```powershell
@@ -589,6 +605,23 @@ manually.
 cd apps\desktop
 npm run tauri build
 ```
+
+or the way artifacts are actually cut and signed off here:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\run-release.ps1 -tag m20
+powershell -ExecutionPolicy Bypass -File tools\verify-artifact.ps1
+```
+
+`run-release.ps1` runs the frontend build first, because `cargo build --release` never runs
+tauri's `beforeBuildCommand`: without that step the exe embeds whatever `apps\desktop\dist`
+happened to hold. It then touches `dist` so cargo re-runs tauri's codegen — the build script
+watches the dist **directory** only (tauri-build-2.7.4 `codegen/context.rs:96`), not the files
+inside it — and `verify-artifact.ps1` step 0 proves the result: the window must come from
+`http://tauri.localhost/` and the binary must contain the hashed asset names that
+`dist\index.html` references right now. Plain `cargo build --release` is fine too, but only
+with `custom-protocol` on (invariant 23 in §4) — otherwise the exe loads the dev URL and shows
+WebView2's "can't reach this page".
 
 Outputs:
 

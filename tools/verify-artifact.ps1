@@ -13,6 +13,10 @@ function Read-Cfg([string]$dir) {
 "exe sha256 = " + ((Get-FileHash $exe -Algorithm SHA256).Hash).ToUpper()
 "git tip    = " + (& 'C:\Program Files\Git\bin\git.exe' -C C:\Source\TheGoonFlow rev-parse HEAD)
 ""
+"=== 0. the exe must carry its own UI (no vite dev server) ==="
+& 'C:\Source\TheGoonFlow\tools\webview-embedded-test.ps1' 2>&1 | Out-String -Width 200
+if ($LASTEXITCODE -ne 0) { "step 0 FAILED - do not hand this exe over"; exit 1 }
+
 "=== 1. smoke on the real vault (window find + panic tap hide/reveal) ==="
 & 'C:\Source\TheGoonFlow\tools\smoke-release.ps1' 2>&1 | Out-String -Width 200
 
