@@ -1221,6 +1221,21 @@ pub fn set_site_setting(
     Ok(())
 }
 
+/// #38: forget the cookie a site has, keeping its rate box and on/off state.
+///
+/// This could not be done through [`set_site_setting`] before: that argument is
+/// `Option<&str>` and the statement uses `IFNULL(?3, cookie)`, where `None` means
+/// *"leave the stored value alone"*. So "clear the cookie" from the UI wrote
+/// nothing and read back as success — the stale paste stayed in the vault and
+/// kept being sent. The true answer is an explicit empty write.
+/// Returns whether a settings row for this site existed at all.
+pub fn clear_site_cookie(conn: &Connection, site: &str) -> rusqlite::Result<bool> {
+    Ok(conn.execute(
+        "UPDATE site_settings SET cookie = '' WHERE site = ?1",
+        params![site],
+    )? > 0)
+}
+
 /// `default` matters per site: repack mirrors ship off (D8), everything else on.
 pub fn site_enabled(conn: &Connection, site: &str, default: bool) -> bool {
     conn.query_row(
@@ -1913,6 +1928,22 @@ mod tests {
         // later calls must not clobber the rate that was seeded on insert
         assert_eq!(site_rate_ms(&conn, "ehentai", 10_500), 10_500);
         assert_eq!(site_rate_ms(&conn, "exhentai", 10_500), 10_500);
+        // #38: and a cookie can actually be taken back out. Passing `None` to
+        // set_site_setting means "leave it", which is why a Clear control that
+        // went through it never removed anything.
+        assert!(clear_site_cookie(&conn, "ehentai").unwrap());
+        assert_eq!(site_cookie(&conn, "ehentai"), None);
+        assert_eq!(
+            get_site_settings(&conn)
+                .unwrap()
+                .iter()
+                .find(|s| s.site == "ehentai")
+                .map(|s| (s.cookie_set, s.rate_ms, s.enabled)),
+            Some((false, 10_500, true)),
+            "clearing the cookie leaves the rate box and the switch alone"
+        );
+        // a site with no settings row is reported as such, not as cleared
+        assert!(!clear_site_cookie(&conn, "no-such-site").unwrap());
         assert_eq!(
             source_item_id(
                 &conn,

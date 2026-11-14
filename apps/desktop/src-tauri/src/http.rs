@@ -337,3 +337,297 @@ mod wiring_tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
+
+/// Live probe: what do the hosts we pull bytes from actually answer to the two
+/// client identities this file defines? Nothing is asserted here — the printout
+/// *is* the product, because the answer is what decides the policy above. Site
+/// protection moves without telling us (rule34 used to 403 our UA on the CDN,
+/// #50; e-hentai rewrote its gallery page around the time of #63), so the only
+/// honest way to fix a download is to re-measure first.
+///
+/// ```text
+/// $env:GOON_EH_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\ehentaicookie.txt" -Raw).Trim()
+/// powershell -ExecutionPolicy Bypass -Command "& tools\dev-env.ps1; `
+///   cargo test -p goonflow-desktop --lib -- --ignored --nocapture --test-threads 1 live_site_answers"
+/// ```
+#[cfg(test)]
+mod live_probe {
+    use super::*;
+    use std::time::Duration;
+
+    /// Same knobs as `build_client`, minus the vault (no proxy to honor).
+    fn client(ua: &str, follow: bool, http1: bool) -> reqwest::Client {
+        let mut b = reqwest::Client::builder()
+            .user_agent(ua)
+            .timeout(Duration::from_secs(30))
+            .redirect(if follow {
+                reqwest::redirect::Policy::default()
+            } else {
+                reqwest::redirect::Policy::none()
+            });
+        if http1 {
+            b = b.http1_only();
+        }
+        b.build().expect("client")
+    }
+
+    /// One request, printed in one line: status, content type, size, and the
+    /// Cloudflare markers that say a bot check answered rather than the origin
+    /// refusing us. Returns whether the host gave us bytes.
+    async fn ask(
+        label: &str,
+        url: &str,
+        ua: &str,
+        referer: Option<&str>,
+        cookie: Option<&str>,
+        http1: bool,
+    ) -> bool {
+        let mut req = client(ua, true, http1).get(url);
+        if let Some(r) = referer {
+            req = req.header(reqwest::header::REFERER, r);
+        }
+        if let Some(c) = cookie {
+            req = req.header(reqwest::header::COOKIE, c);
+        }
+        match req.send().await {
+            Err(e) => {
+                println!("{label:<44} TRANSPORT {e}");
+                false
+            }
+            Ok(r) => {
+                let status = r.status();
+                let kind = r
+                    .headers()
+                    .get(reqwest::header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("?")
+                    .to_string();
+                let cf = ["cf-mitigated", "server", "cf-cache-status"]
+                    .iter()
+                    .filter_map(|h| {
+                        r.headers()
+                            .get(*h)
+                            .and_then(|v| v.to_str().ok())
+                            .map(|v| format!("{h}={v}"))
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let bytes = r.bytes().await.map(|b| b.len()).unwrap_or(0);
+                println!(
+                    "{label:<44} {:<3} {kind} {bytes} B  {cf}",
+                    status.as_u16(),
+                );
+                status.is_success() && bytes > 0
+            }
+        }
+    }
+
+    /// Read a page as text with one of the two client identities.
+    async fn page_text(url: &str, ua: &str, cookie: Option<&str>) -> Option<String> {
+        let mut req = client(ua, true, false).get(url);
+        if let Some(c) = cookie {
+            req = req.header(reqwest::header::COOKIE, c);
+        }
+        req.send().await.ok()?.text().await.ok()
+    }
+
+    /// First substring that starts just after `pat` and runs to the next
+    /// delimiter. Hand-rolled on purpose: this binary has no regex crate, and
+    /// the pages we scan are small.
+    fn grab(html: &str, pat: &str) -> Option<String> {
+        let i = html.find(pat)? + pat.len();
+        let rest = &html[i..];
+        let end = rest.find(['"', '\'', ')', ' ', ';', '\n']).unwrap_or(rest.len());
+        let s = rest[..end].trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
+    /// Like [`grab`] but keeps `pat` itself — for urls that are already written
+    /// out in full in the page.
+    fn grab_url(html: &str, pat: &str) -> Option<String> {
+        let i = html.find(pat)?;
+        let rest = &html[i..];
+        let end = rest.find(['"', '\'', ')', ' ', ';', '\n']).unwrap_or(rest.len());
+        let s = rest[..end].trim();
+        (!s.is_empty()).then(|| s.to_string())
+    }
+
+    #[ignore = "live: asks rule34, e621 and e-hentai for real bytes"]
+    #[tokio::test]
+    async fn live_site_answers() {
+        let cookie: Option<String> = match std::env::var("GOON_EH_COOKIE") {
+            Ok(c) if !c.trim().is_empty() => Some(c.trim().to_string()),
+            _ => {
+                println!("GOON_EH_COOKIE not set: the e-hentai cookie rows below are skipped");
+                None
+            }
+        };
+        let ck = cookie.as_deref();
+
+        println!("--- rule34: does the site still answer, and does the CDN care? ---");
+        // The dapi call clip() makes for a rule34 post link.
+        ask(
+            "rule34 dapi, honest UA",
+            "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id=3411909",
+            crate::ingest::UA,
+            Some("https://rule34.xxx"),
+            None,
+            false,
+        )
+        .await;
+        ask(
+            "rule34 dapi, browser UA",
+            "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id=3411909",
+            FILE_UA,
+            Some("https://rule34.xxx"),
+            None,
+            false,
+        )
+        .await;
+        // The clipped file link itself, exactly as ingest::get_bytes asks for it.
+        ask(
+            "rule34 cdn, file UA + referer (h2)",
+            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
+            FILE_UA,
+            Some("https://rule34.xxx"),
+            None,
+            false,
+        )
+        .await;
+        ask(
+            "rule34 cdn, file UA + referer (http1)",
+            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
+            FILE_UA,
+            Some("https://rule34.xxx"),
+            None,
+            true,
+        )
+        .await;
+        ask(
+            "rule34 cdn, honest UA + referer",
+            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
+            crate::ingest::UA,
+            Some("https://rule34.xxx"),
+            None,
+            false,
+        )
+        .await;
+
+        println!("--- e621: api json, then the file that json names ---");
+        if ask(
+            "e621 posts.json, honest UA",
+            "https://e621.net/posts.json?limit=1",
+            crate::ingest::UA,
+            Some("https://e621.net"),
+            None,
+            false,
+        )
+        .await
+        {
+            let body = page_text("https://e621.net/posts.json?limit=1", crate::ingest::UA, None).await;
+            let file = body.and_then(|t| {
+                serde_json::from_str::<serde_json::Value>(&t)
+                    .ok()
+                    .and_then(|v| v["posts"][0]["file"]["url"].as_str().map(|s| s.to_string()))
+            });
+            println!("e621 live file url: {file:?}");
+            if let Some(url) = file {
+                ask("e621 file, file UA + referer", &url, FILE_UA, Some("https://e621.net"), None, false).await;
+                ask("e621 file, file UA, no referer", &url, FILE_UA, None, None, false).await;
+                ask("e621 file, honest UA + referer", &url, crate::ingest::UA, Some("https://e621.net"), None, false).await;
+            }
+        }
+
+        println!("--- e-hentai: gallery page, sprite sheet, slideshow, cookie verdicts ---");
+        // gid+key of the gallery the user reported; the key is part of the url
+        // now, /g/<gid>/ alone is a bare apache 404.
+        let gallery = "https://e-hentai.org/g/4089666/b9d914bef4/";
+        ask("eh gallery, honest UA, no cookie", gallery, crate::ingest::UA, None, None, false).await;
+        if ck.is_some() {
+            ask("eh gallery, honest UA, cookie", gallery, crate::ingest::UA, None, ck, false).await;
+            ask("eh gallery, file UA, cookie", gallery, FILE_UA, None, ck, false).await;
+        }
+        // The sprite sheet and the slideshow keys are per-session, so pull them
+        // out of the page we just got instead of hardcoding ones that rot.
+        if let Some(html) = page_text(gallery, crate::ingest::UA, ck).await {
+            // Two different sheets in the 2026 page: the cover tile on ehgt.org
+            // (`gthumb`, offset 0 0) and the grid tiles on a random
+            // `*.hath.network` host, laid out side by side with negative x
+            // offsets. Both are webp; neither was there before (#46's gdtm/
+            // og:image markup is gone).
+            let cover = grab(&html, "background:transparent url(");
+            let grid = grab(&html, "url(").filter(|g| !g.contains("ehgt.org"));
+            let slide = grab_url(&html, "https://e-hentai.org/s/");
+            println!(
+                "eh page {} B, cover sheet {cover:?}, grid sheet {grid:?}",
+                html.len()
+            );
+            println!("eh live slide: {slide:?}");
+            for s in [cover, grid].into_iter().flatten() {
+                ask("eh cover sheet, file UA + referer", &s, FILE_UA, Some("https://e-hentai.org/"), ck, false).await;
+                ask("eh cover sheet, file UA, no referer", &s, FILE_UA, None, ck, false).await;
+            }
+            if let Some(s) = slide {
+                ask("eh slideshow, honest UA", &s, crate::ingest::UA, Some(gallery), ck, false).await;
+                let slide_body = page_text(&s, crate::ingest::UA, ck).await.unwrap_or_default();
+                let full = grab_url(&slide_body, "https://e-hentai.org/r/");
+                let orig = grab_url(&slide_body, "https://e-hentai.org/fullimg/");
+                println!(
+                    "eh live r/ image: {full:?}, fullimg: {orig:?} (slide page {} B)",
+                    slide_body.len()
+                );
+                if let Some(f) = full {
+                    ask("eh r/ image, file UA + referer", &f, FILE_UA, Some(&s), ck, false).await;
+                    ask("eh r/ image, honest UA, no cookie", &f, crate::ingest::UA, None, None, false).await;
+                }
+                if let Some(f) = orig {
+                    ask("eh fullimg, file UA + referer", &f, FILE_UA, Some(&s), ck, false).await;
+                }
+            }
+        }
+        if let Some(c) = ck {
+            // exhentai in 2026 answers 200 with an *empty* body unless the
+            // request carries `igneous=mystery`; the browser gets that value
+            // from a Set-Cookie we never keep. Without it a "valid" cookie
+            // looks authenticated and still yields nothing.
+            println!(
+                "exhentai root, cookie only        {} B",
+                page_text("https://exhentai.org/", crate::ingest::UA, Some(c))
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0)
+            );
+            let with_igneous = format!("{c}; igneous=mystery");
+            println!(
+                "exhentai root, cookie + igneous   {} B",
+                page_text("https://exhentai.org/", crate::ingest::UA, Some(&with_igneous))
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0)
+            );
+            println!(
+                "exhentai /g/ cookie + igneous     {} B",
+                page_text(gallery.replace("e-hentai", "exhentai").as_str(), crate::ingest::UA, Some(&with_igneous))
+                    .await
+                    .map(|t| t.len())
+                    .unwrap_or(0)
+            );
+            // redirects NOT followed: for exhentai the login hop is the verdict.
+            let r = client(crate::ingest::UA, false, false)
+                .get("https://exhentai.org/")
+                .header(reqwest::header::COOKIE, c)
+                .send()
+                .await;
+            match r {
+                Ok(r) => println!(
+                    "exhentai root, honest UA + cookie     {} location={:?}",
+                    r.status().as_u16(),
+                    r.headers()
+                        .get(reqwest::header::LOCATION)
+                        .and_then(|v| v.to_str().ok())
+                ),
+                Err(e) => println!("exhentai root, honest UA + cookie     TRANSPORT {e}"),
+            }
+        }
+    }
+}

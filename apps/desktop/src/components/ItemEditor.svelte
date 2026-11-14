@@ -267,6 +267,16 @@
     leaveEditor("close");
   }
 
+  /** #43: leave Edit mode and **stay in the entry**. The edit footer used to offer
+   * Save and a second button that closed the whole dialog, so the only way out of
+   * the form was to save or to throw the entry away — the path back to the view
+   * (`leaveEditor("view")`) existed and nothing called it. Cancel now means
+   * cancel the edit, and unsaved field changes still ask first. */
+  function requestCancelEdit() {
+    if (asking) return;
+    leaveEditor("view");
+  }
+
   function requestEdit() {
     error = null;
     editing = true;
@@ -1071,7 +1081,14 @@
     <div class="row modal-foot">
       {#if editing}
         <button class="primary" disabled={saving} onclick={save}>Save</button>
-        <button class="ghost" onclick={requestClose}>Cancel</button>
+        <button
+          class="ghost"
+          disabled={saving}
+          title="leave Edit mode and keep the entry open; field changes you never saved are thrown away, after asking"
+          onclick={requestCancelEdit}
+        >
+          Cancel
+        </button>
       {:else}
         <button class="primary" onclick={requestEdit}>Edit</button>
         <button class="ghost" onclick={requestClose}>Close</button>

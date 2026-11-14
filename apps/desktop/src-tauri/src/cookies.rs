@@ -152,18 +152,25 @@ pub fn structural(site: &str, cookie: &str) -> Verdict {
 ///   header links `Log in` and `Register` exactly once each, the signed-in page
 ///   (272 053 B) contains neither. Class names were *not* used: the obvious
 ///   candidate (`p-header-accountMenu`) was absent from both.
-/// * e-hentai `https://e-hentai.org/g/` ("My Galleries") - a guest gets `404`
-///   (236 B, "Not Found"). The signed-in side could not be measured on this
-///   machine, no e-hentai session here, so a `true` from this one is weaker
-///   evidence than a `false`; the note says so.
-/// * exhentai `https://exhentai.org/` - a guest gets `302` to
-///   `https://forums.e-hentai.org/remoteapi.php?ex=...` with an empty body. Same
-///   caveat: the accepted side is unmeasured, the rejected side is exact.
+/// * e-hentai `https://e-hentai.org/favorites.php` - measured 2026-11-14 on all
+///   three sides with this app's own UA: no cookie and a right-shape-but-wrong-
+///   hash cookie both answer `302` to `bounce_login.php?b=d&bt=1-6` with an empty
+///   body, the real session answers `200` with 11 496 B (same size three times
+///   in a row). This URL **replaced** `https://e-hentai.org/g/`, which the 2026
+///   site answers with `404` for everybody: cookie, junk cookie and no cookie
+///   alike, so it could only ever accuse a good cookie of being stale.
+/// * exhentai `https://exhentai.org/favorites.php` - a guest is bounced to
+///   `https://forums.e-hentai.org/remoteapi.php?ex=…` with an empty body, which
+///   is a clean rejection. Anything else is *not* a clean acceptance: a real
+///   cookie, a made-up `ipb_pass_hash` and a real member id with that bad hash
+///   all answer `200` with **0 bytes**. So the empty `200` proves only that a
+///   cookie was present, never that a session exists, and `judged` returns
+///   `None` for it instead of a green light.
 pub fn probe_url(site: &str) -> Option<&'static str> {
     match site {
         "f95" => Some("https://f95zone.to/"),
-        "ehentai" => Some("https://e-hentai.org/g/"),
-        "exhentai" => Some("https://exhentai.org/"),
+        "ehentai" => Some("https://e-hentai.org/favorites.php"),
+        "exhentai" => Some("https://exhentai.org/favorites.php"),
         _ => None,
     }
 }
@@ -181,12 +188,23 @@ pub fn judged(site: &str, status: u16, target: &str, body: &str) -> Option<bool>
             // which is exactly when we must not claim a session.
             Some(!(body.contains(">Log in<") || body.contains(">Register<")))
         }
-        "ehentai" => Some(status == 200),
+        "ehentai" => {
+            // Measured both ways: the login bounce is the guest answer.
+            if target.contains("bounce_login") || status == 302 || status == 403 {
+                return Some(false);
+            }
+            (status == 200 && !body.trim().is_empty()).then_some(true)
+        }
         "exhentai" => {
             if redirected_to_login(target) || status == 302 || status == 403 {
                 return Some(false);
             }
-            Some(status == 200)
+            if status != 200 {
+                return Some(false);
+            }
+            // The empty 200 is the site's answer to *every* cookie from this
+            // client, good or junk: nothing here can tell them apart.
+            (!body.trim().is_empty()).then_some(true)
         }
         _ => None,
     }
@@ -196,9 +214,22 @@ fn redirected_to_login(target: &str) -> bool {
     target.contains("forums.e-hentai.org")
 }
 
+/// What the site's own answer proved about the paste. Three states because the
+/// EH pair genuinely has a middle one (see [`probe_url`]): an answer that fits
+/// every cookie is not evidence, and calling it a success is how a dead cookie
+/// kept looking alive in the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Live {
+    Yes,
+    No,
+    /// The site answered, but the same answer comes back for a good cookie and a
+    /// made-up one, so it settles nothing.
+    Inconclusive,
+}
+
 /// Ask the site once, with an already-built client. Split out from [`probe`] so
 /// the live test can drive the markers without a vault.
-pub async fn ask(client: &reqwest::Client, site: &str, cookie: &str) -> Result<bool, String> {
+pub async fn ask(client: &reqwest::Client, site: &str, cookie: &str) -> Result<Live, String> {
     let url = probe_url(site).ok_or_else(|| format!("{site} does not take a cookie"))?;
     let mut req = client.get(url);
     if !cookie.is_empty() {
@@ -209,7 +240,7 @@ pub async fn ask(client: &reqwest::Client, site: &str, cookie: &str) -> Result<b
         .await
         .map_err(|e| format!("{site} did not answer the cookie check: {e}"))?;
     let status = resp.status().as_u16();
-    // Redirects are not followed on purpose: for Exhentai the hop to the forums
+    // Redirects are not followed on purpose: for both EH entries the hop to a
     // login page *is* the answer.
     let target = resp
         .headers()
@@ -218,14 +249,17 @@ pub async fn ask(client: &reqwest::Client, site: &str, cookie: &str) -> Result<b
         .unwrap_or(url)
         .to_string();
     let body = resp.text().await.unwrap_or_default();
-    judged(site, status, &target, &body)
-        .ok_or_else(|| format!("no cookie check defined for {site}"))
+    Ok(match judged(site, status, &target, &body) {
+        Some(true) => Live::Yes,
+        Some(false) => Live::No,
+        None => Live::Inconclusive,
+    })
 }
 
 /// Ask the site once, on the polite lane: same proxy policy, page identity (the
 /// honest UA, because this is a page fetch), and it waits its turn behind other
 /// traffic to that site like every other request does.
-pub async fn probe(core: &crate::Core, site: &str, cookie: &str) -> Result<bool, String> {
+pub async fn probe(core: &crate::Core, site: &str, cookie: &str) -> Result<Live, String> {
     let rate = {
         let inner = core.inner.lock().unwrap();
         match inner.opened.as_ref() {
@@ -244,22 +278,35 @@ pub async fn probe(core: &crate::Core, site: &str, cookie: &str) -> Result<bool,
 
 /// Fold the site's answer into the verdict. The wording matters: "usable, but
 /// the site answered as a guest" is the case where a paste looked perfect and
-/// still does not work, and it must not read as a success.
-pub fn finish(v: &mut Verdict, live: Option<bool>) -> &Verdict {
-    v.live = live;
-    v.ok = v.ok && live != Some(false);
-    v.note = match live {
-        None if !v.ok => v.note.clone(),
-        None => format!("{}; not checked against the site", v.note),
-        Some(true) if v.site == "ehentai" || v.site == "exhentai" => {
-            format!("{}; the site answered as a signed-in member (this check is exact for rejections, new for acceptances)", v.note)
+/// still does not work, and an inconclusive answer must not read as a success.
+pub fn finish(v: &mut Verdict, live: Result<Live, String>) -> &Verdict {
+    match live {
+        Ok(Live::Yes) => {
+            v.live = Some(true);
+            v.note = format!("{}; the site answered as a signed-in member", v.note);
         }
-        Some(true) => format!("{}; the site answered as a signed-in member", v.note),
-        Some(false) => format!(
-            "{}; but {} answered as a guest - the cookie is stale or copied from a logged-out window",
-            v.note, v.site
-        ),
-    };
+        Ok(Live::No) => {
+            v.live = Some(false);
+            v.ok = false;
+            v.note = format!(
+                "{}; but {} answered as a guest - the cookie is stale or copied from a \
+                 logged-out window",
+                v.note, v.site
+            );
+        }
+        Ok(Live::Inconclusive) => {
+            v.live = None;
+            v.note = format!(
+                "{}; {} answered in a way that cannot tell a good cookie from a bad one, so \
+                 only the paste itself was checked",
+                v.note, v.site
+            );
+        }
+        Err(e) => {
+            v.live = None;
+            v.note = format!("{}; not checked against the site ({e})", v.note);
+        }
+    }
     v
 }
 
@@ -271,7 +318,7 @@ pub async fn check(core: &crate::Core, site: &str, cookie: &str) -> Verdict {
     if !v.ok {
         return v;
     }
-    let live = probe(core, site, cookie).await.ok();
+    let live = probe(core, site, cookie).await;
     finish(&mut v, live);
     let mut inner = core.inner.lock().unwrap();
     if let Some(o) = inner.opened.as_mut() {
@@ -423,26 +470,45 @@ mod tests {
             ),
             Some(false)
         );
+        // Measured 2026-11-14: the real cookie, a made-up `ipb_pass_hash` and a
+        // real member id with that bad hash all get `200` with **no body**. So an
+        // empty 200 settles nothing and must not become a green light; only a
+        // page actually in the body counts.
+        assert_eq!(judged("exhentai", 200, "https://exhentai.org/favorites.php", ""), None);
         assert_eq!(
-            judged("exhentai", 200, "https://exhentai.org/", "<div/>"),
+            judged("exhentai", 200, "https://exhentai.org/favorites.php", "<div/>"),
             Some(true)
         );
     }
 
     #[test]
-    fn e_hentai_answers_404_to_a_guest_on_the_members_only_page() {
+    fn e_hentai_bounces_a_guest_and_answers_a_member() {
+        // Both shapes measured with this app's own UA on 2026-11-14, the member
+        // side three times over (always 200, always 11 496 B).
         assert_eq!(
             judged(
                 "ehentai",
-                404,
-                "https://e-hentai.org/g/",
-                "<title>404 Not Found</title>"
+                302,
+                "https://e-hentai.org/bounce_login.php?b=d&bt=1-6",
+                ""
             ),
             Some(false)
         );
         assert_eq!(
-            judged("ehentai", 200, "https://e-hentai.org/g/", "<div/>"),
+            judged(
+                "ehentai",
+                200,
+                "https://e-hentai.org/favorites.php",
+                "<title>E-Hentai Galleries</title><div>Watched</div>"
+            ),
             Some(true)
+        );
+        // The route this app used to probe (`/g/`) answers 404 to everybody now,
+        // cookie or not, which is why it is no longer the marker: an answer that
+        // cannot tell the two apart is `None`, not an accusation.
+        assert_eq!(
+            judged("ehentai", 404, "https://e-hentai.org/g/", "<title>404 Not Found</title>"),
+            None
         );
     }
 
@@ -450,17 +516,27 @@ mod tests {
     fn a_stale_cookie_is_reported_as_stale_not_as_usable() {
         let mut v = structural("f95", "xf_session=c; cf_clearance=b");
         assert!(v.ok);
-        finish(&mut v, Some(false));
+        finish(&mut v, Ok(Live::No));
         assert!(!v.ok);
         assert!(v.note.contains("stale"), "{v:?}");
     }
 
     #[test]
+    fn an_inconclusive_answer_is_not_a_pass() {
+        let mut v = structural("exhentai", "ipb_member_id=1; ipb_pass_hash=beef");
+        assert!(v.ok);
+        finish(&mut v, Ok(Live::Inconclusive));
+        assert_eq!(v.live, None, "the site proved nothing, so nothing is claimed");
+        assert!(v.note.contains("cannot tell a good cookie from a bad one"), "{v:?}");
+    }
+
+    #[test]
     fn an_unprobed_verdict_says_it_was_not_checked() {
         let mut v = structural("f95", "xf_session=c; cf_clearance=b");
-        finish(&mut v, None);
+        finish(&mut v, Err("connection reset".into()));
         assert!(v.ok, "structure passed and nothing contradicted it");
-        assert!(v.note.contains("not checked"), "{v:?}");
+        assert!(v.note.contains("not checked against the site"), "{v:?}");
+        assert!(v.note.contains("connection reset"), "the reason survives");
     }
 
     #[test]
@@ -571,8 +647,8 @@ mod tests {
             .unwrap();
         let guest = ask(&client, "f95", "").await.unwrap();
         let member = ask(&client, "f95", &cookie).await.unwrap();
-        println!("guest says signed-in = {guest}, cookie says signed-in = {member}");
-        assert!(!guest, "a cookie-less request must read as a guest");
-        assert!(member, "the saved cookie must read as a signed-in member");
+        println!("no cookie says {guest:?}, the saved cookie says {member:?}");
+        assert_eq!(guest, Live::No, "a cookie-less request must read as a guest");
+        assert_eq!(member, Live::Yes, "the saved cookie must read as a member");
     }
 }

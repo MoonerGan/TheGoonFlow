@@ -169,8 +169,8 @@ below is design intent, not schema.
 **As built (M1/M2):** `apps/desktop/src-tauri/src/ingest.rs` — `classify(url) -> SiteRef{site, kind, remote_id, Mode}` + `fetch_meta(...) -> Meta{title, store_bytes, thumb_bytes, tags, version, note}` + `clip()` (dedup on `sources(site,url)`; the link is stored even when the fetch fails, with the reason as a note). Trait objects deferred until site-packs make the shape real. Policy: images are stored in the vault, **videos stay links**; `file:///…` URLs and direct CDN file URLs (`…/file.gif?267940`) classify as media (`local` / host slug), which is also how bookmark imports resolve them. Per-site enable/cookie/rate come from `site_settings`.
 
 **First-class modules (defaults per D8):**
-- **booru family:** gelbooru.com public API, rule34.xxx danbooru-style API, e621 (UA required). Clean JSON — ship first (M1). e926 filter wiring available via tag blocklist.
-- **e-hentai:** API3 + APIDB cookie auth; hard 10 s rate limit; 114/124 gate pages → manual pass-through UI.
+- **booru family:** gelbooru.com public API, rule34.xxx danbooru-style API, e621 (UA required). Clean JSON — ship first (M1). e926 filter wiring available via tag blocklist. *As shipped (#50, re-measured 2026-11-14):* e621's api answers this app, gelbooru's and rule34's do not — `403 text/html` with `cf-mitigated: challenge` for the honest UA, a browser UA and no UA alike, while the same post's **file host** answers `200 image/jpeg`. So a link that names a file is fetched from the file host and the item states that the tags could not be read; a link that names no file still goes to the api.
+- **e-hentai:** API3 + APIDB cookie auth; hard 10 s rate limit; 114/124 gate pages → manual pass-through UI. *As shipped (#46, re-measured 2026-11-14):* neither the api nor a cookie is used for art. The gallery page names no `<img>` — one sprite sheet plus CSS boxes, so the cover is **cropped** out of it; `/s/<imgkey>/<gid>-<n>` carries one page's full art; `/g/<gid>/` without the gallery key is a bare 404, so the key is read out of the page that links the gallery. The 10 500 ms lane stands, and a gate page marks a saved cookie stale on the spot.
 - **dlsite:** product page metadata (no login), library sync w/ account cookie, direct downloads.
 - **f95zone:** XenForo HTML scrape (thread prefixes → `site_flag` tags incl. `[Completed]` and engine), version parse; account cookie unlocks two-way tracker sync; downloads via seed hosts (buzzheavier, pixeldrain…) → mirror picker.
 - **repacks (off by default):** otomi/kimochi/ryuugames as DLsite mirrors; dead-mirror tolerance.
@@ -267,7 +267,13 @@ Build order note: extension codegen depends on site-packs (§6).
    so "never checked" stays visibly unknown rather than green, and any later fetch
    that hits the login wall marks the cookie stale. The browser extension can hand
    over that browser's own sign-in cookie, by one deliberate click; the app never
-   reads a cookie store by itself.
+   reads a cookie store by itself. The review round added the two halves that were
+   missing: **Clear** (`db::clear_site_cookie`, an explicit empty write — the settings
+   command's `IFNULL(?3, cookie)` can only mean *"keep what is stored"*, so a Clear
+   control wired through it reported success and removed nothing), and a **three-state**
+   live answer (`cookies::Live::{Yes, No, Inconclusive}`), because exhentai answers
+   `200` with **0 bytes** to a real session, a fabricated hash, and a real member id
+   with that bad hash alike — an honest verdict about that site cannot be a boolean.
 5. Stack tutorial (Tauri/Rust/Svelte) for the user — still owed; `docs/DEVELOPMENT.md`
    is the closest thing to it today.
 

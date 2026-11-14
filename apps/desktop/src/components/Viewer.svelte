@@ -75,9 +75,70 @@
   const isGif = $derived(!!entry && entry.mime === "image/gif");
   const isStill = $derived(!!entry && !!entry.bytes && !isVideo && !isGif);
   const elementSrc = $derived(entry?.raw ? `data:${entry.mime};base64,${entry.raw}` : null);
-  // #62: an oversized stored video now keeps its own kind and reports the size it
-  // could not inline, instead of being relabelled a thumbnail by the backend.
+  // #62: an oversized stored video keeps its own kind and reports the size it
+  // could not inline. `INLINE_MAX` in src-tauri/src/lib.rs is where that line is
+  // drawn, so the sentence states it instead of blaming the file.
   const isTooBig = $derived(!!entry && entry.tooBig !== null);
+  const tooBigMB = $derived(
+    entry?.tooBig ? Math.max(1, Math.round(entry.tooBig / 1048576)) : 0,
+  );
+  /** the byte size of the frame on screen, for the notes that have to be specific */
+  const shownMB = $derived(
+    shown ? Math.max(1, Math.round(shown.size / 1048576)) : 0,
+  );
+  /**
+   * Where the "too big to hand to the player" line is drawn: `INLINE_MAX` in
+   * `src-tauri/src/lib.rs` (96 MB). It is repeated here so the stage can state
+   * the number instead of blaming the file; changing one without the other makes
+   * the sentence a lie, so both say where the other lives.
+   */
+  const INLINE_MAX_MB = 96;
+
+  /** natural size of an <img> that just loaded (the tile stand-in, or a gif) */
+  function sizeOf(el: EventTarget & HTMLImageElement): { w: number; h: number } | null {
+    return el.naturalWidth ? { w: el.naturalWidth, h: el.naturalHeight } : null;
+  }
+
+  /**
+   * An item with no bytes in the vault, described accurately: the picture is a
+   * link, a folder, or a video sitting on this machine. The old sentence told
+   * people to "open it from its source link", which for a stored video is not
+   * even true, and it never said that a video on disk cannot be played here yet.
+   */
+  const noMediaNote =
+    "nothing viewable is stored for this item — it is kept as a link or as a path on this " +
+    "machine, and its editor shows where. Press *Store* under Sources (one picture) or " +
+    "*Store copy in vault* (a video) to bring bytes in; a video that stays on disk is not " +
+    "played here yet.";
+
+  // The element whose layout box "Actual pixels" measures against. `offsetWidth`
+  // is the pre-transform size, which is what a zoom factor has to be divided by;
+  // `getBoundingClientRect` would report the already-scaled box. A function, not
+  // a derived value: the canvas is a plain (non-reactive) ref, and a derived
+  // value would cache the element from the first picture.
+  let posterEl = $state<HTMLImageElement | null>(null);
+  function mediaEl(): HTMLImageElement | HTMLCanvasElement | null {
+    return painted ?? posterEl;
+  }
+  /** natural pixels of the picture on screen (tile stand-in, then the real frame) */
+  let natural = $state<{ w: number; h: number } | null>(null);
+
+  /** zoom 1 = the whole picture inside the stage (the default). */
+  function fitToWindow() {
+    zoom = 1;
+  }
+
+  /**
+   * Zoom so one picture pixel is one screen pixel. Computed, not hardcoded: the
+   * picture may already be zoomed, so the factor is scaled by where we are.
+   */
+  function actualPixels() {
+    const el = mediaEl;
+    if (!el || !natural) return;
+    const layout = el.offsetWidth;
+    if (layout <= 0) return;
+    zoom = Math.min(8, Math.max(0.2, (natural.w * zoom) / layout));
+  }
 
   // #44: bumped on every navigation. A payload that lands after the user moved
   // on is dropped by this token; queued speculative reads are cancelled before
@@ -249,7 +310,10 @@
         zoom = Math.max(0.2, zoom / 1.25);
         break;
       case "0":
-        zoom = 1;
+        fitToWindow();
+        break;
+      case "a":
+        actualPixels();
         break;
       case "i":
         if (item) onEdit(item);
@@ -344,6 +408,8 @@
         ctx.transferFromImageBitmap(bmp);
         painted = cv;
         frameReady = true;
+        // the numbers the "Actual pixels" button and the strip's title need
+        natural = { w: bmp.width, h: bmp.height };
       })
       .catch(() => {
         // decoder refused this image: keep the stand-in rather than a spinner
@@ -360,6 +426,8 @@
     }
     painted = null;
     frameReady = false;
+    // no picture on screen, so no picture size to claim
+    natural = null;
   }
 
   // #44 privacy: if the cache is wiped under this view (Lock, Nuke, panic-hidden
@@ -396,60 +464,81 @@
   onpointermove={() => full && showChrome()}
 >
   <div class="viewer-stage">
-    {#if isVideo && elementSrc}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video src={elementSrc} controls loop autoplay></video>
-    {:else if isGif && elementSrc}
-      <img src={elementSrc} alt={item?.title ?? ""} style="transform: scale({zoom})" />
-    {:else if isStill}
-      {#if poster && !frameReady}
-        <img class="frame-poster" src={poster} alt={item?.title ?? ""} style="transform: scale({zoom})" />
+    <!-- The media always sits inside a box that already fills the stage, so the
+         strip and the control bar stop moving when a picture lands: the stage
+         used to be sized by whatever happened to be on it, so a card with a
+         360 px tile opened into a stage that grew twice in the first second. -->
+    <div class="frame-box">
+      {#if isVideo && elementSrc}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video src={elementSrc} controls loop autoplay></video>
+      {:else if isGif && elementSrc}
+        <img
+          src={elementSrc}
+          alt={item?.title ?? ""}
+          style="transform: scale({zoom})"
+          onload={(e) => (natural = sizeOf(e.currentTarget))}
+        />
+      {:else if isStill}
+        {#if poster && !frameReady}
+          <img
+            class="frame-poster"
+            src={poster}
+            alt={item?.title ?? ""}
+            bind:this={posterEl}
+            onload={(e) => (natural = sizeOf(e.currentTarget))}
+            style="transform: scale({zoom})"
+          />
+        {/if}
+        <canvas
+          class="viewer-frame"
+          class:shown={frameReady}
+          bind:this={frame}
+          style="transform: scale({zoom})"
+        ></canvas>
+      {:else if poster && !err}
+        <img
+          class="frame-poster"
+          src={poster}
+          alt={item?.title ?? ""}
+          bind:this={posterEl}
+          onload={(e) => (natural = sizeOf(e.currentTarget))}
+          style="transform: scale({zoom})"
+        />
       {/if}
-      <canvas
-        class="viewer-frame"
-        class:shown={frameReady}
-        bind:this={frame}
-        style="transform: scale({zoom})"
-      ></canvas>
-      {#if loading}
-        <div class="viewer-note stage-note">loading…</div>
-      {/if}
+    </div>
+
+    {#if isStill && loading}
+      <div class="viewer-note stage-note">loading…</div>
     {:else if err}
       <div class="viewer-note">{err}</div>
-    {:else if poster}
-      <img class="frame-poster" src={poster} alt={item?.title ?? ""} style="transform: scale({zoom})" />
-      {#if loading}
-        <div class="viewer-note stage-note">loading…</div>
-      {:else if !entry || (!entry.bytes && !entry.raw && entry.tooBig === null)}
-        <div class="viewer-note poster-note">
-          nothing viewable is stored for this item — it is tracked by link.
-          (Open its editor to see the source, or use *Store copy in vault* for videos.)
-        </div>
-      {/if}
+    {:else if poster && !isStill && !isVideo && !isGif && loading}
+      <div class="viewer-note stage-note">loading…</div>
+    {:else if poster && !isStill && !isVideo && !isGif && (!entry || (!entry.bytes && !entry.raw && entry.tooBig === null))}
+      <div class="viewer-note poster-note">{noMediaNote}</div>
     {:else if loading}
       <div class="viewer-note">loading…</div>
-    {:else if shown}
-      <!-- #62: a frame the bytes exist for but this branch cannot paint - an
-           oversized stored video the backend refused to inline, or a format with
-           no decoder here (HEIF). Which of the two it is stays in the sentence. -->
+    {:else if shown && !isVideo && !isGif}
+      <!-- a frame whose bytes are in the vault but this branch cannot paint:
+           an oversized stored video the backend would not inline, or a format
+           with no decoder in this build (HEIF). Which of the two it is stays in
+           the sentence, and neither one is called a thumbnail. -->
       <div class="viewer-note">
-        this frame is stored as {shown.mime}
+        this frame is stored as {shown.mime} ({shownMB} MB in the vault)
         {#if entry?.tooBig !== null}
-          (too big to preview here — open it from its source link)
+          — more than this app hands its own player, which is {INLINE_MAX_MB} MB
         {:else}
-          (this build cannot display it)
+          — this build has no decoder for it
         {/if}
       </div>
-    {:else}
-      <div class="viewer-note">
-        nothing viewable is stored for this item — it is tracked by link.
-        <br />
-        (Open its editor to see the source, or use *Store copy in vault* for videos.)
-      </div>
+    {:else if !poster && !isVideo}
+      <div class="viewer-note">{noMediaNote}</div>
     {/if}
     {#if isTooBig}
       <div class="viewer-note poster-note">
-        stored video is too big to preview here — open it from its source link
+        this video is stored in the vault at {tooBigMB} MB — this app hands its player at
+        most {INLINE_MAX_MB} MB and cannot stream past that yet. The copy is not lost: the
+        item's editor can drop it again with *Remove stored video*.
       </div>
     {/if}
   </div>
@@ -504,6 +593,16 @@
         <button onclick={() => (zoom = Math.max(0.2, zoom / 1.25))} title="zoom out (-)">−</button>
         <button onclick={() => (zoom = 1)} title="fit (0)">{Math.round(zoom * 100)}%</button>
         <button onclick={() => (zoom = Math.min(8, zoom * 1.25))} title="zoom in (+)">+</button>
+        <button
+          class="ghost"
+          disabled={!natural}
+          title={natural
+            ? `one picture pixel per screen pixel: this frame is ${natural.w}x${natural.h} (a)`
+            : "the picture's own size is not known yet"}
+          onclick={actualPixels}
+        >
+          Actual
+        </button>
       </span>
       <button onclick={() => item && onEdit(item)} title="open the editor (i)">Edit</button>
       <button class:active={full} onclick={toggleFull} title="fullscreen (f)">⛶</button>

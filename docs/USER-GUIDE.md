@@ -299,14 +299,19 @@ proxy if you set one).
   the editor. **Media**: click opens the **full viewer**. Cards arrive live
   during imports.
 - **Media viewer**: the real image from the encrypted vault (full-res when it
-  was stored), not a re-download. Navigate with **← / →** through the current
-  grid (including filters), **zoom** with `+`/`-`/`0` or the buttons, hit
-  **space** for a **slideshow** (4s per item, wraps), `f` (or the ⛶ button) for
-  **fullscreen** — the image fills the window, chrome hidden, `Esc` or `f` back
-  out — `i` opens the item's
-  editor, **Esc** closes. Stored videos play inline (very large ones show the
-  poster instead); link-only videos show their first-frame poster with a hint.
-  The picture you are looking at stays put while the next one loads in the
+  was stored), not a re-download. **← / →** step through the pictures *inside* one
+  item first and then through the current grid (filters included). **Zoom** with
+  `+` / `-`; `0` fits the whole picture, and `a` (or **Actual** in the bar) shows
+  it at one picture-pixel per screen pixel — the button's tooltip says the frame's
+  own pixel size, e.g. `this frame is 1200x630`. **space** starts a **slideshow**
+  (4 s per picture, wraps), `f` (or the ⛶ button) **fullscreen** — the image fills
+  the window, chrome hidden, `Esc` or `f` back out — `i` opens the item's
+  editor, **Esc** closes. Stored videos play inline up to 96 MB; a bigger one
+  states its size and stays in the vault (the editor's *Remove stored video*
+  drops it again). A video that only exists as a link, or as a file in a folder
+  on this machine, is **not played by the app yet** — the viewer says which of
+  those it is instead of pointing at a source link that does not exist. The
+  picture you are looking at stays put while the next one loads in the
   background; importing something else never re-flickers the current frame.
 - **Search box** (both views): matches title/circle as you type — the quick
   way to confirm something actually landed.
@@ -440,9 +445,23 @@ proxy if you set one).
     - **Check** asks the site once more (one page fetch, on that site's own
       polite delay) without re-pasting — useful after you logged out in the
       browser or after a session rotation.
+    - **Clear** takes the saved cookie back out of the vault. The site's rate box
+      and its on/off switch stay exactly as they are, and the recorded "works"
+      verdict goes away with the cookie it belonged to. Until this existed there
+      was no way to get a wrong or dead paste out: the settings command treated an
+      untouched cookie field as *"keep what is stored"*, so every earlier attempt
+      to clear one reported success and changed nothing (#38).
     - a dead cookie announces itself: when a fetch sends your cookie and the site
       still answers with its login wall, that cookie is marked stale on the spot,
       so the Sources line goes red by itself.
+    - **not every site can be checked honestly, and the app says which ones.**
+      Measured 2026-11-14: e-hentai answers `favorites.php` with a bounce to its
+      login page for a guest and with a real page (11 496 B, three runs in a row)
+      for a member, so both sides of that verdict are exact. Exhentai answers
+      `200` with an **empty page** to a good cookie, to a made-up one, and to a
+      real member id with a bad hash alike — so its line reads *answered in a way
+      that cannot tell a good cookie from a bad one*, and it is never painted
+      green.
     - the browser extension can do steps 2-5 for you. On f95zone.to,
       e-hentai.org or exhentai.org its popup offers **Send this page's sign-in
       cookie**: one deliberate click, nothing automatic, straight to 127.0.0.1
@@ -465,8 +484,16 @@ proxy if you set one).
     cookie under Sources and re-fetch this item to pull the images"*) instead of
     importing nothing quietly. The same strip also tells you when a page offered more
     art than was stored (*"15 attachment image(s) on the page — they stay links, only
-    the cover was downloaded"*); which images those are, and a way to pick them, is
-    #53.
+    the cover was downloaded"*); **Sources → "N pictures this page offered"** lists
+    them with a **Store** button each (#53): one picture per deliberate press, nothing
+    bulk-downloaded.
+
+    What a cookie buys you on e-hentai is **nothing for the art** — measured, the
+    gallery page and each page's own picture come down with no cookie at all (a
+    250x131 cover cut out of the gallery's sprite sheet, a 1200x630 page at
+    177 497 B). The cookie only matters for Exhentai, and there it buys nothing this
+    app can use yet: that site answers this client with an empty page even for a
+    valid session, so an Exhentai clip stays a title-and-links entry and says so.
 - **Proxy** (top of the Sources tab): route *every* outbound request — clip
   fetches, enrich, update checks, match search, video downloads — through one
   proxy address, e.g. `http://127.0.0.1:7890` or a **Tor** SOCKS endpoint.
@@ -509,7 +536,9 @@ proxy if you set one).
 | Clip says "…is disabled — enable it under Sources" | That site is switched off (repack mirrors ship off). Turn it on in *Sources* and clip again. |
 | Clip says "can't identify that link" | It is not a media file and not a site the app knows yet. Site support grows over time; the link text itself is never lost if you keep it in your browser. |
 | Local `file:///…` item has no thumbnail | The file was moved, renamed, or the drive is unplugged — the item is still tracked by path. Re-clip from the new location to store a copy. |
-| Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. Direct file links like `wimg.rule34.xxx/images/….jpeg?12345` now resolve through the site's API — old items imported before that fix can be repaired with **Re-fetch metadata** in the item editor. |
+| Booru clip stored the link but no art | Deleted post, video post (videos stay links), or the site needs a login cookie. The reason is in the report strip's *details*. A link that names a file (`wimg.rule34.xxx/images/…jpeg?3411909`) is fetched from the file host and the picture lands; its tags usually cannot be read, because that site's metadata api answers a Cloudflare bot check to every client identity - the item says so instead of pretending to have tags. e621 is the one booru whose api still answers, so its post pages keep their tags. Old items can be retried with **Re-fetch metadata** in the item editor. |
+| e-hentai clip stored a title and no picture | Clip the **gallery** link (`/g/<gid>/<key>/`) or a **page** link (`/s/<imgkey>/<gid>-<n>`) - both work, and no cookie is needed for either (measured). The gallery page has no `<img>` for its previews any more: it names one sprite sheet and the box inside it, so the cover is cut out of that sheet. A `/g/<gid>/` link with the key missing is an error the site states in words, and the item now says what the site answered instead of the old bare `http 404 Not Found`. Every page of the gallery is listed under **Sources** with a **Store** button; the clip never pulls all 20. |
+| Exhentai clip gives a title, or nothing at all | Measured: this client is answered with an empty page (HTTP 200, 0 bytes) even with a valid session cookie, and with a redirect to the forums login page without one. The item says which happened. Until that changes, an Exhentai gallery is a bookmark with its tags, not a picture, and the Sources cookie line refuses to claim the session works. |
 | f95 card has no tile but the item shows real art | That item was clipped before AVIF decoding landed (#52): f95 serves its cover as AVIF, the vault kept the bytes and no thumbnail was ever made. Open the item → **Re-fetch metadata** and the card gets its tile. Newly clipped items need nothing. HEIF/HEIC is still a format this build cannot decode - those store fine and the item says the thumbnail is missing, out loud. |
 | Clip stored the picture but no tags/source | The link pointed straight at a file with **no post id anywhere in it** (`img3.gelbooru.com/images/2b/34/….jpg`). The image is stored anyway and the item says *"no post could be identified"*. Where the site can look a file up by hash, the app matches it back to its post — but only when the post's md5 **and** file size both match the bytes it downloaded, so it never guesses a wrong post. Fix the rest by hand: open the item, paste the real post page into **Sources**, then **Re-fetch metadata**. Find these in bulk under **Sources → No tags** in the sidebar. |
 | ▶ next to MTool started the tool but the game did not open | Recent MTool builds (NW.js `MToolClient`) accept **no** game on the command line — their list is drag-and-drop, so nothing was ever going to start. The app now uses the game's own `StartWithTool.bat` / `MTool_Game.exe` when the repack ships one, otherwise it opens MTool and puts the game's exe path **on your clipboard** for you to drop in (the message under the mod list says which happened and shows the path). |

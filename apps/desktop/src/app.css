@@ -593,6 +593,10 @@ textarea:focus {
 
 .source-row {
   display: flex;
+  /* #53/#38: a source row is a url plus a control. Without wrapping, the url
+     took the whole line and the Store/detach control landed on top of the row
+     below it - the overlap the report described. */
+  flex-wrap: wrap;
   align-items: center;
   gap: 0.5rem;
   margin: 0.25rem 0;
@@ -604,6 +608,28 @@ textarea:focus {
   /* URLs have no spaces; #29 wanted them wrapped only where they must be,
      not every word chopped mid-syllable */
   overflow-wrap: anywhere;
+  /* `min-width: 0` is what lets a flex item shrink below its text: an unbroken
+     120-character url is its "intrinsic" width otherwise, and that is what
+     pushed the button out of the row */
+  flex: 1 1 12rem;
+  min-width: 0;
+}
+
+.source-row button,
+.source-row .chip,
+.source-row .chip-x {
+  flex: 0 0 auto;
+}
+
+/* #38: the cookie row has three buttons (Set / Check / Clear) beside the paste
+   box. `.site-cookie` cannot wrap, so the last one was pushed past the edge of
+   the card and drew over the next site's row. */
+.site-cookie {
+  flex-wrap: wrap;
+}
+
+.site-cookie button {
+  flex: 0 0 auto;
 }
 
 .site-row,
@@ -953,6 +979,25 @@ textarea:focus {
   object-fit: contain;
   transition: transform 0.08s ease-out;
   image-rendering: auto;
+}
+
+/* The media box: empty, it costs nothing, so a note still gets the stage to
+   itself. Once it holds a picture it takes the stage's whole content area, which
+   is what keeps the filmstrip and the control bar from jumping when the full
+   copy replaces the tile. It never scrolls on its own — a zoomed picture is
+   scrolled by the stage. */
+.frame-box {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+
+.frame-box:not(:empty) {
+  flex: 1 1 auto;
+  align-self: stretch;
 }
 
 /* #44: the full-res frame is painted into this canvas by bitmaprenderer (the

@@ -195,27 +195,6 @@ fn eh_gid(segments: &[&str]) -> Option<String> {
     None
 }
 
-/// #46: fold a slideshow link (`/s/<token>/<gid>-<n>`) onto the gallery page
-/// (`/g/<gid>/`) before parsing. The slideshow is a ~4.7 KB JS shell: no `gdtm`
-/// grid, no `og:image`, no `<img id="image">` — parsing it can only come back
-/// empty, while the gallery page carries the grid. Non-slideshow links are
-/// returned untouched.
-pub fn eh_gallery_url(url: &str) -> String {
-    let url = url.trim();
-    let (host, path) = host_of(url);
-    if host.is_empty() {
-        return url.to_string();
-    }
-    let path = path.split('#').next().unwrap_or(&path).to_string();
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.first().map(|s| *s == "s").unwrap_or(false) {
-        if let Some(gid) = eh_gid(&segments) {
-            return format!("https://{host}/g/{gid}/");
-        }
-    }
-    url.to_string()
-}
-
 fn dlsite_product_id(url: &str) -> Option<String> {
     let up = url.to_uppercase();
     let idx = up.find("RJ")?;
@@ -250,6 +229,15 @@ pub fn classify(url: &str) -> Option<SiteRef> {
     let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
 
     // Known API-backed sites first.
+    //
+    // #50, measured 2026-11-14: the danbooru-family metadata api answers
+    // `403 text/html` + `cf-mitigated: challenge` to this app — honest UA, a
+    // browser UA, even no UA — while the same post's file host answers
+    // `200 image/jpeg`. So a link that **names a file** is fetched as a file
+    // and never sent to the api, even when a post id can be read out of it (the
+    // id is still kept, by the direct-file branch below, so the report can name
+    // the post). A link that does not name a file is a post page: that still
+    // goes to the api, where the fallback note says what could not be read.
     if host_no_port.ends_with("gelbooru.com") {
         let id = query_param(url, "id")
             .or_else(|| query_param(url, "pid"))
@@ -257,7 +245,7 @@ pub fn classify(url: &str) -> Option<SiteRef> {
         // direct CDN file links (img3.gelbooru.com/images/….jpg) with no
         // recoverable post id must fall through to the direct-file branch
         // below, which at least stores the image (#39).
-        if id.is_some() || media_ext(&path).is_none() {
+        if media_ext(&path).is_none() {
             return Some(SiteRef {
                 site: "gelbooru".into(),
                 kind: ItemKind::Post,
@@ -277,7 +265,7 @@ pub fn classify(url: &str) -> Option<SiteRef> {
                     .filter(|s| s.chars().all(|c| c.is_ascii_digit()))
                     .map(|s| s.to_string())
             });
-        if id.is_some() || media_ext(&path).is_none() {
+        if media_ext(&path).is_none() {
             return Some(SiteRef {
                 site: "rule34".into(),
                 kind: ItemKind::Post,
@@ -375,24 +363,21 @@ pub fn classify(url: &str) -> Option<SiteRef> {
             .map(str::to_string)
             .unwrap_or_else(|| registrable_domain(&host_no_port));
         // Booru file-cache links (`wimg.rule34.xxx//images/…jpeg?11353035`)
-        // carry the post id as a numeric query. Going through the site's API
-        // gets tags + file with the *right* referer — pulling bytes straight
-        // from the CDN with the CDN as its own referer is what hotlink
-        // protection kills.
+        // carry the post id as a numeric query, and #50 routed them through the
+        // site's API because that got tags + file with the right referer. That
+        // routing is what broke rule34: measured 2026-11-14, the danbooru dapi
+        // answers `403` + `cf-mitigated: challenge` to *both* client identities
+        // (the API is behind a bot check now), while the CDN link answers `200
+        // image/jpeg` to anything. The file is what the user pasted, so the file
+        // is what gets fetched; the id is kept only to report which post it was.
         if site_for_host(&host_no_port).is_some() && media_ext(&path) == Some("image") {
             if let Some(id) = numeric_query_id(url) {
-                let mode = match site.as_str() {
-                    "gelbooru" | "rule34" | "e621" => Mode::BooruId,
-                    _ => Mode::DirectMedia,
-                };
-                if mode == Mode::BooruId {
-                    return Some(SiteRef {
-                        site,
-                        kind: ItemKind::Post,
-                        remote_id: Some(id),
-                        mode,
-                    });
-                }
+                return Some(SiteRef {
+                    site,
+                    kind: ItemKind::Post,
+                    remote_id: Some(id),
+                    mode: Mode::DirectMedia,
+                });
             }
         }
         return Some(SiteRef {
@@ -449,6 +434,20 @@ pub fn mark_cookie_gate(core: Option<&Core>, site: &str) {
     }
 }
 
+/// A status alone is not a report: a 4xx says our request was refused, a 5xx
+/// says the site's own server failed. The user's next step differs (fix the link
+/// vs wait and retry), so the note has to differ too — an e621 `http 520` used to
+/// read as if this app were broken.
+fn http_error(status: reqwest::StatusCode) -> String {
+    if status.is_server_error() {
+        format!(
+            "http {status} — the site's own server failed this request, try again in a minute"
+        )
+    } else {
+        format!("http {status}")
+    }
+}
+
 async fn get_text(
     client: &reqwest::Client,
     url: &str,
@@ -461,7 +460,7 @@ async fn get_text(
     }
     let resp = req.send().await.map_err(|e| format!("fetch failed: {e}"))?;
     if !resp.status().is_success() {
-        return Err(format!("http {}", resp.status()));
+        return Err(http_error(resp.status()));
     }
     resp.text().await.map_err(|e| format!("read failed: {e}"))
 }
@@ -567,7 +566,37 @@ async fn fetch_meta_with(
 ) -> Result<Meta, String> {
     match s.mode {
         Mode::BooruId => match s.site.as_str() {
-            "gelbooru" | "rule34" => booru_dapi(client, &s.site, s.remote_id.as_deref()).await,
+            "gelbooru" | "rule34" => {
+                match booru_dapi(client, &s.site, s.remote_id.as_deref()).await {
+                    Ok(m) => Ok(m),
+                    // #50: the metadata api is the polite way in, but the
+                    // danbooru-family api is behind a bot check now (measured
+                    // 2026-11-14: `403` with `cf-mitigated: challenge` for both
+                    // client identities). A link that names a file can still be
+                    // fetched from the cdn, so take the picture and say plainly
+                    // that the tags did not come.
+                    Err(e) => {
+                        let (_, path) = host_of(url);
+                        if media_ext(&path).is_some() {
+                            let mut m = direct_media(client, url, Some(&s.site)).await?;
+                            m.note = Some(match m.note.take() {
+                                Some(n) => format!("{n}; the {} metadata api refused us ({e})", s.site),
+                                None => format!(
+                                    "the {} metadata api refused us ({e}) — the picture was taken \
+                                     from the link itself, so there are no tags",
+                                    s.site
+                                ),
+                            });
+                            Ok(m)
+                        } else {
+                            Err(format!(
+                                "the {} metadata api refused us ({e}) and that link is not a file",
+                                s.site
+                            ))
+                        }
+                    }
+                }
+            }
             "e621" => e621_post(client, s.remote_id.as_deref()).await,
             other => Ok(Meta {
                 note: Some(format!(
@@ -580,7 +609,31 @@ async fn fetch_meta_with(
         Mode::DlSite => dl_product(client, url).await,
         Mode::Offsite => offsite_product(client, url).await,
         Mode::F95 => f95_thread(client, url, ctx, want_images).await,
-        Mode::DirectMedia => direct_media(client, url, Some(&s.site)).await,
+        Mode::DirectMedia => {
+            let mut m = direct_media(client, url, Some(&s.site)).await?;
+            // #50, measured 2026-11-14: the danbooru-family metadata api
+            // (`…/index.php?page=dapi…`) answers `403` with `cf-mitigated:
+            // challenge` to *both* client identities this app has — honest UA,
+            // browser UA, even no UA. The file host answers the same link at
+            // `200 image/jpeg` to everything. So a file link gets its picture
+            // and does not get its tags, and the item has to say which half it is.
+            if matches!(s.site.as_str(), "rule34" | "gelbooru") && m.tags.is_empty() {
+                m.note = note_with(
+                    m.note.take(),
+                    Some(format!(
+                        "{}'s metadata api answers a Cloudflare bot check to this app, so the \
+                         tags could not be read; the picture came from the file host, which \
+                         answers normally{}",
+                        s.site,
+                        match s.remote_id.as_deref() {
+                            Some(id) => format!(" (post {id} — open its page in your browser)"),
+                            None => String::new(),
+                        }
+                    )),
+                );
+            }
+            Ok(m)
+        }
         Mode::LocalFile => local_file(url),
     }
 }
@@ -706,30 +759,330 @@ pub fn eh_is_gate(html: &str) -> bool {
         || html.contains("10.114")
         || html.contains("10.124")
         || (html.contains("<h1>Access") && html.contains("restricted"))
+        // 2026: a gallery link without its key is answered by this plain text,
+        // not by a gate page (#46's `gdtm` grid and `og:image` are both gone).
+        || html.contains("Key missing, or incorrect key provided")
 }
 
-/// Parse a gallery page: title from `<title>`, cover from the first gdtm img.
-pub fn parse_eh_gallery(html: &str) -> (Option<String>, Option<String>) {
-    let title = html
-        .find("<title>")
-        .map(|i| &html[i + 7..])
-        .and_then(|s| s.split("</title>").next())
-        .map(|t| {
-            let t = t.split('|').next().unwrap_or(t).trim();
-            // strip trailing language bracket: "Name [English]"
-            match t.rsplit_once('[') {
-                Some((a, b)) if b.ends_with(']') => a.trim_end().to_string(),
-                _ => t.to_string(),
-            }
+/// Page count, in the words the page actually uses.
+///
+/// `Length:</td><td class="gdt2">20 pages</td>` is the row, and the grid header
+/// says `Showing 1 - 20 of 20 images`. The number is taken by walking **back**
+/// from the word it precedes: scanning for digits *after* the label picks up the
+/// `2` inside `gdt2` and then keeps going into the tile urls, which is how this
+/// parser first read a real 20-page gallery as a nine-digit one.
+pub fn eh_pages(html: &str) -> Option<u32> {
+    for (label, word) in [("Length:", " pages"), ("Showing", " of ")] {
+        let Some(i) = html.find(label) else { continue };
+        let from = i + label.len();
+        let window = &html[from..(from + 200).min(html.len())];
+        let Some(w) = window.find(word) else { continue };
+        let digits: String = window[..w]
+            .trim_end()
+            .chars()
+            .rev()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Ok(n) = digits.chars().rev().collect::<String>().parse::<u32>() {
+            return Some(n);
+        }
+    }
+    None
+}
+
+/// One tile of a sprite sheet: which sheet, and the box inside it.
+///
+/// Why this exists at all: e-hentai's gallery page used to carry a `<div
+/// class="gdtm">` with one `<img>` per thumbnail, and `og:image` for the cover.
+/// Measured 2026-11-14, neither is in the page any more — the cover and the
+/// whole page grid are sprite sheets on hosts that change per gallery, and the
+/// only place the tiles are described is CSS:
+/// `style="width:200px;height:141px;background:transparent
+///  url(https://puzaqhxrbn.hath.network/c2/…/4089666-0.webp) -400px 0 no-repeat"`.
+/// So a thumbnail is (sheet, x, y, w, h), not a url.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EhTile {
+    pub sheet: String,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// What a gallery page gave us.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EhGallery {
+    pub title: Option<String>,
+    pub tags: Vec<String>,
+    /// declared page count (`Length: 20 pages`), `None` when the row is absent
+    pub pages: Option<u32>,
+    pub cover: Option<EhTile>,
+    /// the slideshow link of every page on this grid page, in order
+    pub slides: Vec<String>,
+}
+
+/// Read one tile out of a `style` attribute. CSS background-position says where
+/// the **sheet's** top-left corner sits relative to the box, so a tile drawn at
+/// `-400px 0` starts 400px into the sheet.
+pub fn eh_tile(style: &str) -> Option<EhTile> {
+    let px = |key: &str| -> Option<u32> {
+        let i = style.find(key)? + key.len();
+        let digits: String = style[i..]
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        digits.parse().ok()
+    };
+    let w = px("width:")?;
+    let h = px("height:")?;
+    let u = style.find("url(")? + 4;
+    let sheet: String = style[u..].chars().take_while(|c| *c != ')' && *c != '"').collect();
+    if !sheet.starts_with("http") {
+        return None;
+    }
+    // the two offsets after the closing paren: `-400px 0`, `0 0`
+    let after = &style[u + sheet.len()..];
+    let nums: Vec<i64> = after
+        .split([';', ' ', 'n'])
+        .filter_map(|t| {
+            let t = t.trim().trim_end_matches("px");
+            t.parse().ok()
         })
+        .collect();
+    Some(EhTile {
+        sheet,
+        x: nums.first().map(|v| v.unsigned_abs() as u32).unwrap_or(0),
+        y: nums.get(1).map(|v| v.unsigned_abs() as u32).unwrap_or(0),
+        w,
+        h,
+    })
+}
+
+/// The host a `/g/` occurrence was written with, when the page spelled its url
+/// out in full. `None` for a relative href, which then takes the site root.
+fn eh_host_at(html: &str, i: usize) -> Option<String> {
+    let start = html[..i].rfind("://")? + 3;
+    let between = &html[start..i];
+    // close by, and no tag or attribute boundary in the way: `…href="https://
+    // e-hentai.org/g/` is a real absolute url, an earlier link in the page is not
+    if between.len() > 48 || between.contains('"') || between.contains('\'') || between.contains('<')
+    {
+        return None;
+    }
+    let host: String = between.chars().take_while(|c| *c != '/').collect();
+    (!host.is_empty() && host.contains('.')).then_some(host)
+}
+
+/// The gallery link a page carries — `<a href="…/g/<gid>/<key>/">`.
+///
+/// #46 folded a slideshow link onto `https://host/g/<gid>/`, which used to work.
+/// It is an apache 404 now (measured 2026-11-14: 236 B, "Not Found"), while the
+/// `/s/` shell page still names the gallery with its key. This is how the key is
+/// recovered, so the key never has to be guessed.
+pub fn eh_gallery_link(html: &str, root: &str) -> Option<String> {
+    let mut from = 0usize;
+    while let Some(i) = html[from..].find("/g/") {
+        let i = from + i + 3;
+        from = i;
+        let rest = &html[i..];
+        let gid: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if gid.is_empty() {
+            continue;
+        }
+        let key: String = rest[gid.len()..]
+            .trim_start_matches('/')
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        // e-hentai's gallery key is a short hex token; a bare `/g/` nav link or a
+        // numeric segment is not one.
+        if key.len() >= 8 && key.chars().all(|c| c.is_ascii_hexdigit()) {
+            let host = eh_host_at(html, i).unwrap_or_else(|| {
+                root.trim_start_matches("https://")
+                    .trim_start_matches("http://")
+                    .to_string()
+            });
+            return Some(format!("https://{host}/g/{gid}/{key}/"));
+        }
+    }
+    None
+}
+
+/// The gallery name. `<h1 id="gn">` is the name as the page states it;
+/// `<title>` is the same text with " - E-Hentai Galleries" glued on, and until
+/// 2026 it was the only thing this parser read.
+fn eh_title(html: &str) -> Option<String> {
+    ["<h1 id=\"gn\">", "<h1 id=\"gj\">"]
+        .iter()
+        .find_map(|m| html.find(m).map(|i| &html[i + m.len()..]))
+        .map(|s| s.split("</h1>").next().unwrap_or("").trim().to_string())
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            html.find("<title>")
+                .map(|i| html[i + 7..].split("</title>").next().unwrap_or("").trim())
+                .map(|t| {
+                    t.strip_suffix(" - E-Hentai Galleries")
+                        .unwrap_or(t)
+                        .trim()
+                        .to_string()
+                })
+                .filter(|t| !t.is_empty())
+        })
+}
+
+/// The cover box: the first sprite tile in the page. The grid tiles come after
+/// it, and the 720x80 ad banner above them has no `url()` in its style.
+fn eh_cover_tile(html: &str) -> Option<EhTile> {
+    let mut at = 0usize;
+    while let Some(i) = html[at..].find("background:transparent url(") {
+        let i = at + i;
+        let end = html[i..].find('"').map(|e| i + e).unwrap_or(html.len());
+        let start = html[..i].rfind("style=\"").map(|s| s + 7).unwrap_or(i);
+        if let Some(tile) = eh_tile(&html[start..end]) {
+            return Some(tile);
+        }
+        at = end;
+    }
+    None
+}
+
+/// Tags, in the order the page lists them: `id="ta_artist:horosuke"`.
+fn eh_tags(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let Some(i) = html[at..].find("id=\"ta_") {
+        let i = at + i + 7;
+        let tag: String = html[i..].chars().take_while(|c| *c != '"').collect();
+        if tag.contains(':') {
+            out.push(tag);
+        }
+        at = i;
+    }
+    out
+}
+
+/// Every slideshow link on this grid page, in page order. They are absolute
+/// urls in the real page; a relative one would still work because the item
+/// keeps its source host.
+fn eh_slides(html: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut at = 0usize;
+    while let Some(i) = html[at..].find("/s/") {
+        let i = at + i;
+        let start = html[..i].rfind("href=\"").map(|s| s + 6).unwrap_or(i);
+        let end = html[start..].find('"').map(|e| start + e).unwrap_or(html.len());
+        let href = &html[start..end];
+        if href.contains("/s/") && seen.insert(href.to_string()) {
+            out.push(href.to_string());
+        }
+        at = end;
+    }
+    out
+}
+
+/// Parse a gallery page (2026 shape): title, tags, page count, the cover sprite
+/// box, and one link per page.
+pub fn parse_eh_gallery(html: &str) -> EhGallery {
+    EhGallery {
+        title: eh_title(html),
+        tags: eh_tags(html),
+        pages: eh_pages(html),
+        cover: eh_cover_tile(html),
+        slides: eh_slides(html),
+    }
+}
+
+/// True when a link is e-hentai's slideshow page (`/s/<imgkey>/<gid>-<page>`)
+/// rather than a gallery page. The slideshow page is not decoration: it carries
+/// the full-size art of one page (#46, measured below).
+pub fn eh_is_show(url: &str) -> bool {
+    let (_host, path) = host_of(url);
+    path.starts_with("/s/")
+}
+
+/// One page of the slideshow, as its own page describes it.
+///
+/// Measured 2026-11-14 on `https://e-hentai.org/s/3c7a2c86a5/4089666-1` with
+/// this app's own UA and **no cookie at all**:
+/// * `<img id="img" src="https://fivpjap.ezrzluxzxslb.hath.network/h/<hash>-…
+///   /keystamp=1794642300-…;fileindex=…;xres=org/12349451_0.jpg">` — the real
+///   page art. It answered `200 image/jpeg 177 497 B` with our UA, with or
+///   without a referer and with or without a cookie. The host and the
+///   `keystamp` are handed out per request, so this url is never a candidate to
+///   keep: the **page link** is the thing worth remembering.
+/// * `<div>12349451_0.jpg :: 1200 x 630 :: 173.3 KiB</div>` — name and size.
+/// * `<span>1</span> / <span>20</span>` — this page and the page count.
+/// * `<div id="i5"><a href="https://e-hentai.org/g/4089666/b9d914bef4/">` — the
+///   gallery, **with the key the gallery page needs**.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct EhShow {
+    pub title: Option<String>,
+    /// full-size art of this one page, `None` when the page refused to show it
+    pub image: Option<String>,
+    /// this page number (`1` in `1 / 20`)
+    pub page: Option<u32>,
+    /// page count (`20` in `1 / 20`)
+    pub pages: Option<u32>,
+}
+
+pub fn parse_eh_show(html: &str) -> EhShow {
+    let title = ["<h1>", "<title>"]
+        .iter()
+        .find_map(|m| html.find(m).map(|i| &html[i + m.len()..]))
+        .map(|t| t.split("</").next().unwrap_or("").trim().to_string())
         .filter(|t| !t.is_empty());
-    let cover = html
-        .find("gdtm")
-        .and_then(|i| html[i..].find("<img src=\"").map(|j| &html[i + j..]))
-        .and_then(|tag| tag.find("src=\"").map(|k| &tag[k + 5..]))
-        .and_then(|s| s.split('"').next())
-        .map(|u| u.to_string());
-    (title, cover)
+    // `id="img"` is the art; the nav arrows are plain `ehgt.org/g/*.png` icons.
+    let image = html
+        .find("id=\"img\"")
+        .and_then(|i| html[i..].find("src=\"").map(|j| &html[i + j + 5..]))
+        .and_then(|t| t.split('"').next())
+        .map(|u| u.trim().to_string())
+        .filter(|u| u.starts_with("http"));
+    // `1</span> / <span>20` is the page counter, and the file line gives the
+    // same numbers as `:: 1200 x 630 ::`. The counter is the shorter read.
+    let (page, pages) = match html.find("</span> / <span>") {
+        Some(i) => {
+            let before: String = html[..i]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            let after: String = html[i + 16..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            (before.chars().rev().collect::<String>().parse().ok(), after.parse().ok())
+        }
+        None => (None, None),
+    };
+    EhShow { title, image, page, pages }
+}
+
+async fn eh_page_art(
+    client: &reqwest::Client,
+    page_url: &str,
+    referer: &str,
+    ctx: &FetchCtx<'_>,
+) -> Result<(Vec<u8>, EhShow), String> {
+    let html = get_text(client, page_url, referer, ctx.cookie).await?;
+    let show = parse_eh_show(&html);
+    let image = show
+        .image
+        .clone()
+        .filter(|_| !eh_is_gate(&html) && !html.trim().is_empty())
+        .ok_or("the slideshow page named no picture (its art is not shown to this client)")?;
+    let bytes = get_bytes(client, &image, page_url, ctx.cookie).await?;
+    Ok((bytes, show))
+}
+
+/// The site root, as the referer its own pages expect.
+fn eh_root(site: &str) -> &'static str {
+    if site == "exhentai" {
+        "https://exhentai.org"
+    } else {
+        "https://e-hentai.org"
+    }
 }
 
 async fn eh_gallery(
@@ -738,70 +1091,130 @@ async fn eh_gallery(
     ctx: &FetchCtx<'_>,
     site: &str,
 ) -> Result<Meta, String> {
-    // #46: a `/s/` slideshow link is parsed on its gallery page instead.
-    let page = eh_gallery_url(url);
-    let folded = page != url;
-    let html = get_text(client, &page, "https://e-hentai.org", ctx.cookie).await?;
-    if eh_is_gate(&html) {
-        // #55: #38 made a login-walled *f95* fetch mark the saved cookie stale, but
-        // the EH pair never did. An e-hentai/exhentai cookie could die and the
-        // Sources line stayed green, because nothing recorded what the site had
-        // just answered. Same rule, same helper, for the other two login sites.
-        if ctx.cookie.is_some() {
-            mark_cookie_gate(ctx.core, site);
+    // #46: the gallery url needs its **key**. A `/s/` slideshow link used to be
+    // folded onto `https://host/g/<gid>/`; since 2026-11 that is a bare apache
+    // 404 (`http 404 Not Found`, exactly what the user saw when clipping
+    // e-hentai.org/s/fd0163b571/4089666-7), while the shell page still names the
+    // gallery with its key. So the key comes from the page, never from a guess.
+    let show_link = eh_is_show(url);
+    let root = eh_root(site);
+    let (gallery, gallery_html) = if show_link {
+        let shell = get_text(client, url, root, ctx.cookie).await?;
+        if eh_is_gate(&shell) || shell.trim().is_empty() {
+            return Ok(eh_gate_meta(ctx, site, &shell));
         }
-        return Ok(Meta {
-            note: Some(
-                "e-hentai gate page hit — open the gallery once in your browser \
-                 (or set its cookie under Sources), then re-clip to enrich"
-                    .into(),
-            ),
-            ..Default::default()
-        });
+        let link = eh_gallery_link(&shell, root).ok_or_else(|| {
+            "the slideshow page named no gallery (no /g/<gid>/<key>/ link in it)".to_string()
+        })?;
+        let html = get_text(client, &link, url, ctx.cookie).await?;
+        (link, html)
+    } else {
+        let page = url.to_string();
+        let html = get_text(client, &page, root, ctx.cookie).await?;
+        (page, html)
+    };
+
+    if eh_is_gate(&gallery_html) || gallery_html.trim().is_empty() {
+        return Ok(eh_gate_meta(ctx, site, &gallery_html));
     }
-    let (title, cover) = parse_eh_gallery(&html);
+
+    let g = parse_eh_gallery(&gallery_html);
     let mut m = Meta {
-        title,
-        images: cover.clone().map(|c| vec![c]).unwrap_or_default(),
+        title: g.title.clone(),
+        tags: g.tags.clone(),
+        // Every page of the gallery is a candidate: the link, never the
+        // per-request image url it would hand out (#53 — one picture per click).
+        images: g.slides.clone(),
         ..Default::default()
     };
-    match cover {
-        Some(cover) => {
-            match get_bytes(client, &cover, "https://e-hentai.org", ctx.cookie).await {
-                Ok(bytes) => {
-                    // #50: only hand a real image to the thumbnailer. A gallery cover
-                    // stays a thumbnail — the gallery's pages themselves stay a link.
-                    match media::sniff_media(&bytes) {
-                        media::Sniffed::Image(_) if bytes.len() <= MAX_COVER_BYTES => {
-                            m.thumb_bytes = Some(bytes)
-                        }
-                        _ => m.note = Some(
-                            "the gallery cover was not a usable image — only the title was stored"
-                                .into(),
-                        ),
-                    }
-                }
-                Err(e) => {
+    let pages = g
+        .pages
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| g.slides.len().to_string());
+
+    if show_link {
+        // The link names one page, so that page's own art is the picture.
+        match eh_page_art(client, url, &gallery, ctx).await {
+            Ok((bytes, show)) => {
+                // `store_bytes_in` writes its own reason when the bytes are not a
+                // keepable picture, so only the success path adds a note here.
+                if let Some(mime) = store_bytes_in(&mut m, bytes) {
+                    let page = show
+                        .page
+                        .map(|p| format!("page {p}"))
+                        .unwrap_or_else(|| "a page".into());
                     m.note = Some(format!(
-                    "gallery cover at {cover} could not be fetched ({e}) — the title was stored"
-                ));
+                        "{page} stored from e-hentai's image host as {mime}; the gallery has \
+                         {} page(s), listed under Sources where any one of them can be stored",
+                        show.pages.map(|p| p.to_string()).unwrap_or_else(|| pages.clone())
+                    ));
                 }
             }
+            Err(e) => m.note = Some(format!(
+                "the gallery was read, but this page's own art could not be taken ({e}) — \
+                 the title and tags were stored"
+            )),
         }
+        return Ok(m);
+    }
+
+    match g.cover {
+        Some(tile) => match get_bytes(client, &tile.sheet, &gallery, ctx.cookie).await {
+            Ok(sheet) => match media::crop_tile(&sheet, tile.x, tile.y, tile.w, tile.h) {
+                Ok(t) => {
+                    m.thumb_bytes = Some(t.bytes.clone());
+                    m.store_bytes = Some(t.bytes);
+                    m.note = Some(format!(
+                        "cover cut out of e-hentai's gallery sheet ({}x{} from a {} B sheet); \
+                         {pages} page(s) listed under Sources, where any one of them can be \
+                         stored — a gallery page is only ever a preview",
+                        t.width,
+                        t.height,
+                        sheet.len()
+                    ));
+                }
+                Err(e) => m.note = Some(format!(
+                    "e-hentai's gallery sheet arrived but the cover box could not be cut from \
+                     it ({e}) — the title and tags were stored"
+                )),
+            },
+            Err(e) => m.note = Some(format!(
+                "the gallery sheet at {} could not be fetched ({e}) — the title was stored",
+                tile.sheet
+            )),
+        },
         None => {
             if m.title.is_some() {
                 m.note = Some(format!(
-                    "e-hentai gallery page had no thumbnail grid to take a cover from{}",
-                    if folded {
-                        " (the slideshow link was folded onto its /g/ gallery page)"
-                    } else {
-                        ""
-                    }
+                    "e-hentai gallery page named no cover box to take a picture from \
+                     ({pages} page(s) listed under Sources)"
                 ));
             }
         }
     }
     Ok(m)
+}
+
+/// What to say when the page came back as a gate instead of a gallery. #55: an
+/// e-hentai/exhentai cookie could die and the Sources line stayed green, because
+/// nothing recorded what the site had just answered. Same rule, same helper, as
+/// the f95 login wall.
+fn eh_gate_meta(ctx: &FetchCtx<'_>, site: &str, html: &str) -> Meta {
+    if ctx.cookie.is_some() {
+        mark_cookie_gate(ctx.core, site);
+    }
+    Meta {
+        note: Some(if html.trim().is_empty() {
+            "the site answered with an empty page — its anti-bot layer did not accept this \
+             client and cookie pair (measured: exhentai 200 with 0 bytes, any user-agent)"
+                .into()
+        } else {
+            "e-hentai gate page hit — open the gallery once in your browser (or set its \
+             cookie under Sources), then re-clip to enrich"
+                .into()
+        }),
+        ..Default::default()
+    }
 }
 
 // ---- DLsite + repack mirrors ----
@@ -1302,7 +1715,18 @@ pub async fn store_picture(core: &Core, item_id: String, url: String) -> Result<
     // Phase 2 (async): the bytes. get_bytes carries the file UA per request and
     // refuses the empty 204 a guest gets back, so a gated host says so here.
     let client = crate::http::client_for(core, 25)?;
-    let bytes = get_bytes(&client, &url, &referer, cookie.as_deref()).await?;
+    // An e-hentai candidate is a *page* link, not a picture link (#46): the url
+    // the page hands out for its art carries a per-request host and keystamp, so
+    // it is not worth remembering. The page is fetched, and its art is stored.
+    let bytes = if eh_is_show(&url) {
+        let ctx = FetchCtx {
+            cookie: cookie.as_deref(),
+            core: Some(core),
+        };
+        eh_page_art(&client, &url, &referer, &ctx).await?.0
+    } else {
+        get_bytes(&client, &url, &referer, cookie.as_deref()).await?
+    };
     let mime = storable_picture(&bytes)?;
 
     // Phase 3 (sync): store, mark the candidate stored, and report.
@@ -2560,22 +2984,26 @@ mod tests {
         assert_eq!(s.site, "example-media.net");
     }
 
-    /// Field report #7: `wimg.rule34.xxx//images/…jpeg?11353035` must route
-    /// through the rule34 API (numeric query = post id), not the CDN directly —
-    /// that is where the thumbnail 403 was coming from.
+    /// Field report #7, **re-measured 2026-11-14**. This test used to insist that
+    /// a rule34/gelbooru CDN link must route through the site API ("that is where
+    /// the thumbnail 403 was coming from"). That premise was a guess, and it is
+    /// backwards: the API answers `403` + `cf-mitigated: challenge` to every
+    /// identity this app has, while the CDN answers `200 image/jpeg`. A link that
+    /// names a file is fetched as a file now; the post id in the query is still
+    /// recovered, because the report and the fallback note name the post with it.
     #[test]
-    fn booru_cdn_file_links_route_through_the_api() {
+    fn booru_cdn_file_links_keep_their_post_id_but_fetch_as_files() {
         let s = classify(
             "https://wimg.rule34.xxx//images/3868/7412ed67862b691cceef71b918028f66.jpeg?11353035",
         )
         .unwrap();
         assert_eq!(s.site, "rule34");
-        assert_eq!(s.mode, Mode::BooruId);
+        assert_eq!(s.mode, Mode::DirectMedia);
         assert_eq!(s.remote_id.as_deref(), Some("11353035"));
 
         let s = classify("https://img3.gelbooru.com//images/2b/34/2b34cd.jpg?4765984").unwrap();
         assert_eq!(s.site, "gelbooru");
-        assert_eq!(s.mode, Mode::BooruId);
+        assert_eq!(s.mode, Mode::DirectMedia);
         assert_eq!(s.remote_id.as_deref(), Some("4765984"));
 
         // hypnohub has no API wired → stays a direct file, but named correctly
@@ -2637,6 +3065,42 @@ mod tests {
         let s = classify("https://hypnohub.net/index.php?page=post&s=view&id=267940").unwrap();
         assert_eq!(s.mode, Mode::BooruId);
         assert_eq!(s.remote_id.as_deref(), Some("267940"));
+    }
+
+    /// #50, the part that was actually broken. The app used to send every rule34
+    /// file link through the site's metadata api because that also carried tags —
+    /// and the api is a bot wall now (measured 2026-11-14: `403 text/html` plus
+    /// `cf-mitigated: challenge` for the honest UA, a browser UA and no UA at all,
+    /// while the same post's CDN file answered `200 image/jpeg 678 634 B` to all
+    /// three). A link that names a file must therefore be fetched as a file.
+    #[test]
+    fn a_booru_file_link_is_fetched_as_a_file_not_through_the_api() {
+        let s = classify("https://wimg.rule34.xxx//images/3043/a6cf0e6d194728b189303b9da8c904e6.jpeg?3411909")
+            .expect("rule34 file link");
+        assert_eq!(
+            (s.site.as_str(), s.mode),
+            ("rule34", Mode::DirectMedia),
+            "the api is a bot wall; the file host is not"
+        );
+        assert_eq!(
+            s.remote_id.as_deref(),
+            Some("3411909"),
+            "the post id is kept, so the report can name the post"
+        );
+        // same rule for gelbooru, and the doubled slash the bookmark carries is
+        // normalised later, in direct_media, not here
+        let s = classify("https://img3.gelbooru.com//images/f2/1e/f21e0ce1d9ff33ba2b7fdc75f01e6a3d.jpeg?11353035")
+            .expect("gelbooru file link");
+        assert_eq!((s.site.as_str(), s.mode), ("gelbooru", Mode::DirectMedia));
+        // a post *page* still goes to the api, where the fallback note explains
+        // what could not be read
+        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=3411909").unwrap();
+        assert_eq!((s.site.as_str(), s.mode), ("rule34", Mode::BooruId));
+        // e621 is the one booru whose api answers this app (measured `200
+        // application/json`, and its file host `200 image/png`), so its post
+        // pages still take the api path and keep their tags
+        let s = classify("https://e621.net/posts/4914601").unwrap();
+        assert_eq!((s.site.as_str(), s.mode), ("e621", Mode::BooruId));
     }
 
     #[test]
@@ -2756,17 +3220,24 @@ mod tests {
     }
 
     #[test]
-    fn eh_gate_and_gallery_parse() {
+    fn eh_gate_pages_are_recognised() {
         let gate = r##"<html><body><div class="gtable ggate">You must <a href="#">IP Login</a> to continue</div></body></html>"##;
         assert!(eh_is_gate(gate));
-        let gallery = r#"<html><head><title>Kanojo no Kaomo | e-hentai.org</title></head>
+        assert!(!eh_is_gate("<html><body><h1 id=\"gn\">Real gallery</h1></body></html>"));
+
+        // The shape #46 was written against (`gdtm` + `<img src>` per thumbnail)
+        // no longer exists on the site, and the parser must not invent a cover
+        // for it: an empty result is what leads to an honest note.
+        let legacy = r#"<html><head><title>Kanojo no Kaomo | e-hentai.org</title></head>
         <body><div id="gdt"><div class="gdtm" style="..."><div class="g2"></div>
         <a href="https://e-hentai.org/s/abc/1234-1"><img src="https://ex.ph/cover1.jpg"></a></div></div>
         <div class="gld">This gallery has <em>24</em> pages.</div></body></html>"#;
-        assert!(!eh_is_gate(gallery));
-        let (title, cover) = parse_eh_gallery(gallery);
-        assert_eq!(title.as_deref(), Some("Kanojo no Kaomo"));
-        assert_eq!(cover.as_deref(), Some("https://ex.ph/cover1.jpg"));
+        let g = parse_eh_gallery(legacy);
+        assert!(g.cover.is_none(), "no sprite box means no cover, not a guess");
+        assert_eq!(g.pages, None);
+        // a title is still a title, and that must be reported as partial success
+        assert_eq!(g.title.as_deref(), Some("Kanojo no Kaomo | e-hentai.org"));
+        assert_eq!(g.slides, vec!["https://e-hentai.org/s/abc/1234-1".to_string()]);
     }
 
     #[test]
@@ -2858,35 +3329,98 @@ mod tests {
         assert!(tags.contains(&"renpy".to_string()));
     }
 
-    /// #46: `/s/<token>/<gid>-<n>` is a ~4.7 KB JS shell — no `gdtm` grid, no
-    /// `og:image`, no `<img id="image">`. Fold it onto the gallery page.
+    /// #46, the 2026 shape. A slideshow link is **not** folded onto
+    /// `https://host/g/<gid>/` any more: measured, that url is a bare apache 404
+    /// (236 B), which is exactly the `http 404 Not Found` the user hit. The
+    /// slideshow page names its gallery with the key the gallery url needs.
     #[test]
-    fn eh_slideshow_links_fold_onto_their_gallery_page() {
+    fn eh_slideshow_links_are_resolved_from_the_page_not_a_guess() {
+        let shell = r##"<html><head><title>[horosuke] Asuka Dairy</title><script>
+            var gid=4089666;var startpage=1;var startkey="3c7a2c86a5";var showkey="3w32t1laoni";
+            </script></head><body><div id="i3"><a onclick="return load_image(2, '24e4797087')"
+            href="https://e-hentai.org/s/24e4797087/4089666-2"><img id="img" src="https://fivpjap.ezrzluxzxslb.hath.network/h/3c7a2c86a58d-177497-1200-630-jpg/keystamp=1794642300-f03a00b680;fileindex=254604586;xres=org/12349451_0.jpg"
+            style="width:1200px;height:630px" /></a></div>
+            <div>12349451_0.jpg :: 1200 x 630 :: 173.3 KiB</div>
+            <div><span>1</span> / <span>20</span></div>
+            <div id="i5"><a href="https://e-hentai.org/g/4089666/b9d914bef4/"></a></div></body></html>"##;
         assert_eq!(
-            eh_gallery_url("https://e-hentai.org/s/f6a1b2c3d4/3214201-2"),
-            "https://e-hentai.org/g/3214201/"
+            eh_gallery_link(shell, "https://e-hentai.org").as_deref(),
+            Some("https://e-hentai.org/g/4089666/b9d914bef4/")
         );
-        assert_eq!(
-            eh_gallery_url("https://exhentai.org/s/f6a1b2c3d4/3214201-7/"),
-            "https://exhentai.org/g/3214201/"
+        let show = parse_eh_show(shell);
+        assert_eq!(show.title.as_deref(), Some("[horosuke] Asuka Dairy"));
+        assert_eq!(show.page, Some(1));
+        assert_eq!(show.pages, Some(20));
+        assert!(
+            show.image
+                .as_deref()
+                .unwrap()
+                .contains("keystamp=1794642300-f03a00b680"),
+            "the art url is per-request: it is fetched, never stored as a candidate"
         );
-        let gallery_link = "https://e-hentai.org/g/3214201/f6a1b2c3d4/?p=2";
-        assert_eq!(eh_gallery_url(gallery_link), gallery_link);
-        // the gid is already in the slideshow link
-        let s = classify("https://e-hentai.org/s/f6a1b2c3d4/3214201-2").unwrap();
+
+        // the gid is still what the item records, and both link kinds are eh
+        let s = classify("https://e-hentai.org/s/fd0163b571/4089666-7").unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
-            ("ehentai", Mode::Ehentai, Some("3214201"))
+            ("ehentai", Mode::Ehentai, Some("4089666"))
         );
-        // and the page we now parse really does yield the grid
-        let shell = "<html><head><script>var show = JSON.parse(galleries[\"3214201\"])</script></head><body></body></html>";
-        assert!(parse_eh_gallery(shell).0.is_none());
-        let page = "<html><head><title>Sample Gallery [English] | e-hentai.org</title></head>\
-                    <body><div id=\"gdt\"><div class=\"gdtm\"><a href=\"https://e-hentai.org/s/f6a1b2c3d4/3214201-0\"><img src=\"https://ex.ph/covers/1.jpg\"></a></div></div></body></html>";
-        assert!(!eh_is_gate(page));
-        let (title, cover) = parse_eh_gallery(page);
-        assert_eq!(title.as_deref(), Some("Sample Gallery"));
-        assert_eq!(cover.as_deref(), Some("https://ex.ph/covers/1.jpg"));
+        assert!(eh_is_show("https://e-hentai.org/s/fd0163b571/4089666-7"));
+        assert!(!eh_is_show("https://e-hentai.org/g/4089666/b9d914bef4/"));
+
+        // #46 as reported: the gallery key missing from the url is an error the
+        // site states in words, and it must not read as a gallery with no art.
+        assert!(eh_is_gate("<html><head><title>Key Missing</title></head><body>Key missing, or incorrect key provided.</body></html>"));
+    }
+
+    /// #46, the 2026 gallery page: title, tags, page count and the sprite boxes
+    /// are all markup this app has never read before.
+    #[test]
+    fn eh_gallery_page_reads_the_2026_shape() {
+        // Trimmed from the real page for gid 4089666 (saved live). What stays is
+        // what the parser depends on: `id="gn"`, `id="ta_"`, `Length:`, and the
+        // `background:transparent url(<sheet>) -Xpx 0` boxes.
+        let page = r##"<html><head><title>[horosuke] Asuka Dairy - E-Hentai Galleries</title></head>
+        <body><div class="gm"><div id="gleft"><div id="gd1"><div style="width:250px; height:131px;
+        background:transparent url(https://ehgt.org/w/02/546/04586-20dsbt2q.webp) 0 0 no-repeat"></div></div></div>
+        <div id="gd2"><h1 id="gn">[horosuke] Asuka Dairy</h1><h1 id="gj"></h1></div>
+        <a id="ta_artist:horosuke" href="https://e-hentai.org/tag/artist:horosuke">horosuke</a>
+        <a id="ta_female:big_breasts" href="https://e-hentai.org/tag/female:big+breasts">big breasts</a>
+        <td class="gdt1">Length:</td><td class="gdt2">20 pages</td>
+        <div id="gdt" class="gt200">
+        <a href="https://e-hentai.org/s/3c7a2c86a5/4089666-1"><div title="Page 1: 12349451_0.jpg"
+          style="width:200px;height:105px;background:transparent url(https://puzaqhxrbn.hath.network/c2/du3afh26zz2jhx1a05/4089666-0.webp) -0px 0 no-repeat"></div></a>
+        <a href="https://e-hentai.org/s/24e4797087/4089666-2"><div title="Page 2: 12349451_1.jpg"
+          style="width:200px;height:141px;background:transparent url(https://puzaqhxrbn.hath.network/c2/du3afh26zz2jhx1a05/4089666-0.webp) -200px 0 no-repeat"></div></a>
+        </div></body></html>"##;
+        let g = parse_eh_gallery(page);
+        assert_eq!(g.title.as_deref(), Some("[horosuke] Asuka Dairy"));
+        assert_eq!(g.pages, Some(20));
+        assert_eq!(
+            g.tags,
+            vec!["artist:horosuke".to_string(), "female:big_breasts".to_string()]
+        );
+        assert_eq!(
+            g.slides,
+            vec![
+                "https://e-hentai.org/s/3c7a2c86a5/4089666-1".to_string(),
+                "https://e-hentai.org/s/24e4797087/4089666-2".to_string()
+            ],
+            "every page of the gallery becomes one candidate, not a download"
+        );
+        // The cover is the box in `gd1`, and the box is a position *inside a
+        // sheet*: what has to be stored is a crop, not the sheet url.
+        let cover = g.cover.expect("the cover box must be found");
+        assert_eq!(cover.sheet, "https://ehgt.org/w/02/546/04586-20dsbt2q.webp");
+        assert_eq!((cover.x, cover.y, cover.w, cover.h), (0, 0, 250, 131));
+
+        // and the grid tiles: the page's own offsets say where each one sits
+        let t0 = eh_tile(r#"width:200px;height:105px;background:transparent url(https://x.hath.network/c2/a/4089666-0.webp) -0px 0 no-repeat"#).unwrap();
+        assert_eq!((t0.x, t0.y, t0.w, t0.h), (0, 0, 200, 105));
+        let t7 = eh_tile(r#"width:200px;height:141px;background:transparent url(https://x.hath.network/c2/a/4089666-0.webp) -1200px 0 no-repeat"#).unwrap();
+        assert_eq!((t7.x, t7.y, t7.w, t7.h), (1200, 0, 200, 141));
+        // a banner box with no sheet in it is not a picture
+        assert!(eh_tile("width:720px;height:80px;margin:0 auto").is_none());
     }
 
     /// #46/#50: `attachments.f95zone.to/…_642380pr.jpg` answers `image/avif`.
@@ -3173,11 +3707,18 @@ mod tests {
             .await
             .expect("clip 2");
         let waited = at.elapsed();
-        println!("clip 2 behind a 900 ms lane: {waited:?}");
+        println!("clip 2 behind a 900 ms lane: {waited:?} (clip 1 cost {fast:?})");
         assert!(second.created, "a different link is a new item");
+        // The lane opens when the first clip starts its work, so the second clip
+        // waits the lane minus whatever the first clip itself cost. A flat 800 ms
+        // floor failed on a busy machine (clip 1 measured 152 ms, the lane was
+        // fine) — the quantity under test is "the gap between the two lane
+        // slots is the lane", so compare against that, with clock slack.
+        let floor = 900u128.saturating_sub(fast.as_millis() + 150);
         assert!(
-            waited.as_millis() >= 800,
-            "the clip fetched {waited:?} after the last one, but konachan's lane is 900 ms"
+            waited.as_millis() >= floor,
+            "the clip fetched {waited:?} after the last one, but konachan's lane is 900 ms \
+             (floor {floor} ms)"
         );
         assert!(
             fast.as_millis() < 800,
@@ -3592,5 +4133,201 @@ mod tests {
             );
         }
         let _ = std::fs::remove_dir_all(&tmp2);
+    }
+
+    /// #46 with live bytes: the whole e-hentai chain through the real pipeline.
+    /// Nothing here is assumed — the gallery link is the one the site hands out,
+    /// the cover has to be **cut out of the sprite sheet** the page names (there
+    /// is no `<img>` to fetch any more), and one remembered page is stored
+    /// through the same one-picture-at-a-time path an f95 attachment uses.
+    ///
+    ///   $env:GOON_EH_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\ehentaicookie.txt" -Raw).Trim()
+    ///   powershell -ExecutionPolicy Bypass -Command "& tools\dev-env.ps1; `
+    ///     cargo test -p goonflow-desktop --lib -- --ignored --nocapture --test-threads 1 eh_live_clip_rehearsal"
+    #[tokio::test]
+    #[ignore]
+    async fn eh_live_clip_rehearsal() {
+        let (core, tmp) = crate::scratch_core("ehclip", true);
+        match std::env::var("GOON_EH_COOKIE") {
+            Ok(c) if !c.trim().is_empty() => {
+                let inner = core.inner.lock().unwrap();
+                let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+                db::set_site_setting(
+                    conn,
+                    "ehentai",
+                    Some(true),
+                    Some(c.trim()),
+                    None,
+                    default_rate_ms("ehentai"),
+                )
+                .unwrap();
+            }
+            _ => println!(
+                "GOON_EH_COOKIE not set: the art below needs no cookie (measured), only the \
+                 cookie verdict does"
+            ),
+        }
+
+        // 1. a gallery link. The gid+key are this gallery's real ones; the gid
+        //    alone is an apache 404 now, which is the bug #46 was filed as.
+        let gallery = clip(&core, "https://e-hentai.org/g/4089666/b9d914bef4/".to_string())
+            .await
+            .expect("clip an e-hentai gallery");
+        println!(
+            "gallery  = created {} stored_image {} thumb {} tags {} images_found {}",
+            gallery.created,
+            gallery.stored_image,
+            gallery.thumb,
+            gallery.tags,
+            gallery.images_found
+        );
+        println!("gallery  = note {:?}", gallery.note);
+        assert!(gallery.created, "the gallery must become an item");
+        assert!(
+            gallery.stored_image,
+            "the cover must be cut out of the gallery sheet (#46: no <img> to fetch)"
+        );
+        assert!(gallery.thumb, "and it must decode into a grid tile");
+        assert!(gallery.tags > 0, "the tags are on the gallery page: {gallery:?}");
+        assert!(
+            gallery.images_found >= 20,
+            "every page of the gallery is a candidate, none of them fetched"
+        );
+
+        // 2. store one of those page links. It is a *page*, so the store path has
+        //    to resolve the page and take the art the site names inside it.
+        let page = {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            let cands = db::source_images_for(conn, &gallery.item_id);
+            cands
+                .get(6)
+                .expect("page 7 of the gallery as a candidate")
+                .url
+                .clone()
+        };
+        println!("page     = resolving candidate {page}");
+        let stored = store_picture(&core, gallery.item_id.clone(), page.clone())
+            .await
+            .expect("storing one chosen e-hentai page");
+        println!(
+            "page     = {} bytes {} already {} tile {} frames {}",
+            stored.bytes, stored.mime, stored.already, stored.tile, stored.frames
+        );
+        assert!(
+            stored.bytes > 50_000,
+            "a gallery page is full-size art, not a preview tile: {} B",
+            stored.bytes
+        );
+        assert!(
+            media::thumbnailable(&stored.mime),
+            "the page arrives in a format this build can show: {}",
+            stored.mime
+        );
+
+        // 3. the link shape the bug came in as: `/s/<imgkey>/<gid>-<n>`. The key
+        //    is per-session, so it is taken from the live page instead of a
+        //    hardcoded one that would rot — the point is that a slideshow link
+        //    resolves onto its gallery instead of 404ing.
+        let slide = clip(&core, page.clone())
+            .await
+            .expect("a slideshow link must resolve through its gallery, not 404");
+        println!(
+            "slideshow= created {} stored_image {} thumb {} tags {} images_found {}",
+            slide.created,
+            slide.stored_image,
+            slide.thumb,
+            slide.tags,
+            slide.images_found
+        );
+        println!("slideshow= note {:?}", slide.note);
+        assert!(slide.created, "the same page as a link is still an item");
+        assert!(
+            slide.stored_image,
+            "and its own art is what gets stored for it"
+        );
+
+        {
+            let inner = core.inner.lock().unwrap();
+            let conn = &inner.opened.as_ref().expect("unlocked vault").conn;
+            println!(
+                "strip    = {} frame(s) on the gallery item (cover + tile + the stored page)",
+                media::media_count(conn, &gallery.item_id)
+            );
+            assert!(
+                media::media_count(conn, &gallery.item_id) >= 3,
+                "cover + tile + the one chosen page"
+            );
+            let row = db::source_images_for(conn, &gallery.item_id)
+                .into_iter()
+                .find(|c| c.url == page)
+                .expect("the page is still listed under Sources");
+            assert!(row.stored_at.is_some(), "and it is marked stored");
+            let frames = media::frames_for(conn, &gallery.item_id);
+            println!(
+                "frames   = {}",
+                frames
+                    .iter()
+                    .map(|f| format!("#{} {} {} {} B", f.id, f.kind, f.mime, f.size))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #38 with live bytes: what the two EH sites answer to the cookie check,
+    /// for no cookie, a right-shape junk cookie and the real paste. Asserts the
+    /// verdicts that were measured on 2026-11-14, because the old marker
+    /// (`/g/`) answered `404` to every one of them and could only accuse a good
+    /// cookie of being stale.
+    ///
+    ///   $env:GOON_EH_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\ehentaicookie.txt" -Raw).Trim()
+    #[tokio::test]
+    #[ignore]
+    async fn eh_cookie_verdicts_live() {
+        let real = match std::env::var("GOON_EH_COOKIE") {
+            Ok(c) if !c.trim().is_empty() => c.trim().to_string(),
+            _ => panic!("GOON_EH_COOKIE must be set to measure the cookie verdicts"),
+        };
+        let client = reqwest::Client::builder()
+            .user_agent(UA)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(25))
+            .build()
+            .unwrap();
+        let junk = "ipb_member_id=1; ipb_pass_hash=deadbeefdeadbeefdeadbeefdeadbeef";
+
+        for site in ["ehentai", "exhentai"] {
+            for (label, cookie) in [
+                ("no cookie", ""),
+                ("right shape, wrong hash", junk),
+                ("the real paste", real.as_str()),
+            ] {
+                let v = crate::cookies::ask(&client, site, cookie).await;
+                println!("  {site:<9} {label:<24} {v:?}");
+            }
+        }
+        assert_eq!(
+            crate::cookies::ask(&client, "ehentai", "").await.ok(),
+            Some(crate::cookies::Live::No),
+            "a guest is bounced to login: that side is exact"
+        );
+        assert_eq!(
+            crate::cookies::ask(&client, "ehentai", &real).await.ok(),
+            Some(crate::cookies::Live::Yes),
+            "the real session gets a page: that side is exact too"
+        );
+        assert_eq!(
+            crate::cookies::ask(&client, "ehentai", junk).await.ok(),
+            Some(crate::cookies::Live::No),
+            "a paste with the right key names and a dead hash is caught"
+        );
+        assert_eq!(
+            crate::cookies::ask(&client, "exhentai", &real).await.ok(),
+            Some(crate::cookies::Live::Inconclusive),
+            "exhentai answers 200 with an empty page to every cookie from this client, \
+             so it must not be reported as working"
+        );
     }
 }

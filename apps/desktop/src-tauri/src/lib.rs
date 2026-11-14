@@ -1369,6 +1369,34 @@ async fn check_site_cookie(
     Ok(cookies::check(&state.core, &site, &saved).await)
 }
 
+/// #38: take the saved cookie back out of the vault for one site, leaving its
+/// on/off switch and rate box alone.
+///
+/// This is the missing half of #38. The settings command took `Option<&str>` for
+/// the cookie and its SQL is `IFNULL(?3, cookie)`, where `None` means *"keep the
+/// stored value"* — so a Clear control wired through it reported success and
+/// changed nothing, and a paste that turned out to be stale (or someone else's
+/// session) kept being sent on every fetch. An explicit empty write is the only
+/// honest way out.
+#[tauri::command]
+async fn clear_site_cookie(
+    state: tauri::State<'_, AppState>,
+    site: String,
+) -> Result<bool, String> {
+    let site = cookies::canonical_site(&site);
+    if site.is_empty() {
+        return Err("no site".into());
+    }
+    let mut inner = state.inner.lock().unwrap();
+    let conn = &mut inner.opened.as_mut().ok_or("vault is locked")?.conn;
+    let had = goon_core::db::site_cookie(conn, &site).is_some();
+    goon_core::db::clear_site_cookie(conn, &site).map_err(err)?;
+    // The recorded verdict belonged to the cookie that is gone. Left in place,
+    // the Sources list would keep showing last month's "works".
+    let _ = cookies::forget(conn, &site);
+    Ok(had)
+}
+
 // ---------- update feed (M2) ----------
 
 #[tauri::command]
@@ -2275,6 +2303,7 @@ pub fn run() {
             get_site_settings,
             set_site_setting,
             check_site_cookie,
+            clear_site_cookie,
             check_updates,
             list_updates,
             pairing_suggestions,

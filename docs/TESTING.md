@@ -237,6 +237,35 @@ the board's *In review* column is the current list.
     `extract:` - never `updates:` for something that is not an update check (#60).
 
 
+ 27. e-hentai with **no cookie saved at all** (#46): clip a gallery link of the shape
+     `https://e-hentai.org/g/<gid>/<key>/` → the cover arrives even though the page names
+     no `<img>` any more. It names a **sprite sheet plus a CSS box**, and that box is cut
+     out of the sheet (measured 2026-11-14: a 250x131 cover out of an 11 422 B `ehgt.org`
+     sheet, 20 tiles at 200x105/200x141 out of a 4000x300 `*.hath.network` sheet). The
+     title, 16 tags and the 20-page count arrive, and Sources lists one link per page.
+     Clip a `/s/<imgkey>/<gid>-<n>` slideshow link instead → the gallery's **key is read out
+     of that page**, because `https://e-hentai.org/g/<gid>/` without the key is a bare
+     apache 404 (236 B) now - that 404 was the whole of #46 - and the page's own art is
+     stored (measured `200 image/jpeg 177 497 B` for page 1, `image/webp 76 300 B` for
+     page 7, with or without a referer, with or without a cookie).
+ 28. A rule34/gelbooru **file** link (#50), e.g.
+     `https://wimg.rule34.xxx/images/3043/a6cf….jpeg?3411909` → the picture stores, and the
+     note must say the tags could not be read: that site's metadata api answers a
+     Cloudflare bot check (measured `403 text/html` plus `cf-mitigated: challenge` for this
+     app's honest UA, for a browser UA and for no UA at all, while the file host answers the
+     same link at `200 image/jpeg 678 634 B`). A rule34 **post page** still goes to the api,
+     and e621 keeps its api path - its api and its file host both answer 200.
+ 29. Sources, cookie controls (#38): **Set** checks a paste before storing it, **Check**
+     re-asks the site exactly one page, **Clear** takes the paste back out - and the rate
+     box and the on/off switch must survive that. What the sites answer decides the
+     sentence: e-hentai's marker is `favorites.php` (a guest is bounced to
+     `bounce_login.php?b=d&bt=1-6`, a member gets 11 496 B of page, three times in a row),
+     so a good cookie is no longer accused by the `/g/` 404 the site now answers to
+     *everybody*; exhentai answers `200` with **0 bytes** to a real cookie, to a made-up
+     `ipb_pass_hash` and to a real member id with that bad hash alike, so its verdict says
+     the site could not tell them apart and the row stays un-green instead of claiming a
+     working session.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

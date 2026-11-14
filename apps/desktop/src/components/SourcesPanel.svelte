@@ -18,6 +18,7 @@
     setScrubOnLock,
     setSiteSetting,
     checkSiteCookie,
+    clearSiteCookie,
     siteStats,
     type CompanionStatus,
     type CookieVerdict,
@@ -35,6 +36,7 @@
   // a check costs one page fetch so the button must say when it is busy.
   let cookieVerdict = $state<Record<string, CookieVerdict>>({});
   let checking = $state<Record<string, boolean>>({});
+  let clearing = $state<Record<string, boolean>>({});
   let counts = $state<SiteCount[]>([]);
   let note = $state<string | null>(null);
 
@@ -241,6 +243,31 @@
     }
   }
 
+  /** #38, the other half: take the cookie back out. Until this existed there was
+   * no way to get a wrong or dead paste out of the vault — `setSiteSetting` sends
+   * `null` for "I am not touching the cookie", which the database reads as "keep
+   * the stored value", so every earlier attempt to clear one reported success and
+   * changed nothing. The rate box and the on/off switch stay put. */
+  async function clearCookie(site: string) {
+    if (clearing[site]) return;
+    clearing[site] = true;
+    note = null;
+    try {
+      const had = await clearSiteCookie(site);
+      const rows = await getSiteSettings();
+      siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
+      delete cookieVerdict[site];
+      delete cookieDraft[site];
+      note = had
+        ? `${site}: cookie forgotten — links from that site will be fetched as a guest`
+        : `${site}: there was no cookie saved to forget`;
+    } catch (e) {
+      note = `could not clear ${site}: ${e}`;
+    } finally {
+      clearing[site] = false;
+    }
+  }
+
   /** The line under a cookie box. "never checked" must read as unknown, never
    * as broken, and a stale cookie must read as stale. */
   function cookieLine(s: SiteInfo): { text: string; cls: string } {
@@ -248,8 +275,18 @@
     const fresh = cookieVerdict[s.site];
     if (fresh) return { text: fresh.note, cls: fresh.ok ? "good" : "bad" };
     const cur = siteSettings[s.site];
-    if (!cur?.cookieSet)
-      return { text: "no cookie saved — this site shows its art to logged-in members only", cls: "" };
+    if (!cur?.cookieSet) {
+      // Measured, because the three login sites are not alike: f95 hides its
+      // thread art from a guest, e-hentai hands out its gallery and page art to
+      // anybody, and exhentai answers this client with an empty page either way.
+      const why =
+        s.site === "ehentai"
+          ? "no cookie saved — e-hentai's gallery art is fetched without one; a cookie only adds your own watched and favorites pages to the check"
+          : s.site === "exhentai"
+            ? "no cookie saved — and measured, exhentai answers this app with an empty page even for a valid session, so its galleries stay a link"
+            : "no cookie saved — this site shows its art to logged-in members only";
+      return { text: why, cls: "" };
+    }
     const when = cur.cookieCheckedAt
       ? new Date(Number(cur.cookieCheckedAt) * 1000).toLocaleString()
       : "";
@@ -444,6 +481,14 @@
             onclick={() => checkCookie(s.site)}
           >
             {checking[s.site] ? "Checking…" : "Check"}
+          </button>
+          <button
+            class="ghost"
+            disabled={!cur?.cookieSet || clearing[s.site]}
+            title="forget the saved cookie; the rate and the on/off switch stay as they are"
+            onclick={() => clearCookie(s.site)}
+          >
+            {clearing[s.site] ? "Clearing…" : "Clear"}
           </button>
         </div>
         <p class="cookie-state {cookieLine(s).cls}">{cookieLine(s).text}</p>

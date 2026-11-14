@@ -373,6 +373,10 @@ export const setSiteSetting = (
 /** #38: re-check the cookie already in the vault (one page fetch, polite lane). */
 export const checkSiteCookie = (site: string) =>
   invoke<CookieVerdict>("check_site_cookie", { site });
+/** #38: take the saved cookie back out. `set_site_setting` cannot do this — its
+ * cookie argument treats "absent" as "keep what is stored" — so this is the only
+ * way a stale or wrong paste leaves the vault. */
+export const clearSiteCookie = (site: string) => invoke<boolean>("clear_site_cookie", { site });
 export const checkUpdates = () => invoke<UpdateReport>("check_updates");
 export const listUpdates = (limit = 100) => invoke<UpdateRow[]>("list_updates", { limit });
 export const pairingSuggestions = (kind?: "game" | "media") =>

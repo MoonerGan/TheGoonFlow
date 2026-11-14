@@ -159,6 +159,61 @@ pub fn make_thumbnail(bytes: &[u8]) -> Option<Thumbnail> {
     }
 }
 
+/// Cut one rectangle out of a bigger image and re-encode it.
+///
+/// Why this exists (#46, 2026 shape): e-hentai's gallery page no longer marks a
+/// thumbnail per `<img>`. The cover and the whole page grid are one sprite
+/// sheet on a per-gallery host, and the page says where each tile sits —
+/// `style="width:200px;height:141px;background:transparent url(<sheet>) -400px 0
+/// no-repeat"`. Cropping the advertised box out of the sheet is the only way to
+/// get a picture off that page, and the sheet itself answers to any client
+/// (measured: `image/webp`, 200, no referer, no cookie).
+///
+/// A box that is not fully inside the decoded sheet is an error, never a silent
+/// clamp: sheet and geometry disagreeing means the page is not the shape we
+/// measured, and a shifted crop would be shown to the user as if it were art.
+pub fn crop_tile(bytes: &[u8], x: u32, y: u32, w: u32, h: u32) -> Result<Thumbnail, String> {
+    if w == 0 || h == 0 {
+        return Err("that tile has no size".into());
+    }
+    // A page could advertise anything; keep one crop inside the memory budget
+    // the rest of the media path already works with.
+    if u64::from(w) * u64::from(h) > 12_000_000 {
+        return Err(format!("that tile is {w}x{h} — too large to cut out"));
+    }
+    let img = image::load_from_memory(bytes).map_err(|_| "the sheet could not be decoded")?;
+    let (sw, sh) = (img.width(), img.height());
+    if x >= sw || y >= sh || x + w > sw || y + h > sh {
+        return Err(format!(
+            "the page asked for a {w}x{h} tile at ({x},{y}) of a {sw}x{sh} sheet"
+        ));
+    }
+    let tile = img.crop_imm(x, y, w, h);
+    let opaque = tile.to_rgba8().pixels().all(|p| p[3] == 255);
+    let (width, height) = (tile.width(), tile.height());
+    let mut buf = Vec::new();
+    if opaque {
+        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 82);
+        enc.encode_image(&tile)
+            .map_err(|_| "the tile could not be re-encoded")?;
+        Ok(Thumbnail {
+            mime: "image/jpeg",
+            width,
+            height,
+            bytes: buf,
+        })
+    } else {
+        tile.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .map_err(|_| "the tile could not be re-encoded")?;
+        Ok(Thumbnail {
+            mime: "image/png",
+            width,
+            height,
+            bytes: buf,
+        })
+    }
+}
+
 /// Replace the item's single `thumb` row with a generated thumbnail.
 /// Returns false when `source_bytes` cannot be decoded.
 pub fn put_thumbnail(conn: &Connection, item_id: &str, source_bytes: &[u8]) -> bool {
@@ -781,5 +836,67 @@ mod tests {
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].kind, "full");
         assert_eq!(frames[0].size, png.len() as i64);
+    }
+
+    /// #46 (2026 shape): e-hentai delivers its previews as **one sheet plus CSS
+    /// offsets**, so the picture has to be cut out here. A crop that clamped, or
+    /// read the offsets wrong, would be shown to the user as if it were the art —
+    /// so the exact colour of each crop is checked, and a box that does not fit
+    /// the sheet is refused instead of quietly moved inside it.
+    #[test]
+    fn a_sprite_sheet_is_cut_at_the_box_the_page_advertises() {
+        use image::ImageEncoder as _;
+        // 300x100, three 100x100 tiles in different colours: red, green, blue.
+        let img = image::RgbImage::from_fn(300, 100, |x, _| {
+            if x < 100 {
+                image::Rgb([220, 10, 10])
+            } else if x < 200 {
+                image::Rgb([10, 200, 10])
+            } else {
+                image::Rgb([10, 10, 220])
+            }
+        });
+        let mut sheet = Vec::new();
+        image::codecs::png::PngEncoder::new(&mut sheet)
+            .write_image(img.as_raw(), 300, 100, image::ExtendedColorType::Rgb8)
+            .unwrap();
+
+        // The gallery cover case: the sheet is exactly the advertised box.
+        let cover = crop_tile(&sheet, 0, 0, 300, 100).expect("the whole sheet is one box");
+        assert_eq!((cover.width, cover.height), (300, 100));
+        assert_eq!(cover.mime, "image/jpeg", "an opaque tile comes back as jpeg");
+
+        // And the grid case: the same sheet cut at the offsets the page names.
+        let second = crop_tile(&sheet, 100, 0, 100, 100).expect("the second tile");
+        assert_eq!((second.width, second.height), (100, 100));
+        let decoded = image::load_from_memory(&second.bytes)
+            .expect("the crop must be a real picture")
+            .to_rgb8();
+        let (mut r, mut g, mut b) = (0u64, 0u64, 0u64);
+        for p in decoded.pixels() {
+            r += u64::from(p[0]);
+            g += u64::from(p[1]);
+            b += u64::from(p[2]);
+        }
+        assert!(
+            g > r && g > b,
+            "the box at x=100 is the green tile, got averages r={r} g={g} b={b}"
+        );
+
+        // Refusals, each with the reason in the message.
+        // `.err()` rather than `expect_err()`: `Thumbnail` carries the bytes, so
+        // it deliberately has no `Debug` and a failed unwrap would print them.
+        let off = crop_tile(&sheet, 250, 0, 100, 100).err().expect("hangs off the right edge");
+        assert!(off.contains("300x100"), "the sheet size must be in the reason: {off}");
+        assert!(crop_tile(&sheet, 0, 100, 10, 10).is_err(), "starts below the sheet");
+        assert!(crop_tile(&sheet, 0, 0, 0, 10).is_err(), "a zero-sized box");
+        assert!(
+            crop_tile(&sheet, 0, 0, 5000, 4000).is_err(),
+            "an advertised box bigger than any sane tile is refused"
+        );
+        assert!(
+            crop_tile(b"not a picture at all", 0, 0, 10, 10).is_err(),
+            "an undecodable sheet says so"
+        );
     }
 }

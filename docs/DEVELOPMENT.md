@@ -234,7 +234,7 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v8, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v9, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
@@ -274,6 +274,12 @@ tools/
   stored canonically (smaller id first) so `dismiss_pair` is symmetric and
   `pairing_suggestions` can skip a pair the user already judged. Deleting/
   merging either item drops the row; the items themselves are never touched.
+- `source_images` (v9, #53) — the pictures a source page **offered**, one row per
+  url: `item_id`, `url` (unique per item), `found_at`, `stored_at`. They are
+  candidates, never downloads: the fetch remembers urls, the user stores one at a
+  time (`store_picture` sets `stored_at`). A site's art host gives out a
+  per-request url (e-hentai's `keystamp`, f95's signed attachment link), so the
+  **page or attachment link** is the thing worth keeping and re-resolving.
 - **Game dupe suggestions** are `pairing_key(title)` equality (brackets and
   punctuation stripped, so `Summer Witch` matches `Summer Witch [v0.12] [renpy]`)
   with two guards from #47: `title_is_placeholder` skips titles that name the
@@ -284,12 +290,12 @@ tools/
   If you really do have more than a dozen games under one title, the rest are
   paired by hand from the item editor.
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
-  `if v < N` steps up to `SCHEMA_VERSION` (v8). v3 renames hosts-labeled sites
+  `if v < N` steps up to `SCHEMA_VERSION` (v9). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
   `allthefallen`); v4 adds `items.launch_path`; v5 `match_suggestions`; v6/v7
-  the `mods` table and its deploy columns; v8 `pair_dismissals`. Any new schema
-  change is a new numbered step — never edit the `CREATE TABLE` batch for
-  existing columns.
+  the `mods` table and its deploy columns; v8 `pair_dismissals`; v9
+  `source_images`. Any new schema change is a new numbered step — never edit the
+  `CREATE TABLE` batch for existing columns.
 
 ## 4. Invariants (do not break without updating DESIGN.md)
 
@@ -559,14 +565,25 @@ manually.
 - **Thumbnails**: always through `goon_core::media::put_thumbnail` (hash,
   dedup, size cap in one place).
 - **Probe the site, then write the parser.** Every ingest bug so far came from
-  assuming a page shape. Current measurements (2026-11, browser UA unless
-  stated; `tools/` scripts + the issue bodies carry the transcripts):
-  - `wimg.rule34.xxx` (and rule34's CDN generally) answers **403 to any
-    non-browser User-Agent** — `TheGoonFlow/0.1 (…)` included. A browser UA gets
-    the file; the `Referer` makes no difference there. See #50.
-  - rule34's `dapi` (`?page=dapi&s=post…&id=`) answers a Cloudflare **CAPTCHA**
-    page from a normal machine, so the md5/post lookups (#39) cannot depend on
-    it — use the HTML post page and keep verifying md5+filesize (invariant 21).
+  assuming a page shape. The measurements below are what the code depends on; the
+  ones marked *re-measured* were re-checked on 2026-11-14 with **this app's own
+  UA** (`TheGoonFlow/0.1 (personal library; user-initiated clip/import)`), because
+  a marker that only holds under a browser UA is not a marker this app has. The
+  ignored tests `ingest::tests::eh_live_clip_rehearsal`,
+  `ingest::tests::eh_cookie_verdicts_live` and `http::live_probe` re-run them
+  against the live sites.
+  - **rule34 / gelbooru: the metadata api is the bot wall, the file host is not**
+    (*re-measured*; this reverses what #50 first assumed). The danbooru api
+    (`index.php?page=dapi…`) **and** the post html page answer `403 text/html`
+    with `cf-mitigated: challenge` to the honest UA, to a browser UA and to no UA
+    at all. The CDN answers that same post's file at `200 image/jpeg 678 634 B`
+    to all three. So a link that **names a file** is classified
+    `Mode::DirectMedia` and never sent to the api, even when a post id can be
+    read out of the query (`…jpeg?3411909`) — the id is kept so the note can name
+    the post it came from, and the note says plainly that the tags could not be
+    read. A link that names no file is a post page, and that still goes to the
+    api. **e621 is the exception**: its api and its file host both answer 200, so
+    its post pages keep the api path and keep their tags.
   - rule34 CDN file URLs carry the **post id in the query**
     (`…/7783/<md5>.png?8886918`) — free identity to verify against.
   - **f95zone without a login cookie** returns the thread with a "register to …"
@@ -577,10 +594,40 @@ manually.
     there, it is the site logo. See #46.
   - Those attachment URLs answer `content-type: image/avif` even when the path
     ends `.jpg` → sniff the bytes, don't trust the extension.
-  - **e-hentai `/s/<token>/<gid>-<n>`** (slideshow page) is a ~4.7 KB JS shell:
-    it contains no `gdtm` grid, no `og:image`, no `<img id="image">` — the art is
-    injected by script. The gallery page `/g/<gid>/` is the one with the
-    thumbnails, and the gid is already in the URL. See #46.
+  - **e-hentai's gallery page (2026) names no `<img>` for its previews at all**
+    (*re-measured*): the cover is `<div id="gd1"><div style="width:250px;
+    height:131px; background:transparent url(https://ehgt.org/…webp) 0 0
+    no-repeat">` and the 20 grid tiles are boxes in **one** 4000x300 sheet on a
+    per-gallery `*.hath.network` host, each written as
+    `url(<sheet>) -200px 0 no-repeat`. So a preview is (sheet, x, y, w, h) and the
+    only honest cover is a **crop** (`media::crop_tile`, which refuses a box that
+    does not fit the sheet instead of clamping it). `gdtm` and `og:image` are gone
+    from the page.
+  - **`/g/<gid>/` without the gallery key is a bare apache 404 (236 B)**
+    (*re-measured*) — that is exactly the `http 404 Not Found` #46 was filed with.
+    The key is read **out of the page that links the gallery**
+    (`eh_gallery_link(html, root)`), never guessed, and that is also how a `/s/`
+    link finds its gallery.
+  - **The `/s/<imgkey>/<gid>-<n>` slideshow page is worth fetching**
+    (*re-measured*): `200`, 4 534 B, and it carries
+    `<img id="img" src="https://<rand>.hath.network/h/<hash>-…-1200-630-jpg/keystamp=…;fileindex=…;xres=org/12349451_0.jpg">`
+    — the **full art of that one page**, which answered `200 image/jpeg
+    177 497 B` with our UA, referer or not, cookie or not. The host and the
+    `keystamp` are handed out per request, so the *page link* is what gets
+    remembered as a candidate and `store_picture` re-resolves the page for its
+    bytes. (`api.e-hentai.org/api.php` with `{"method":"showpage",…}` was probed
+    and answered a 32 B error — not needed.)
+  - **Cookie probes are one page fetch on the polite lane**, and the marker must be
+    a route that answers a guest and a member *differently*: f95's home page
+    (`>Log in<` / `>Register<` = guest), e-hentai's `favorites.php` (guest `302 →
+    bounce_login.php?b=d&bt=1-6`, member `200` 11 496 B, stable over three runs).
+    exhentai has **no honest marker for this client**: `favorites.php` gives the
+    `302 → forums remoteapi` hop to a guest and `200` with **0 bytes** to a real
+    cookie, a made-up `ipb_pass_hash` and a real member id with that bad hash
+    alike — so its verdict is `Live::Inconclusive`, and the UI shows "the site
+    could not tell" instead of a green light. A route that answers the same thing
+    to everybody is worse than none: `https://e-hentai.org/g/` is a 404 for guest
+    and member both, which is how a good cookie got accused of being stale.
   - Cookies are stored and replayed verbatim as the `Cookie` header, and that
     works: a hand-pasted f95 cookie (`xf_session`, `xf_user`, `xf_csrf`,
     `cf_clearance`) unlocked the page above. When a source yields nothing, check
