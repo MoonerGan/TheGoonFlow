@@ -4,9 +4,11 @@
   // #44 privacy: lock/nuke/panic all end the vault session through one place,
   // and that place is what wipes the viewer's decrypted media cache.
   import { lockVaultWithErase, noteVaultUnlocked, watchVaultSession } from "./lib/session";
+  import { clearToasts } from "./lib/toast.svelte";
   import SetupView from "./views/SetupView.svelte";
   import UnlockView from "./views/UnlockView.svelte";
   import LibraryView from "./views/LibraryView.svelte";
+  import Toasts from "./components/Toasts.svelte";
 
   let status = $state<AppStatus | null>(null);
   let error = $state<string | null>(null);
@@ -55,3 +57,6 @@
 {:else}
   <LibraryView {status} onLock={doLock} />
 {/if}
+
+<!-- one stack for the whole app: warnings leave the panel they came from -->
+<Toasts />

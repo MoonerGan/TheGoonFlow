@@ -36,6 +36,7 @@
     type TagCount,
     type UpdateRow,
   } from "../lib/api";
+  import { bad, info } from "../lib/toast.svelte";
   import { evictMedia } from "../lib/mediacache.svelte";
   import { jobState, onActivityChange } from "../lib/activity.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
@@ -62,12 +63,9 @@
   let gameFailures = $state<string[]>([]);
   let loadError = $state<string | null>(null);
   let updates = $state<UpdateRow[]>([]);
-  let updateNote = $state<string | null>(null);
-  let pairNote = $state<string | null>(null);
   let pairs = $state<PairSuggestion[]>([]);
   let checkingUpdates = $state(false);
   let matches = $state<MatchSuggestion[]>([]);
-  let matchNote = $state<string | null>(null);
   let attaching = $state<string | null>(null);
   let selected = $state<ItemSummary | null>(null);
 
@@ -210,17 +208,17 @@
   async function doCheckUpdates() {
     if (checkingUpdates) return;
     checkingUpdates = true;
-    updateNote = "checking each tracked game once, respecting site rate limits…";
+    info("checking each tracked game once, respecting site rate limits…");
     try {
       const r = await checkUpdates();
-      updateNote =
+      info(
         `checked ${r.checked} source links` +
         (r.updated ? ` → ${r.updated} updated: ${r.updatedTitles.join(", ")}` : " → nothing new") +
         (r.failures ? ` (${r.failures} could not be reached)` : "") +
-        (r.stopped ? " (stopped)" : "");
+        (r.stopped ? " (stopped)" : ""));
       await load();
     } catch (e) {
-      updateNote = `update check failed: ${e}`;
+      bad(`update check failed: ${e}`);
     } finally {
       checkingUpdates = false;
     }
@@ -228,20 +226,19 @@
 
   function openPairs() {
     panel = "pairs";
-    pairNote = null;
     pairingSuggestions("game")
       .then((p) => (pairs = p))
-      .catch((e) => (pairNote = String(e)));
+      .catch((e) => bad(String(e)));
   }
 
   async function doMerge(s: PairSuggestion, keep: "a" | "b") {
     try {
       await mergeItems(keep === "a" ? s.aId : s.bId, keep === "a" ? s.bId : s.aId);
       pairs = await pairingSuggestions();
-      pairNote = `merged into "${keep === "a" ? s.aTitle : s.bTitle}"`;
+      info(`merged into "${keep === "a" ? s.aTitle : s.bTitle}"`);
       await load();
     } catch (e) {
-      pairNote = `merge failed: ${e}`;
+      bad(`merge failed: ${e}`);
     }
   }
 
@@ -249,9 +246,9 @@
     try {
       await dismissPair(p.aId, p.bId);
       pairs = await pairingSuggestions("game");
-      pairNote = "kept both — this pair will not be suggested again";
+      info("kept both — this pair will not be suggested again");
     } catch (e) {
-      pairNote = `could not dismiss: ${e}`;
+      bad(`could not dismiss: ${e}`);
     }
   }
 
@@ -278,28 +275,27 @@
 
   function openMatches() {
     panel = "matches";
-    matchNote = null;
     listMatchSuggestions()
       .then((m) => (matches = m))
-      .catch((e) => (matchNote = String(e)));
+      .catch((e) => bad(String(e)));
   }
 
   async function doFindMatches() {
     if (matchesJob === "running") return;
-    matchNote = "searching DLsite (and f95 with a login cookie) for your local-only games…";
+    info("searching DLsite (and f95 with a login cookie) for your local-only games…");
     try {
       const r = await findMatches();
-      matchNote =
+      info(
         `scanned ${r.scanned} local-only game${r.scanned === 1 ? "" : "s"} → ` +
         (r.suggestions
           ? `${r.suggestions} suggestions for ${r.withSuggestions} game${r.withSuggestions === 1 ? "" : "s"}`
           : "no confident matches") +
         (r.failures.length ? ` (${r.failures.length} site problems — see below)` : "") +
-        (r.stopped ? " (stopped)" : "");
+        (r.stopped ? " (stopped)" : ""));
       matches = await listMatchSuggestions();
       await load();
     } catch (e) {
-      matchNote = `match search failed: ${e}`;
+      bad(`match search failed: ${e}`);
     }
   }
 
@@ -309,17 +305,17 @@
     try {
       await addSource(s.itemId, s.url);
       await clearItemSuggestions(s.itemId);
-      matchNote = `linked ${s.site} to "${s.itemTitle}" — fetching its metadata…`;
+      info(`linked ${s.site} to "${s.itemTitle}" — fetching its metadata…`);
       try {
         await reEnrichItem(s.itemId); // job: cover + title/version arrive in the strip
       } catch {
         // enrich job busy — the user can re-fetch from the item editor
-        matchNote = `linked ${s.site} to "${s.itemTitle}" — press Re-fetch metadata in its editor when the queue is free`;
+        info(`linked ${s.site} to "${s.itemTitle}" — press Re-fetch metadata in its editor when the queue is free`);
       }
       matches = await listMatchSuggestions();
       await load();
     } catch (e) {
-      matchNote = `attach failed: ${e}`;
+      bad(`attach failed: ${e}`);
     } finally {
       attaching = null;
     }
@@ -330,7 +326,7 @@
       await dismissSuggestion(s.itemId, s.site, s.url);
       matches = matches.filter((m) => !(m.itemId === s.itemId && m.site === s.site && m.url === s.url));
     } catch (e) {
-      matchNote = `dismiss failed: ${e}`;
+      bad(`dismiss failed: ${e}`);
     }
   }
 
@@ -468,9 +464,6 @@
         </button>
         <span class="hint">Re-visits the DLsite pages and f95 threads of games you track, and records version changes here.</span>
       </div>
-      {#if updateNote}
-        <p class="report-inline">{updateNote}</p>
-      {/if}
       {#if updates.length === 0}
         <div class="empty">
           <strong>No updates recorded yet.</strong><br />
@@ -501,9 +494,6 @@
       <h2 class="panel-title">Possible duplicates</h2>
       <p class="hint">Same title once version/engine brackets are dropped — the usual DLsite origin + f95 thread +
         local folder triple. Nothing merges itself; you decide which entry to keep.</p>
-      {#if pairNote}
-        <p class="report-inline">{pairNote}</p>
-      {/if}
       {#if pairs.length === 0}
         <div class="empty"><strong>No duplicates found.</strong><br />Two games whose titles match once brackets
           (<code>[v0.12]</code>, <code>[renpy]</code>) are stripped would show up here.</div>
@@ -549,9 +539,6 @@
         </button>
         <span class="hint">Only games with no online source yet; polite per-site rate limits apply.</span>
       </div>
-      {#if matchNote}
-        <p class="report-inline">{matchNote}</p>
-      {/if}
       {#if matches.length === 0}
         <div class="empty"><strong>No open suggestions.</strong><br />Press <em>Find online matches</em> —
           imported games are matched by title once <code>[v0.12]</code> / <code>[renpy]</code> noise is stripped,

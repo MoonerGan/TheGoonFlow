@@ -301,9 +301,13 @@ proxy if you set one).
 - **Media viewer**: the real image from the encrypted vault (full-res when it
   was stored), not a re-download. **← / →** step through the pictures *inside* one
   item first and then through the current grid (filters included). **Zoom** with
-  `+` / `-`; `0` fits the whole picture, and `a` (or **Actual** in the bar) shows
-  it at one picture-pixel per screen pixel — the button's tooltip says the frame's
-  own pixel size, e.g. `this frame is 1200x630`. **space** starts a **slideshow**
+  `+` / `-`; **Fit** (`0`) puts the whole picture inside the window, **1:1** (`a`)
+  puts one picture pixel on one screen pixel, and whichever of the two you are at
+  is the button that is highlighted. The number next to them is the picture's scale
+  **against its own pixels** — a 6000×4000 frame fitted into a normal window reads
+  `20%`, not `100%` — and the bar spells it out too (`6000×4000 px, shown at 20%`).
+  1:1 is always reachable: the zoom ceiling rises for pictures that need it.
+  **space** starts a **slideshow**
   (4 s per picture, wraps), `f` (or the ⛶ button) **fullscreen** — the image fills
   the window, chrome hidden, `Esc` or `f` back out — `i` opens the item's
   editor, **Esc** closes. Stored videos play inline up to 96 MB; a bigger one
@@ -313,6 +317,15 @@ proxy if you set one).
   those it is instead of pointing at a source link that does not exist. The
   picture you are looking at stays put while the next one loads in the
   background; importing something else never re-flickers the current frame.
+- **Warnings leave on their own.** Anything that is a message about something that
+  *just happened* — a stored video too big for the player, a frame format this
+  build cannot decode, "cookie forgotten", "merged into …", a scrub report —
+  appears as a toast in the bottom-right corner and disappears by itself; it never
+  sits on top of the picture it describes or between the buttons it belongs to.
+  What stays written in the panel is **state**, which has to be readable later: a
+  site being switched off, the panic key not being armed, a cookie's verdict, a
+  value the form refuses. Locking the vault clears the toasts along with the
+  decrypted media cache.
 - **Search box** (both views): matches title/circle as you type — the quick
   way to confirm something actually landed.
 - **Select… mode** (both views): click cards to tick them, *Select all* /
@@ -442,6 +455,9 @@ proxy if you set one).
       this cookie · <time>*, *the site refused this cookie · <time> — re-copy it
       from a logged-in window*, or *cookie saved — never checked against the
       site*. "Never checked" is shown as unknown, never as working.
+       That sentence has **its own row under the box**, never beside it, and it is
+       also the box's **tooltip** — hover the box to read it, so the text never
+       takes space away from the paste field or from Set / Check / Clear (#38).
     - **Check** asks the site once more (one page fetch, on that site's own
       polite delay) without re-pasting — useful after you logged out in the
       browser or after a session rotation.

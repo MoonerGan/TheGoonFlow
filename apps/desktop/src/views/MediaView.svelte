@@ -28,6 +28,7 @@
     type SourceStats,
     type TagCount,
   } from "../lib/api";
+  import { bad, info } from "../lib/toast.svelte";
   import { evictMedia } from "../lib/mediacache.svelte";
   import { jobState, onActivityChange } from "../lib/activity.svelte";
   import ConfirmDialog from "../components/ConfirmDialog.svelte";
@@ -72,7 +73,6 @@
 
   // dupes (#10)
   let pairs = $state<PairSuggestion[]>([]);
-  let pairNote = $state<string | null>(null);
 
   const imagesJob = $derived(jobState("images"));
   const videosJob = $derived(jobState("videos"));
@@ -227,20 +227,19 @@
 
   function openPairs() {
     panel = "pairs";
-    pairNote = null;
     pairingSuggestions("media")
       .then((p) => (pairs = p))
-      .catch((e) => (pairNote = String(e)));
+      .catch((e) => bad(String(e)));
   }
 
   async function doMerge(s: PairSuggestion, keep: "a" | "b") {
     try {
       await mergeItems(keep === "a" ? s.aId : s.bId, keep === "a" ? s.bId : s.aId);
       pairs = await pairingSuggestions("media");
-      pairNote = `merged into "${keep === "a" ? s.aTitle : s.bTitle}"`;
+      info(`merged into "${keep === "a" ? s.aTitle : s.bTitle}"`);
       await load();
     } catch (e) {
-      pairNote = `merge failed: ${e}`;
+      bad(`merge failed: ${e}`);
     }
   }
 
@@ -248,9 +247,9 @@
     try {
       await dismissPair(p.aId, p.bId);
       pairs = await pairingSuggestions("media");
-      pairNote = "kept both — this pair will not be suggested again";
+      info("kept both — this pair will not be suggested again");
     } catch (e) {
-      pairNote = `could not dismiss: ${e}`;
+      bad(`could not dismiss: ${e}`);
     }
   }
 
@@ -413,9 +412,6 @@
       <h2 class="panel-title">Possible duplicates</h2>
       <p class="hint">Media whose <em>stored image bytes are identical</em> — the same picture imported twice or
         reposted across boorus. Nothing merges itself; you decide which entry to keep.</p>
-      {#if pairNote}
-        <p class="report-inline">{pairNote}</p>
-      {/if}
       {#if pairs.length === 0}
         <div class="empty"><strong>No duplicates found.</strong><br />Two entries holding the exact same stored
           image show up here (remote links are compared by their fetched copy, so enrich must have run).</div>

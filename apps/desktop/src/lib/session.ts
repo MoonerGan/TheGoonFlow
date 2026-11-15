@@ -18,6 +18,7 @@
 import { getStatus, lockVault, nukeVault } from "./api";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { clearMediaCache } from "./mediacache.svelte";
+import { clearToasts } from "./toast.svelte";
 
 /** Poll slow enough to be free, fast enough that re-showing a panic-hidden
  * window lands on the unlock screen instead of a stale library. */
@@ -34,6 +35,8 @@ let seenGeneration = -1;
 /** The one clear path. */
 export function endVaultSession(): void {
   clearMediaCache();
+  // A toast can name an item, a site or a path. It goes with the session.
+  clearToasts();
 }
 
 /** Seed with the state the app currently believes it is in; every route that

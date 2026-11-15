@@ -49,6 +49,9 @@
     type ModRow,
     type VideoInfo,
   } from "../lib/api";
+  // one-shot results ("stored image/webp, 240 KB", "could not save") are toasts
+  // now, so they no longer take a line inside the section they came from
+  import { bad, info, toast } from "../lib/toast.svelte";
   import { evictMedia } from "../lib/mediacache.svelte";
   import ConfirmDialog from "./ConfirmDialog.svelte";
   import Section from "./Section.svelte";
@@ -116,10 +119,8 @@
 
   // source editing
   let newSource = $state("");
-  let sourceMsg = $state<string | null>(null);
   let enriching = $state(false);
   let enrichReport = $state<EnrichReport | null>(null);
-  let enrichError = $state<string | null>(null);
 
   // #53: the pictures a source page offered, kept as candidates. Nothing was
   // downloaded to build this list - the default stays one cover per clip - and
@@ -127,7 +128,6 @@
   // is one polite fetch per chosen picture instead of a mirror of the thread.
   let images = $state<CandidateImage[]>([]);
   let storingImage = $state<string | null>(null);
-  let imageMsg = $state<string | null>(null);
   let showAllImages = $state(false);
   // a page can offer 100+ attachments; the section shows a screenful and says so
   const IMAGE_PAGE = 24;
@@ -135,7 +135,6 @@
   // launch (#18, games only)
   let launchPlan = $state<LaunchPlan | null>(null);
   let launching = $state(false);
-  let launchMsg = $state<string | null>(null);
 
   // archive extraction + folder linking (#17, games only)
   let xplan = $state<ExtractPlan | null>(null);
@@ -148,13 +147,11 @@
   let modName = $state("");
   let modPath = $state("");
   let modArgs = $state("");
-  let modMsg = $state<string | null>(null);
   let launchingMod = $state<number | null>(null);
 
   // vault video storage (#16, media only, strictly opt-in)
   let vinfo = $state<VideoInfo | null>(null);
   let storing = $state(false);
-  let videoMsg = $state<string | null>(null);
   let confirmStore = $state(false);
 
   // read-only facts for view mode; until get_item lands, the summary the caller
@@ -350,15 +347,14 @@
   async function attachSource() {
     const url = newSource.trim();
     if (!url) return;
-    sourceMsg = null;
     try {
       const site = await addSource(item.id, url);
-      sourceMsg = `linked to ${site} — press “Re-fetch metadata” to pull art/tags`;
+      info(`linked to ${site} — press “Re-fetch metadata” to pull art/tags`);
       newSource = "";
       detail = await getItem(item.id);
       onChanged();
     } catch (e) {
-      sourceMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -368,14 +364,13 @@
       detail = await getItem(item.id);
       onChanged();
     } catch (e) {
-      sourceMsg = String(e);
+      bad(String(e));
     }
   }
 
   async function refetch() {
     if (enriching) return;
     enriching = true;
-    enrichError = null;
     enrichReport = null;
     try {
       enrichReport = await reEnrichItem(item.id);
@@ -385,7 +380,7 @@
       await loadImages();
       onChanged();
     } catch (e) {
-      enrichError = String(e);
+      bad(String(e));
     } finally {
       enriching = false;
     }
@@ -408,18 +403,17 @@
   async function storeImage(url: string) {
     if (storingImage) return;
     storingImage = url;
-    imageMsg = null;
     try {
       const r = await storeSourceImage(item.id, url);
-      imageMsg = r.already
+      info(r.already
         ? "the vault already had these exact bytes — stored once, deduped by content hash"
-        : `stored ${r.mime}, ${Math.max(1, Math.round(r.bytes / 1024))} KB${r.tile ? ", and it became the grid tile" : ""}`;
+        : `stored ${r.mime}, ${Math.max(1, Math.round(r.bytes / 1024))} KB${r.tile ? ", and it became the grid tile" : ""}`);
       evictMedia([item.id]);
       detail = await getItem(item.id);
       await loadImages();
       onChanged();
     } catch (e) {
-      imageMsg = String(e);
+      bad(String(e));
     } finally {
       storingImage = null;
     }
@@ -435,13 +429,15 @@
   async function doLaunch() {
     if (launching) return;
     launching = true;
-    launchMsg = null;
     try {
       const r = await launchItem(item.id);
       launchPlan = r;
-      launchMsg = r.ok ? `launched${r.pid ? ` (pid ${r.pid})` : ""} — ${r.exe}` : r.note;
+      toast(
+        r.ok ? `launched${r.pid ? ` (pid ${r.pid})` : ""} — ${r.exe}` : (r.note ?? "the launch did not start, and gave no reason"),
+        r.ok ? "info" : "warn",
+      );
     } catch (e) {
-      launchMsg = String(e);
+      bad(String(e));
     } finally {
       launching = false;
     }
@@ -456,9 +452,9 @@
     try {
       await setLaunchPath(item.id, path);
       launchPlan = await previewLaunch(item.id);
-      launchMsg = "saved as this game's launcher";
+      info("saved as this game's launcher");
     } catch (e) {
-      launchMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -466,9 +462,9 @@
     try {
       await setLaunchPath(item.id, null);
       launchPlan = await previewLaunch(item.id);
-      launchMsg = "launcher override cleared";
+      info("launcher override cleared");
     } catch (e) {
-      launchMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -477,16 +473,16 @@
     extracting = true;
     try {
       const r = await extractGame(item.id);
-      launchMsg =
+      info(
         `extracted ${r.entries} entries → ${r.dest}` +
         (r.sourceAdded ? " · folder linked as a source" : "") +
-        (r.note ? ` · ${r.note}` : "");
+        (r.note ? ` · ${r.note}` : ""));
       launchPlan = await previewLaunch(item.id);
       xplan = await extractPlan(item.id);
       detail = await getItem(item.id);
       onChanged();
     } catch (e) {
-      launchMsg = String(e);
+      bad(String(e));
     } finally {
       extracting = false;
     }
@@ -497,12 +493,12 @@
     if (typeof dir !== "string") return;
     try {
       await addSource(item.id, `file:///${dir.replace(/\\/g, "/")}`);
-      launchMsg = `linked folder ${dir}`;
+      info(`linked folder ${dir}`);
       launchPlan = await previewLaunch(item.id);
       detail = await getItem(item.id);
       onChanged();
     } catch (e) {
-      launchMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -527,64 +523,59 @@
   }
 
   async function doAddMod() {
-    modMsg = null;
     try {
       await addMod(item.id, modName, modKind, modPath, modArgs);
       mods = await listMods(item.id);
       modName = modPath = modArgs = "";
-      modMsg = "recipe added";
+      info("recipe added");
       onChanged();
     } catch (e) {
-      modMsg = String(e);
+      bad(String(e));
     }
   }
 
   async function doDeleteMod(m: ModRow) {
-    modMsg = null;
     try {
       await deleteMod(item.id, m.id);
       mods = await listMods(item.id);
     } catch (e) {
-      modMsg = String(e);
+      bad(String(e));
     }
   }
 
   async function doLaunchMod(m: ModRow) {
     if (launchingMod !== null) return;
     launchingMod = m.id;
-    modMsg = null;
     try {
       const r = await launchMod(item.id, m.id);
-      modMsg = `started ${m.name}` + (r.note ? ` · ${r.note}` : "");
+      info(`started ${m.name}` + (r.note ? ` · ${r.note}` : ""));
     } catch (e) {
-      modMsg = String(e);
+      bad(String(e));
     } finally {
       launchingMod = null;
     }
   }
 
   async function doApplyMod(m: ModRow) {
-    modMsg = null;
     try {
       const r = await applyMod(item.id, m.id);
       mods = await listMods(item.id);
-      modMsg = `deployed ${m.name} — originals kept as .flowbak`;
+      info(`deployed ${m.name} — originals kept as .flowbak`);
       void r;
       onChanged();
     } catch (e) {
-      modMsg = String(e);
+      bad(String(e));
     }
   }
 
   async function doRevertMod(m: ModRow) {
-    modMsg = null;
     try {
       const log = await revertMod(item.id, m.id);
       mods = await listMods(item.id);
-      modMsg = log.length ? `reverted with notes: ${log.join("; ")}` : `reverted ${m.name}`;
+      info(log.length ? `reverted with notes: ${log.join("; ")}` : `reverted ${m.name}`);
       onChanged();
     } catch (e) {
-      modMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -595,17 +586,17 @@
   async function doStoreVideo() {
     if (storing) return;
     storing = true;
-    videoMsg = "storing… (watch the activity strip)";
+    info("storing… (watch the activity strip)");
     try {
       const r = await storeVideo(item.id);
-      videoMsg =
+      info(
         `stored ${mb(r.storedBytes)} in the vault` +
         (r.thumbAdded ? " · first-frame thumbnail added" : "") +
-        (r.note ? ` · ${r.note}` : "");
+        (r.note ? ` · ${r.note}` : ""));
       vinfo = await videoInfo(item.id);
       onChanged();
     } catch (e) {
-      videoMsg = String(e);
+      bad(String(e));
     } finally {
       storing = false;
     }
@@ -614,11 +605,11 @@
   async function doRemoveVideo() {
     try {
       await removeStoredVideo(item.id);
-      videoMsg = "stored copy removed — the link is untouched";
+      info("stored copy removed — the link is untouched");
       vinfo = await videoInfo(item.id);
       onChanged();
     } catch (e) {
-      videoMsg = String(e);
+      bad(String(e));
     }
   }
 
@@ -736,9 +727,6 @@
               {/if}
             {/if}
           </div>
-          {#if launchMsg}
-            <p class="report-inline">{launchMsg}</p>
-          {/if}
         {/if}
       </Section>
 
@@ -766,9 +754,6 @@
           <input type="text" placeholder="paste a source URL, press Enter" bind:value={newSource} onkeydown={(e) => e.key === "Enter" && attachSource()} />
           <button onclick={attachSource}>Link source</button>
         </div>
-        {#if sourceMsg}
-          <p class="report-inline">{sourceMsg}</p>
-        {/if}
         <div class="row">
           <button onclick={refetch} disabled={enriching}>{enriching ? "Re-fetching…" : "Re-fetch metadata"}</button>
           <span class="hint">asks each source above again; nothing is merged by itself</span>
@@ -826,12 +811,6 @@
               </span>
             </div>
           {/if}
-          {#if imageMsg}
-            <p class="report-inline">{imageMsg}</p>
-          {/if}
-        {/if}
-        {#if enrichError}
-          <p class="error">{enrichError}</p>
         {/if}
       </Section>
 
@@ -912,9 +891,6 @@
             />
             <button disabled={!modPath} onclick={doAddMod}>Add recipe</button>
           </div>
-          {#if modMsg}
-            <p class="report-inline">{modMsg}</p>
-          {/if}
         </Section>
       {/if}
 
@@ -982,9 +958,6 @@
                 Store copy in vault
               </button>
             </div>
-          {/if}
-          {#if videoMsg}
-            <p class="report-inline">{videoMsg}</p>
           {/if}
         {:else}
           <p class="hint">No video file tracked for this item — it is stored art only.</p>

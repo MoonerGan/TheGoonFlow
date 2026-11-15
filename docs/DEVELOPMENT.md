@@ -489,6 +489,29 @@ tools/
     with the app's title, and fails it again if the hashed asset names in
     `dist\index.html` are not inside the binary.
 
+24. **A message about something that just happened is a toast; only state stays in
+    the panel (#62 and #38, 2026-11-15 review).** The two bugs the report named were
+    one structural mistake: a sentence sharing layout space with the thing it
+    described. In the viewer the frame note was a flex sibling of the picture, so a
+    stage showing a 6000 px frame spent its right third on the words "this build has
+    no decoder for it" — and it showed for *every* picture, because that branch
+    tested `shown`, the frame's metadata row, which is always present. On Sources the
+    cookie verdict was a flex sibling of the paste box and its three buttons, so the
+    box shrank to a stub and the text painted across Set/Check/Clear. Rules:
+
+      * one-shot results (an image stored, a cookie forgotten, a merge, a scrub
+        report, a refused launch, a frame this build cannot decode or a video too big
+        for the player) go through `lib/toast.svelte.ts` — `info` / `warn` / `bad`,
+        and `sticky()` for a result with numbers worth reading. They never live in a
+        `*Msg` state var rendered as `<p class="report-inline">`.
+      * persistent **state** stays inline and un-dismissed: a site switched off, the
+        panic key not armed, a per-site cookie verdict, a value a form refuses
+        (`ClipDialog`'s `error`, `ItemEditor`'s field validation). State must still
+        be readable a minute later, a toast does not have to be.
+      * `endVaultSession()` calls `clearToasts()` next to `clearMediaCache()`: a
+        toast can name an item, a site or a path, so it dies with the session like
+        every other decrypted string. Nothing here is persisted anywhere.
+
 ## 5. Testing
 
 ```powershell
@@ -519,6 +542,29 @@ When M3 site-packs land: save HTML/JSON **fixtures** per site and test
 parsers against them (site redesigns must become failing tests, not silent
 breakage). Network tests stay opt-in; the enrichment path is exercised
 manually.
+
+Frontend (Svelte 5 — there is no JS test runner in this repo):
+
+```powershell
+Set-Location apps\desktop
+& "$env:ProgramFiles\nodejs\node.exe" ..\..\tools\view-zoom-check.js  # viewer zoom arithmetic
+& "$env:ProgramFiles\nodejs\npm.cmd" run build                        # vite: types + bundle
+& "$env:ProgramFiles\nodejs\npm.cmd" exec --yes svelte-check -- --threshold warning
+```
+
+- `tools\view-zoom-check.js` imports `apps/desktop/src/lib/view-zoom.ts` directly
+  (node ≥23 strips the types), so the numbers the viewer prints are asserted rather
+  than eyeballed. Anything in the UI that can produce `NaN` — a scale, a percentage,
+  a byte count — belongs in a pure module with a check like this one: the reported
+  `NaN%` came from `mediaEl` written without its `()`, i.e. dividing by a function
+  reference (`undefined`).
+- `svelte-check` is **not** a devDependency (nothing is vendored for the frontend), so
+  it runs through `npm exec --yes`. It must print 0 errors **and** 0 warnings: that is
+  what catches a `currentTarget` typed as `Element`, a possibly-null ref, and the
+  leftover of a deleted `*Msg` variable.
+- No browser automation on this box (only Firefox and the WebView2 runtime are
+  installed), so layout is verified by the CSS contract in §6, by these two checks,
+  and by the user's live test of the release exe.
 
 ## 6. Adding things (patterns)
 
@@ -632,6 +678,30 @@ manually.
     works: a hand-pasted f95 cookie (`xf_session`, `xf_user`, `xf_csrf`,
     `cf_clearance`) unlocked the page above. When a source yields nothing, check
     the *parser* before blaming the cookie (#38, #46).
+
+- **Never put a sentence in the same flex line as the controls it describes.** A long
+  text node has an enormous max-content width, so it wins the space argument: the
+  items that are allowed to shrink (`min-width: 0`) collapse to a stub and the text
+  overlaps whatever is left. That is exactly how #38's "tiny text box, buttons
+  vertical, text over the buttons" looked after the first `flex-wrap: wrap` attempt —
+  wrapping only decided *how* the wreckage was stacked. `app.css` now gives the
+  Sources site row real tracks: `.site-row` is a grid
+  (`190px max-content max-content`), `.site-cookie` and `.cookie-state` each take
+  `grid-column: 1 / -1`, the paste input has `min-width: 16rem` (10 rem under 900 px
+  wide), and the buttons are `flex: 0 0 auto; white-space: nowrap`. The verdict is
+  also the box's `title`, so it can be read as a tooltip instead of a row. Same rule
+  in the viewer: `.viewer-note` is `position: absolute` over the stage, so no caption
+  buys its width out of the picture.
+- **Zoom and other on-screen arithmetic is a pure module.** `lib/view-zoom.ts` owns
+  fit / 1:1 / ceiling / percent and `tools\view-zoom-check.js` asserts it, because a
+  component cannot be tested. Model: `zoom 1` means "the whole picture inside the
+  box", `fit = min(box.w/natural.w, box.h/natural.h, 1)`, so the honest readout is
+  `zoom * fit` — a 6000×4000 frame in a 1240×800 stage says `20%` at fit and `100%`
+  at 1:1 (`zoom = 1/fit = 5`). `zoomCeiling` rises above `ZOOM_MAX` when 1:1 needs
+  it, because a button that silently refuses to reach 1:1 is worse than a big number.
+  Controls: **Fit** (`0`) and **1:1** (`a`) carry `class:active` / `aria-pressed` so
+  the state is visible, and the percentage is a separate non-clickable readout —
+  never the label of a button.
 
 ## 7. Release-ish notes for contributors
 

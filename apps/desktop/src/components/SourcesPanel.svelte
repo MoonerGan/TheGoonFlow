@@ -28,6 +28,12 @@
     type SiteInfo,
     type SiteSetting,
   } from "../lib/api";
+  // One-shot results ("saved", "drill ok", "could not save") are toasts now: they
+  // used to be `<p class="report-inline">` lines wedged between the controls they
+  // came from, which is space the controls need. Persistent state — a site being
+  // off, a hotkey not being armed, a cookie verdict — stays in this panel, where
+  // it can still be read after the moment passes.
+  import { bad, info, toast, warn } from "../lib/toast.svelte";
 
   let siteInfos = $state<SiteInfo[]>([]);
   let siteSettings = $state<Record<string, SiteSetting>>({});
@@ -38,7 +44,6 @@
   let checking = $state<Record<string, boolean>>({});
   let clearing = $state<Record<string, boolean>>({});
   let counts = $state<SiteCount[]>([]);
-  let note = $state<string | null>(null);
 
   // #37: the list gets long — group it the way people actually think about it
   const gameSites = $derived(siteInfos.filter((s) => s.kind === "games"));
@@ -51,27 +56,22 @@
   // proxy (#24)
   let proxyUrl = $state<string | null>(null);
   let proxyDraft = $state("");
-  let proxyMsg = $state<string | null>(null);
 
   // browser pairing (#19)
   let companion = $state<CompanionStatus | null>(null);
-  let copied = $state<string | null>(null);
 
   // panic hotkey + nuke drill (#23)
   let panic = $state<PanicInfo | null>(null);
   let panicDraft = $state("");
-  let panicMsg = $state<string | null>(null);
   let drilling = $state(false);
 
   // scrubber (#23)
   let scrubOnLock = $state(false);
-  let scrubResult = $state<string | null>(null);
   let scrubbing = $state(false);
 
   // decoy chrome / deniability (#27)
   let chrome = $state<ChromeInfo | null>(null);
   let chromeDraft = $state("");
-  let chromeMsg = $state<string | null>(null);
 
   onMount(async () => {
     try {
@@ -80,7 +80,7 @@
       siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
       counts = await siteStats();
     } catch (e) {
-      note = `sources settings unavailable: ${e}`;
+      bad(`sources settings unavailable: ${e}`);
     }
     try {
       proxyUrl = (await getProxy()).proxyUrl;
@@ -110,26 +110,26 @@
   });
 
   async function saveChrome() {
-    chromeMsg = null;
     try {
       const t = chromeDraft.trim();
       chrome = await setChrome(t || null);
-      chromeMsg = chrome.decoy
-        ? `window title now "${chrome.decoy}" (in-app brand changes after the next lock)`
-        : "decoy cleared — back to the neutral Flow title";
+      info(
+        chrome.decoy
+          ? `window title now "${chrome.decoy}" (in-app brand changes after the next lock)`
+          : "decoy cleared — back to the neutral Flow title",
+      );
       chromeDraft = "";
     } catch (e) {
-      chromeMsg = String(e);
+      bad(`could not set the decoy title: ${e}`);
     }
   }
 
   async function clearChrome() {
-    chromeMsg = null;
     try {
       chrome = await setChrome(null);
-      chromeMsg = "decoy cleared — back to the neutral Flow title";
+      info("decoy cleared — back to the neutral Flow title");
     } catch (e) {
-      chromeMsg = String(e);
+      bad(`could not clear the decoy title: ${e}`);
     }
   }
 
@@ -137,7 +137,7 @@
     try {
       scrubOnLock = (await setScrubOnLock(!scrubOnLock)).scrubOnLock;
     } catch (e) {
-      scrubResult = String(e);
+      bad(`could not change the scrub setting: ${e}`);
     }
   }
 
@@ -146,39 +146,41 @@
     scrubbing = true;
     try {
       const r = await scrubNow();
-      scrubResult =
+      const line =
         `webview profile ${r.webviewCleared ? "cleared" : "could not clear"}` +
         ` · thumbcache: ${r.thumbcacheRemoved} gone, ${r.thumbcacheLocked} still held by Explorer`;
+      // The counts are the point of the button, so this one stays until read.
+      toast(line, r.webviewCleared ? "info" : "warn", 0);
     } catch (e) {
-      scrubResult = String(e);
+      bad(`scrub failed: ${e}`);
     } finally {
       scrubbing = false;
     }
   }
 
   async function savePanic() {
-    panicMsg = null;
     try {
       panic = await setPanicHotkey(panicDraft.trim() || null);
       panicDraft = "";
-      panicMsg = panic.stored
-        ? `panic key now ${panic.hotkey} — the default Ctrl+Alt+L works too`
-        : "back to the default panic key";
+      info(
+        panic.stored
+          ? `panic key now ${panic.hotkey} — the default Ctrl+Alt+L works too`
+          : "back to the default panic key",
+      );
     } catch (e) {
-      panicMsg = String(e);
+      bad(`could not set the panic key: ${e}`);
     }
   }
 
   async function doDrill() {
     if (drilling) return;
     drilling = true;
-    panicMsg = null;
     try {
       const r = await nukeDrill();
       panic = await getPanicInfo();
-      panicMsg = `drill ok — ${r}`;
+      info(`drill ok — ${r}`);
     } catch (e) {
-      panicMsg = `drill failed: ${e}`;
+      bad(`drill failed: ${e}`);
     } finally {
       drilling = false;
     }
@@ -187,22 +189,20 @@
   async function copy(label: string, value: string) {
     try {
       await navigator.clipboard.writeText(value);
-      copied = `${label} copied`;
+      info(`${label} copied`);
     } catch {
-      copied = `copy failed — select and copy manually`;
+      warn("copy failed — select and copy manually");
     }
-    setTimeout(() => (copied = null), 2000);
   }
 
   async function saveProxy() {
-    proxyMsg = null;
     try {
       const r = await setProxy(proxyDraft.trim() || null);
       proxyUrl = r.proxyUrl;
       proxyDraft = "";
-      proxyMsg = r.proxyUrl ? `all traffic now routes through ${r.proxyUrl}` : "proxy cleared — direct connections";
+      info(r.proxyUrl ? `all traffic now routes through ${r.proxyUrl}` : "proxy cleared — direct connections");
     } catch (e) {
-      proxyMsg = String(e);
+      bad(`could not set the proxy: ${e}`);
     }
   }
 
@@ -212,7 +212,6 @@
   }
 
   async function saveSite(site: string, patch: { enabled?: boolean; rateMs?: number; cookie?: string }) {
-    note = null;
     try {
       const verdict = await setSiteSetting(site, patch.enabled, patch.cookie, patch.rateMs);
       const rows = await getSiteSettings();
@@ -222,8 +221,8 @@
     } catch (e) {
       // #38: the app now refuses a paste that cannot be a session, and says why
       // ("not a session cookie: missing xf_session") instead of storing it and
-      // failing later in a note about some other item.
-      note = `could not save ${site}: ${e}`;
+      // failing later in a message about some other item.
+      bad(`could not save ${site}: ${e}`);
     }
   }
 
@@ -231,13 +230,16 @@
   async function checkCookie(site: string) {
     if (checking[site]) return;
     checking[site] = true;
-    note = null;
     try {
-      cookieVerdict[site] = await checkSiteCookie(site);
+      const v = await checkSiteCookie(site);
+      cookieVerdict[site] = v;
       const rows = await getSiteSettings();
       siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
+      // The answer also goes in the row under the box, where it stays; this is
+      // the one that lands where the button was just pressed.
+      toast(`${site}: ${v.note}`, v.ok ? "info" : "warn");
     } catch (e) {
-      note = `could not check ${site}: ${e}`;
+      bad(`could not check ${site}: ${e}`);
     } finally {
       checking[site] = false;
     }
@@ -251,18 +253,19 @@
   async function clearCookie(site: string) {
     if (clearing[site]) return;
     clearing[site] = true;
-    note = null;
     try {
       const had = await clearSiteCookie(site);
       const rows = await getSiteSettings();
       siteSettings = Object.fromEntries(rows.map((r) => [r.site, r]));
       delete cookieVerdict[site];
       delete cookieDraft[site];
-      note = had
-        ? `${site}: cookie forgotten — links from that site will be fetched as a guest`
-        : `${site}: there was no cookie saved to forget`;
+      info(
+        had
+          ? `${site}: cookie forgotten — links from that site will be fetched as a guest`
+          : `${site}: there was no cookie saved to forget`,
+      );
     } catch (e) {
-      note = `could not clear ${site}: ${e}`;
+      bad(`could not clear ${site}: ${e}`);
     } finally {
       clearing[site] = false;
     }
@@ -306,10 +309,6 @@
   DLsite re-uploads, not new works). A cookie is only used for sites that need a login — paste the whole
   <code>Cookie</code> header value. Rate is the delay between requests to that site.</p>
 
-{#if note}
-  <p class="report-inline">{note}</p>
-{/if}
-
 <div class="group-title">
   Network <span class="hint">— one address for every fetch the app makes</span>
 </div>
@@ -334,9 +333,6 @@
 {:else}
   <p class="hint">No proxy: connections go direct. With the Tor Browser running, <code>socks5://127.0.0.1:9150</code>
     puts all enrichment traffic through Tor; nothing is ever sent anywhere except the sites you track.</p>
-{/if}
-{#if proxyMsg}
-  <p class="report-inline">{proxyMsg}</p>
 {/if}
 
 <div class="group-title" style="margin-top:1.6rem">
@@ -370,7 +366,7 @@
   />
   <button onclick={savePanic}>Set</button>
   {#if panic?.stored}
-    <button class="ghost" onclick={() => { panicDraft = ""; void setPanicHotkey(null).then((p) => (panic = p)).catch((e) => (panicMsg = String(e))); }}>Default</button>
+    <button class="ghost" onclick={() => { panicDraft = ""; void setPanicHotkey(null).then((p) => (panic = p)).catch((e) => bad(`could not set the panic key: ${e}`)); }}>Default</button>
   {/if}
 </div>
 <div class="row">
@@ -383,9 +379,6 @@
     {/if}
   </span>
 </div>
-{#if panicMsg}
-  <p class="report-inline">{panicMsg}</p>
-{/if}
 
 <div class="field-label" style="margin-top:1.2rem">
   Scrubber <span class="hint">— cleans traces the vault never held (web session, Explorer thumbnails)</span>
@@ -397,9 +390,6 @@
     scrub every time I lock or hit the panic key
   </label>
 </div>
-{#if scrubResult}
-  <p class="report-inline">{scrubResult}</p>
-{/if}
 
 <div class="field-label" style="margin-top:1.2rem">
   Decoy title <span class="hint">— deniability: rename the exe in Explorer freely; this dresses the window too</span>
@@ -424,9 +414,6 @@
     <button class="ghost" onclick={() => { chromeDraft = ""; void clearChrome(); }}>Clear</button>
   {/if}
 </div>
-{#if chromeMsg}
-  <p class="report-inline">{chromeMsg}</p>
-{/if}
 
 <div class="group-title">Game sites</div>
 {#if counts.length > 0}
@@ -471,6 +458,7 @@
             type="text"
             placeholder={cur?.cookieSet ? "cookie saved — paste to replace" : "cookie (optional)"}
             bind:value={cookieDraft[s.site]}
+            title={cookieLine(s).text}
             onkeydown={(e) => e.key === "Enter" && cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}
           />
           <button onclick={() => cookieDraft[s.site] && saveSite(s.site, { cookie: cookieDraft[s.site] })}>Set</button>
@@ -491,7 +479,12 @@
             {clearing[s.site] ? "Clearing…" : "Clear"}
           </button>
         </div>
-        <p class="cookie-state {cookieLine(s).cls}">{cookieLine(s).text}</p>
+        <!-- its own grid row (see .cookie-state): this sentence used to be a flex
+             sibling of the paste box and the buttons, and it won — the box shrank to a
+             stub and the text painted over Set/Check/Clear. Also the box's tooltip. -->
+        <p class="cookie-state {cookieLine(s).cls}" title={cookieLine(s).text}>
+          {cookieLine(s).text}
+        </p>
       {/if}
     </div>
   {/each}
@@ -532,9 +525,6 @@
     <span class="chip token-chip">token <strong>{companion.token}</strong></span>
     <button class="ghost" onclick={() => copy("token", companion?.token ?? "")}>Copy token</button>
   </div>
-  {#if copied}
-    <p class="report-inline">{copied}</p>
-  {/if}
 {:else}
   <p class="hint">The companion API is disabled on this run (port bind failed) — browser clipping is unavailable.</p>
 {/if}

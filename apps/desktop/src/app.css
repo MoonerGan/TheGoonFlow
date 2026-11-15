@@ -621,18 +621,34 @@ textarea:focus {
   flex: 0 0 auto;
 }
 
-/* #38: the cookie row has three buttons (Set / Check / Clear) beside the paste
-   box. `.site-cookie` cannot wrap, so the last one was pushed past the edge of
-   the card and drew over the next site's row. */
-.site-cookie {
-  flex-wrap: wrap;
+/* ---------- the Sources site row (#38, second kick-back) ---------- */
+/* The first fix wrapped `.site-cookie` and called it done. The 2026-11-15
+   screenshot shows what that did: a paste box shrunk to a 40 px stub, Set /
+   Check / Clear stacked in a column, and the cookie verdict painted across the
+   buttons. The cause was structural — the whole row was one flex row and the
+   verdict `<p>` was one of its flex items. A long sentence has an enormous
+   max-content width, so it took all the space, and the paste box had
+   `min-width: 0`, so it was allowed to disappear. Wrapping the container only
+   decided *how* the wreckage was stacked.
+   A grid gives every control a track it cannot steal from:
+     row 1: name | enabled | rate
+     row 2: the cookie box — paste input (never under 16rem) and Set | Check |
+            Clear on one line, the buttons never shrinkable
+     row 3: the verdict, its own line, full width — and the same text as a
+            tooltip, so it can also be read without hunting for it. */
+.site-row {
+  display: grid;
+  align-items: center;
+  grid-template-columns: 190px max-content max-content;
+  column-gap: 0.9rem;
+  row-gap: 0.45rem;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  margin: 0.4rem 0;
 }
 
-.site-cookie button {
-  flex: 0 0 auto;
-}
-
-.site-row,
 .update-row,
 .pair-row {
   display: flex;
@@ -654,6 +670,7 @@ textarea:focus {
   width: 190px;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 
 .site-rate {
@@ -664,10 +681,17 @@ textarea:focus {
 
 .site-rate input {
   width: 78px;
+  flex: 0 0 auto;
+}
+
+.site-rate .hint {
+  /* "ms between hits" broke into three stacked words when the row was squeezed
+     and read as if it overlapped the box */
+  white-space: nowrap;
 }
 
 .site-cookie {
-  flex: 1;
+  grid-column: 1 / -1;
   display: flex;
   align-items: center;
   gap: 0.4rem;
@@ -675,15 +699,23 @@ textarea:focus {
 }
 
 .site-cookie input {
-  flex: 1;
-  min-width: 0;
+  flex: 1 1 auto;
+  /* A cookie header is one long line. An input allowed to shrink below this is a
+     box nobody can read or paste into, which is what "tiny text box" meant. */
+  min-width: 16rem;
+}
+
+.site-cookie button {
+  flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .cookie-state {
-  margin: 0.1rem 0 0.55rem;
-  padding-left: 0.8rem;
+  grid-column: 1 / -1;
+  margin: 0;
   font-size: 0.8rem;
   color: var(--muted);
+  overflow-wrap: anywhere;
 }
 
 .cookie-state.good {
@@ -729,9 +761,19 @@ textarea:focus {
 }
 
 @media (max-width: 900px) {
-  .site-row,
   .update-row {
     flex-wrap: wrap;
+  }
+  /* the site row is a grid now; on a narrow window the name column and the
+     paste box give ground, the controls do not stack into a column */
+  .site-row {
+    grid-template-columns: minmax(7rem, 1fr) max-content max-content;
+  }
+  .site-name {
+    width: auto;
+  }
+  .site-cookie input {
+    min-width: 10rem;
   }
 }
 
@@ -1012,25 +1054,28 @@ textarea:focus {
   display: block;
 }
 
-.viewer-stage .stage-note {
+/* Anything the stage says is an overlay (2026-11-15 review): as static flex
+   items these lines sat *next to* the picture and took its width — a 6000 px
+   frame was shown at 27% in a stage whose right third was a sentence. */
+.viewer-note {
   position: absolute;
   left: 50%;
   bottom: 1.25rem;
   transform: translateX(-50%);
-  color: var(--muted);
-  font-size: 0.85rem;
-}
-
-.viewer-note {
-  color: var(--text);
+  max-width: min(46rem, calc(100% - 2rem));
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(12, 13, 16, 0.86);
+  color: var(--fg);
   text-align: center;
-  max-width: 40rem;
-  line-height: 1.6;
+  line-height: 1.5;
+  font-size: 0.85rem;
 }
 
-.poster-note {
-  margin-top: 0.75rem;
-  font-size: 0.85rem;
+.viewer-stage .stage-note {
+  background: none;
+  border-color: transparent;
   color: var(--muted);
 }
 
@@ -1124,14 +1169,6 @@ textarea:focus {
   pointer-events: none;
 }
 
-.viewer.fullscreen .poster-note {
-  position: absolute;
-  left: 50%;
-  bottom: 1rem;
-  transform: translateX(-50%);
-  margin-top: 0;
-}
-
 .viewer-info {
   display: flex;
   flex-direction: column;
@@ -1141,12 +1178,98 @@ textarea:focus {
 
 .viewer-zoom {
   display: inline-flex;
+  align-items: center;
   gap: 0.25rem;
+}
+
+/* The scale readout: a separate, unclickable number, so "what am I looking at"
+   is never encoded in the label of a button. It states the picture's own
+   pixels, which is the number the old `100%` button lied about. */
+.viewer-zoom .zoom-readout {
+  min-width: 3.5rem;
+  padding-left: 0.35rem;
+  text-align: right;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 0.82rem;
+  cursor: default;
 }
 
 button.active {
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* ---------- the toast stack (#65) ----------
+   One-line messages about something that just happened. Floating, so a warning
+   never has to share a row with the thing it is talking about, and never has to
+   be dismissed by hand. It sits above the viewer (z 60) and the dialogs (z 50). */
+.toasts {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 70;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 0.4rem;
+  max-width: min(32rem, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+  padding: 0.55rem 0.5rem 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--muted);
+  border-radius: 8px;
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  font-size: 0.85rem;
+  line-height: 1.45;
+  pointer-events: auto;
+  animation: toast-in 0.12s ease-out;
+}
+
+.toast.info {
+  border-left-color: var(--accent);
+}
+
+.toast.warn {
+  border-left-color: #d7a13a;
+}
+
+.toast.bad {
+  border-left-color: var(--danger);
+}
+
+.toast-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.toast-x {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  padding: 0 0.15rem;
+  color: inherit;
+  font-size: 1rem;
+  line-height: 1;
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.35rem);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 /* #43: the editor opens as a read-only view and its fields fold into sections.

@@ -272,12 +272,51 @@ the board's *In review* column is the current list.
  30. Viewer, the parts that used to move on their own: open a media card whose tile is
      small and whose full copy is much larger → the filmstrip and the control bar must
      not jump when the full picture lands (the media sits in a box that already fills
-     the stage). Press `a` (or **Actual**) → the picture shows at its own pixels and the
-     button's tooltip names them (`this frame is 1200x630`); `0` fits it again. A video
+     the stage). **Fit** (or `0`) puts the whole picture inside the window and **1:1** (or
+     `a`) shows it at its own pixels; whichever one you are on is the highlighted
+     button, and the number beside them is the picture’s scale against its own pixels
+     (`6000×4000 px, shown at 20%`). Item 31 below is the version of that sequence the
+     2026-11-15 report asked for. A video
      that exists only as a link, or as a file in a folder, says *"kept as a link or as a
      path on this machine… not played here yet"*; a video stored in the vault past 96 MB
      states its size; and neither sentence says "open it from its source link", because
      for those items there is nothing to open.
+
+ 31. Viewer, the numbers (#62, 2026-11-15 report: "Actual is always `NaN%`"). Open a
+     large picture — a 6000×4000 PNG import is the measured case → the bar reads the
+     honest scale (`20%` in a normal window), **not** `100%`, and the info line spells
+     it out: `6000×4000 px, shown at 20%`. Press **1:1** (or `a`) → the readout goes to
+     `100%`, the picture grows until one picture pixel is one screen pixel, and the
+     **1:1** button is the highlighted one. Press **Fit** (or `0`) → back to the first
+     number and **Fit** is highlighted instead. `+` / `-` keep working past 1:1 for a
+     frame that needs it. Nothing in this sequence may ever print `NaN%`, including
+     while the full copy is still loading behind its thumbnail.
+ 32. Viewer, ordinary pictures (#62, same report: "almost every image shows *this
+     build has no decoder for it*"). An ordinary `.jpg` / `.png` / `.webp` / `.gif`
+     frame shows **no** such sentence in the stage at all, and no toast either: the
+     false note came from a branch that tested `shown`, which is the frame's metadata
+     row and is always present. A frame that genuinely cannot be shown says so as a
+     **toast** in the corner that disappears by itself, and the picture's space is
+     never reduced by a sentence — the stage text is an overlay, so a 6000 px frame is
+     still laid out across the whole stage with a note floating over it.
+ 33. Sources, the same row again (#38, second kick-back). At a normal window width
+     every site row shows: name / **enabled** / rate box on one line, then the cookie
+     paste box with **Set · Check · Clear** beside it on **one** line — never stacked —
+     and the cookie verdict on **its own line below**, never across the buttons. The
+     paste box never collapses below about 16 rem (≈256 px) no matter how long the
+     verdict sentence is, and hovering the box shows that verdict as a tooltip. Resize
+     the window narrow: the row re-wraps, the buttons stay on one line and the box
+     keeps at least 10 rem. Press **Check**: the answer appears both under the box
+     (it stays) and as a toast (it leaves).
+ 34. One toast system for the whole app (#62's "this should apply for almost all
+     warnings"). Store a picture from an item's attachment list → the corner says
+     `stored image/webp (240 KB)` and vanishes on its own; so do *Clear* on a cookie
+     (`… cookie forgotten`), a *Keep both* on a dupe pair, an update check, a match
+     search, a scrub report, a refused launch and a mod that would not start. None of
+     them may leave a line of text wedged between the controls it came from. What
+     **must** stay written in the panel: a site switched off, *panic key NOT armed*, a
+     cookie's per-site verdict, and a value the editor refuses. Press the panic key or
+     **Lock** while a toast is up → the toast is gone with it, like the media cache.
 
 ## 4. House rules that prevent whole classes of damage
 
