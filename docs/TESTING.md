@@ -274,7 +274,7 @@ the board's *In review* column is the current list.
      not jump when the full picture lands (the media sits in a box that already fills
      the stage). **Fit** (or `0`) puts the whole picture inside the window and **1:1** (or
      `a`) shows it at its own pixels; whichever one you are on is the highlighted
-     button, and the number beside them is the picture’s scale against its own pixels
+     button, and the number beside them is the picture's scale against its own pixels
      (`6000×4000 px, shown at 20%`). Item 31 below is the version of that sequence the
      2026-11-15 report asked for. A video
      that exists only as a link, or as a file in a folder, says *"kept as a link or as a
