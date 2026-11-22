@@ -290,7 +290,8 @@ the board's *In review* column is the current list.
      **1:1** button is the highlighted one. Press **Fit** (or `0`) → back to the first
      number and **Fit** is highlighted instead. `+` / `-` keep working past 1:1 for a
      frame that needs it. Nothing in this sequence may ever print `NaN%`, including
-     while the full copy is still loading behind its thumbnail.
+     while the full copy is still loading behind its thumbnail. Item 35 is the same
+      sequence, run by a script against the real exe.
  32. Viewer, ordinary pictures (#62, same report: "almost every image shows *this
      build has no decoder for it*"). An ordinary `.jpg` / `.png` / `.webp` / `.gif`
      frame shows **no** such sentence in the stage at all, and no toast either: the
@@ -317,6 +318,22 @@ the board's *In review* column is the current list.
      **must** stay written in the panel: a site switched off, *panic key NOT armed*, a
      cookie's per-site verdict, and a value the editor refuses. Press the panic key or
      **Lock** while a toast is up → the toast is gone with it, like the media cache.
+
+  35. Viewer, **Fit** and **1:1** measured rather than assumed (2026-11-22 report:
+      "Fit still doesn't make the image actually fit to the screen size… certain images
+      show both as selected even though the image resolution definitely doesn't fit").
+      The cases are the ones `tools\viewer-layout-probe.js` generates, imports and
+      clicks for real — **2400×1600**, **1200×3000** and **600×400** PNGs in a 1380×860
+      window. The two large ones must open *contained*, with the readout at their real
+      scale (`45%` and `24%` in that window) and **Fit** as the only lit button; **1:1**
+      must draw them at exactly 2400×1600 and 1200×3000 (`drawn/own 1.000`, bar `100%`)
+      and leave the stage scrollable to **every** part of the frame — top edge and left
+      edge reachable, not clipped behind a centred zoom. **Fit** returns them to the
+      opening size in one press. The 600×400 picture is smaller than the window, so both
+      buttons are lit and it must say why: `600×400 px, shown at 100% · Fit and 1:1 are
+      the same here: the picture is smaller than the window`. Nothing in this sequence
+      may print `0×0 px` (the size was read off a detached `ImageBitmap`) or `zoom 100%`
+      (the transform standing in for a scale the app did not know).
 
 ## 4. House rules that prevent whole classes of damage
 

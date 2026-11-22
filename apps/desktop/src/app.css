@@ -1016,11 +1016,21 @@ textarea:focus {
 .viewer-stage img,
 .viewer-stage video,
 .viewer-stage canvas {
+  /* Auto margins centre the picture while it fits and start-align it once it does
+     not (see .frame-box), which is what keeps a zoomed frame fully scrollable. */
+  margin: auto;
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  transition: transform 0.08s ease-out;
   image-rendering: auto;
+}
+
+/* Once the frame's own pixels are known the media is laid out at
+   `own pixels x scale` in CSS px (see lib/view-zoom.ts): that is the only way 1:1
+   can be exactly one pixel per pixel, and a percentage cap would clamp it away. */
+.viewer-stage .sized {
+  max-width: none;
+  max-height: none;
 }
 
 /* The media box: empty, it costs nothing, so a note still gets the stage to
@@ -1028,18 +1038,28 @@ textarea:focus {
    is what keeps the filmstrip and the control bar from jumping when the full
    copy replaces the tile. It never scrolls on its own — a zoomed picture is
    scrolled by the stage. */
+/* The media box: pinned to the stage, never sized by the picture. Two reasons,
+   both measured live on 2026-11-22 with tools\viewer-layout-probe.js:
+
+   1. While the box was a flex item sized by its content, zooming past the stage
+      raised the stage's scrollbars, which shrank the box, which changed the fit
+      factor the 1:1 button had just used — 1:1 on a 2400 px frame drew 2367 px and
+      the bar said 99%. Pinned, the box is the same number before and after a zoom.
+   2. It is a grid and the media takes `margin: auto`: centred while it fits, and
+      start-aligned (never overflown at the top/left) once it does not. That is what
+      keeps a zoomed frame inside the stage's scroll area — a centred
+      `transform: scale()` leaves the part that sticks out to the left and above
+      unreachable, measured as scroll width 1868 for a picture drawn 2367. */
 .frame-box {
-  flex: 0 1 auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: absolute;
+  inset: 1rem;
+  display: grid;
   min-width: 0;
   min-height: 0;
 }
 
-.frame-box:not(:empty) {
-  flex: 1 1 auto;
-  align-self: stretch;
+.viewer.fullscreen .frame-box {
+  inset: 0;
 }
 
 /* #44: the full-res frame is painted into this canvas by bitmaprenderer (the

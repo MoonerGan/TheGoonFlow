@@ -306,7 +306,12 @@ proxy if you set one).
   is the button that is highlighted. The number next to them is the picture's scale
   **against its own pixels** — a 6000×4000 frame fitted into a normal window reads
   `20%`, not `100%` — and the bar spells it out too (`6000×4000 px, shown at 20%`).
-  1:1 is always reachable: the zoom ceiling rises for pictures that need it.
+  At 1:1 the frame is laid out at its exact pixel count, so the stage's scrollbars
+  reach every edge of it rather than hiding part of the picture; `+` keeps going past
+  1:1 (to eight screen pixels per picture pixel) and stops there. A picture *smaller*
+  than the window has nothing to fit: **Fit** already shows it at 1:1, so both buttons
+  are lit and the bar says so — `Fit and 1:1 are the same here: the picture is smaller
+  than the window`.
   **space** starts a **slideshow**
   (4 s per picture, wraps), `f` (or the ⛶ button) **fullscreen** — the image fills
   the window, chrome hidden, `Esc` or `f` back out — `i` opens the item's

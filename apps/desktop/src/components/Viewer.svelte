@@ -16,14 +16,15 @@
   import { type ItemSummary, type MediaFrame } from "../lib/api";
   import { toast } from "../lib/toast.svelte";
   import {
-    clampZoom,
+    clampScale,
+    drawnSize,
     fitScale,
-    isFitted,
+    fitsTheStage,
     isOneToOne,
-    onScreenPercent,
-    oneToOneZoom,
+    oneToOneScale,
+    scaleCeiling,
+    scalePercent,
     type Size,
-    zoomCeiling,
   } from "../lib/view-zoom";
   import {
     cancelOutsideWindow,
@@ -63,7 +64,8 @@
   let f = $state(0);
   let loading = $state(false);
   let err = $state<string | null>(null);
-  let zoom = $state(1); // 1 = fit-to-window
+  let fitMode = $state(true); // Fit: the picture is as big as the stage allows
+  let absScale = $state(1); // screen px per picture px, once the user takes over
   let slideshow = $state(false);
   let frameReady = $state(false);
 
@@ -130,19 +132,26 @@
   // the picture sat still while the bar read `NaN%` (2026-11-15 review).
   //
   // `natural` is the picture actually on screen: the stored tile while the full
-  // copy loads, then the frame itself. `stageBox` is the box it is laid out in,
-  // measured before any transform, refreshed by a ResizeObserver so it is also
-  // right after a window resize or a fullscreen change.
+  // copy loads, then the frame itself. `stageBox` is the space the stage has for
+  // it, measured from the stage's *border box* less its own padding. Measuring the
+  // media box instead (what shipped until 2026-11-22) made the number depend on
+  // whether the stage was showing scrollbars: a zoomed picture raised them, which
+  // shrank the box under the button that had just used it, and 1:1 drew 2367 px of
+  // a 2400 px frame while the bar read 99%.
   let natural = $state<Size | null>(null);
-  let boxEl = $state<HTMLDivElement | null>(null);
+  let stageEl = $state<HTMLDivElement | null>(null);
   let stageBox = $state<Size | null>(null);
 
   $effect(() => {
-    const el = boxEl;
+    const el = stageEl;
     if (!el) return;
     const measure = () => {
-      const r = el.getBoundingClientRect();
-      stageBox = { w: r.width, h: r.height };
+      const cs = getComputedStyle(el);
+      const num = (v: string) => (Number.isFinite(parseFloat(v)) ? parseFloat(v) : 0);
+      stageBox = {
+        w: Math.max(0, el.getBoundingClientRect().width - num(cs.paddingLeft) - num(cs.paddingRight)),
+        h: Math.max(0, el.getBoundingClientRect().height - num(cs.paddingTop) - num(cs.paddingBottom)),
+      };
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -150,47 +159,63 @@
     return () => ro.disconnect();
   });
 
-  /** how much of one picture pixel lands on one screen pixel at zoom 1 */
-  const fit = $derived(fitScale(natural, stageBox));
-  const ceiling = $derived(zoomCeiling(natural, stageBox));
-  /** the honest readout: the picture's own pixels, not the transform */
-  const scalePct = $derived(onScreenPercent(zoom, natural, stageBox));
-  const atFit = $derived(isFitted(zoom));
-  const atOne = $derived(isOneToOne(zoom, natural, stageBox));
   /** Do we know how big this picture is at all? A frame that has not decoded yet,
-   * or one whose bitmap came back empty, has no size to talk about - and the UI
+   * or one whose bitmap came back empty, has no size to talk about — and the UI
    * has to say "not known" rather than print `0×0 px, shown at ?%`. */
   const sized = $derived(!!natural && natural.w > 0 && natural.h > 0);
+  /** the scale that puts the whole picture inside the stage, never enlarging it */
+  const fit = $derived(fitScale(natural, stageBox));
+  const ceiling = $derived(scaleCeiling(natural));
+  /** screen pixels per picture pixel, right now */
+  const scale = $derived(fitMode ? fit : clampScale(absScale, ceiling));
+  /** the box the media is laid out at, in CSS px; null means "let CSS contain it",
+   *  which is what a video gets, since its pixel size is not read here */
+  const drawn = $derived(drawnSize(natural, scale));
+  const frameStyle = $derived(drawn ? `width: ${drawn.w}px; height: ${drawn.h}px` : "");
+  /** the honest readout: the picture's own pixels, never the transform */
+  const scalePct = $derived(sized ? scalePercent(scale) : null);
+  const atOne = $derived(sized && isOneToOne(scale));
   /**
    * The picture is no larger than the space the stage has, so there is nothing for
    * "Fit" to shrink and Fit / 1:1 are the same state. That is true by definition
    * (fit never enlarges a picture), and the UI says so: the 2026-11-22 report read
    * two lit buttons as a bug, and the honest answer is a sentence, not a guess.
    */
-  const smallerThanStage = $derived(sized && fit >= 0.999);
+  const smallerThanStage = $derived(fitsTheStage(natural, stageBox));
 
-  function setZoom(z: number) {
-    zoom = clampZoom(z, ceiling);
+  /** + / −: leaving Fit means the user owns the number from here on. */
+  function zoomBy(factor: number) {
+    if (!sized) return;
+    fitMode = false;
+    absScale = clampScale(scale * factor, ceiling);
   }
 
-  /** zoom 1 = the whole picture inside the stage (the default, key `0`). */
+  /** Fit (key `0`): the whole picture inside the stage, never enlarged. */
   function fitToWindow() {
-    zoom = 1;
+    fitMode = true;
   }
 
   /**
-   * One picture pixel per screen pixel (key `a`). Always recomputed from the
-   * frame and the stage rather than from where the zoom happens to be, so
-   * pressing it twice lands in the same place. If the frame's own size is not
-   * known yet the button says so out loud instead of moving the picture to NaN.
+   * One picture pixel per screen pixel (key `a`). In this model that is scale 1
+   * whatever the picture is, and the media box is laid out at the frame's own
+   * pixel count, so the stage scrolls to the whole picture rather than clipping it
+   * behind a centred transform. If the frame's own size is not known yet the button
+   * says so out loud instead of moving the picture to NaN.
    */
   function actualPixels() {
-    const target = oneToOneZoom(natural, stageBox);
-    if (target <= 0) {
+    if (!sized) {
       toast("this picture's own size is not known yet, so 1:1 cannot be worked out", "warn");
       return;
     }
-    zoom = clampZoom(target, ceiling);
+    fitMode = false;
+    absScale = clampScale(oneToOneScale(), ceiling);
+  }
+
+  /** New picture on screen, so start at Fit: whatever zoom the last frame was left
+   *  at must not decide how this one opens. */
+  function resetView() {
+    fitMode = true;
+    absScale = 1;
   }
 
   /** the zoom buttons' shared tooltip: what this picture is, and where we are */
@@ -235,7 +260,7 @@
     const mine = ++nav;
     loading = true;
     err = null;
-    zoom = 1;
+    resetView();
     f = 0;
     frames = [];
     loadFrames(id)
@@ -325,7 +350,7 @@
       const mine = ++nav;
       loading = true;
       err = null;
-      zoom = 1;
+      resetView();
       void openFrame(frames[next].id, mine);
       return;
     }
@@ -340,7 +365,7 @@
     const mine = ++nav;
     loading = true;
     err = null;
-    zoom = 1;
+    resetView();
     void openFrame(frames[i].id, mine);
   }
 
@@ -367,10 +392,10 @@
         break;
       case "+":
       case "=":
-        setZoom(zoom * 1.25);
+        zoomBy(1.25);
         break;
       case "-":
-        setZoom(zoom / 1.25);
+        zoomBy(1 / 1.25);
         break;
       case "0":
         fitToWindow();
@@ -585,12 +610,12 @@
   aria-label="media viewer"
   onpointermove={() => full && showChrome()}
 >
-  <div class="viewer-stage">
+  <div class="viewer-stage" bind:this={stageEl}>
     <!-- The media always sits inside a box that already fills the stage, so the
          strip and the control bar stop moving when a picture lands: the stage
          used to be sized by whatever happened to be on it, so a card with a
          360 px tile opened into a stage that grew twice in the first second. -->
-    <div class="frame-box" bind:this={boxEl}>
+    <div class="frame-box">
       {#if isVideo && elementSrc}
         <!-- svelte-ignore a11y_media_has_caption -->
         <video src={elementSrc} controls loop autoplay></video>
@@ -598,32 +623,36 @@
         <img
           src={elementSrc}
           alt={item?.title ?? ""}
-          style="transform: scale({zoom})"
+          class:sized={!!drawn}
+          style={frameStyle}
           onload={(e) => (natural = sizeOf(e.currentTarget))}
         />
       {:else if isStill}
         {#if poster && !frameReady}
           <img
             class="frame-poster"
+            class:sized={!!drawn}
             src={poster}
             alt={item?.title ?? ""}
             onload={(e) => (natural = sizeOf(e.currentTarget))}
-            style="transform: scale({zoom})"
+            style={frameStyle}
           />
         {/if}
         <canvas
           class="viewer-frame"
           class:shown={frameReady}
+          class:sized={!!drawn}
           bind:this={frame}
-          style="transform: scale({zoom})"
+          style={frameStyle}
         ></canvas>
       {:else if poster && !err}
         <img
           class="frame-poster"
+          class:sized={!!drawn}
           src={poster}
           alt={item?.title ?? ""}
           onload={(e) => (natural = sizeOf(e.currentTarget))}
-          style="transform: scale({zoom})"
+          style={frameStyle}
         />
       {/if}
     </div>
@@ -679,7 +708,7 @@
         {#if frames.length > 1}· picture {f + 1}/{frames.length}{/if}
         {#if shown?.kind === "full"}· full-res in vault{:else if shown?.kind === "video"}· stored video{:else if shown}· preview only{/if}
         {#if shown}· {shown.mime}{/if}
-        {#if natural && natural.w > 0 && natural.h > 0}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{#if smallerThanStage} · Fit and 1:1 are the same here: the picture is smaller than the window{/if}{/if}
+        {#if natural && natural.w > 0 && natural.h > 0}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{#if smallerThanStage}{' '}· Fit and 1:1 are the same here: the picture is smaller than the window{/if}{/if}
         {#if mediaCache.entries > 0}· {mediaCache.entries} in cache · {Math.round(mediaCache.bytes / 1048576)} MB{/if}
       </span>
     </div>
@@ -690,12 +719,20 @@
         ▶▶ {slideshow ? "Stop" : "Slideshow"}
       </button>
       <span class="viewer-zoom" role="group" aria-label="zoom">
-        <button onclick={() => setZoom(zoom / 1.25)} title="zoom out (−)">−</button>
         <button
-          class:active={atFit}
-          aria-pressed={atFit}
+          onclick={() => zoomBy(1 / 1.25)}
+          disabled={!sized}
+          title={sized
+            ? "zoom out: 1.25 steps, counted against the picture's own pixels (−)"
+            : "zooming needs the picture's own pixel size, which is not known yet"}
+        >
+          −
+        </button>
+        <button
+          class:active={fitMode}
+          aria-pressed={fitMode}
           onclick={fitToWindow}
-          title="Fit: the whole picture inside the window (0)"
+          title="Fit: the whole picture inside the window, never enlarged (0)"
         >
           Fit
         </button>
@@ -707,16 +744,25 @@
           title={smallerThanStage
             ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px and already fits the window, so Fit has it at 1:1 already (a)`
             : sized
-              ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px (a)`
+              ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px, drawn at exactly that (a)`
               : "1:1 needs the picture's own pixel size, which is not known yet"}
         >
           1:1
         </button>
-        <button onclick={() => setZoom(zoom * 1.25)} title="zoom in (+)">+</button>
-        <!-- The number is the picture's scale against its own pixels, never the
-             transform: "100%" used to be a button label that meant "fit", which is
-             how the 2026-11-15 "Actual is NaN%" report and its follow-up both read
-             as broken. Unknown is shown as "?" and explained on hover. -->
+        <button
+          onclick={() => zoomBy(1.25)}
+          disabled={!sized}
+          title={sized
+            ? `zoom in: 1.25 steps, up to ${Math.round(ceiling * 100)}% of the picture's own pixels (+)`
+            : "zooming needs the picture's own pixel size, which is not known yet"}
+        >
+          +
+        </button>
+        <!-- The number is always the picture's own pixels: there is no transform to
+             report any more, the media is laid out at `own pixels x scale` in CSS px.
+             "100%" used to be a button label that meant "fit", which is how the
+             2026-11-15 "Actual is NaN%" report and its follow-up both read as
+             broken. Unknown is shown as "?" and explained on hover. -->
         <span
           class="zoom-readout"
           class:unknown={scalePct === null}

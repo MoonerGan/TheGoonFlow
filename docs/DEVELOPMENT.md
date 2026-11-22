@@ -562,9 +562,20 @@ Set-Location apps\desktop
   it runs through `npm exec --yes`. It must print 0 errors **and** 0 warnings: that is
   what catches a `currentTarget` typed as `Element`, a possibly-null ref, and the
   leftover of a deleted `*Msg` variable.
-- No browser automation on this box (only Firefox and the WebView2 runtime are
-  installed), so layout is verified by the CSS contract in §6, by these two checks,
-  and by the user's live test of the release exe.
+- No browser is installed on this box, but **the release exe is one**: the WebView2
+  runtime answers the DevTools protocol on a loopback port, so a real session can be
+  measured. `tools\viewer-layout-probe.js` (run it through
+  `tools\webview-layout-test.ps1`) starts a *copy* of the exe in
+  `%TEMP%\goon-viewer-probe` with its own throwaway vault, imports generated PNGs of
+  exact pixel size, clicks the real card and then the real **Fit** / **1:1** buttons, and
+  prints the box the stage really got, what the app claimed, and what the engine drew.
+  It is how the 2026-11-22 Fit / 1:1 report was found: the arithmetic test and the CSS
+  contract were both green while the live app printed `0×0 px, shown at ?%` and disabled
+  1:1. It asserts the app's own words — contained at Fit, 1:1 drawing the frame's own
+  pixel count, the whole picture inside the stage's scroll area, and no `?` or `0×0` in
+  the readout or the info line. The copy has no `flow.cfg`, so no real vault is ever
+  attached, and like the other live tools it stops running instances first because the
+  single-instance plugin would otherwise hand off.
 
 ## 6. Adding things (patterns)
 
@@ -693,15 +704,37 @@ Set-Location apps\desktop
   in the viewer: `.viewer-note` is `position: absolute` over the stage, so no caption
   buys its width out of the picture.
 - **Zoom and other on-screen arithmetic is a pure module.** `lib/view-zoom.ts` owns
-  fit / 1:1 / ceiling / percent and `tools\view-zoom-check.js` asserts it, because a
-  component cannot be tested. Model: `zoom 1` means "the whole picture inside the
-  box", `fit = min(box.w/natural.w, box.h/natural.h, 1)`, so the honest readout is
-  `zoom * fit` — a 6000×4000 frame in a 1240×800 stage says `20%` at fit and `100%`
-  at 1:1 (`zoom = 1/fit = 5`). `zoomCeiling` rises above `ZOOM_MAX` when 1:1 needs
-  it, because a button that silently refuses to reach 1:1 is worse than a big number.
-  Controls: **Fit** (`0`) and **1:1** (`a`) carry `class:active` / `aria-pressed` so
-  the state is visible, and the percentage is a separate non-clickable readout —
-  never the label of a button.
+  fit / scale / ceiling / percent and `tools\view-zoom-check.js` asserts it, because a
+  component cannot be tested. Model (rewritten 2026-11-22, measured by
+  `tools\viewer-layout-probe.js`): `scale` is *screen pixels per picture pixel*, so
+  **1:1 is scale 1 whatever the picture is** and the readout is `round(scale × 100)`;
+  `fit = min(box.w/natural.w, box.h/natural.h, 1)` is only the scale the **Fit** button
+  picks, and picking it is a mode (`fitMode`) that any manual zoom leaves. A picture
+  that already fits has `fit == 1`, so Fit and 1:1 are the same state — the UI says that
+  in words instead of leaving two lit buttons to be read as a bug.
+  - `box` is measured from the **stage's border box less its padding**, never from the
+    media box. The media box used to be a flex item sized by its own content, so a
+    zoomed picture raised the stage's scrollbars, which shrank the box, which changed
+    the `fit` the 1:1 button had just used: measured 1:1 on a 2400 px frame drew
+    2367 px while the bar read 99%.
+  - `scale` is applied as the media's own `width`/`height` in CSS px, **not** as
+    `transform: scale()`. A centred transform puts part of a zoomed picture outside the
+    scroll container, where it cannot be scrolled to (measured: scroll width 1868 for a
+    picture drawn 2367). `.frame-box` is pinned to the stage
+    (`position: absolute; inset: 1rem`, `inset: 0` in fullscreen) and is a grid; the
+    media takes `margin: auto`, which centres it while it fits and start-aligns it when
+    it does not, so the whole frame stays reachable.
+  - `scaleCeiling` caps zoom *past* 1:1 at `MAX_DRAWN_PX` (the WebView2 texture limit),
+    but 1:1 itself is never clamped away — a button that silently refuses to reach 1:1
+    is worse than one that stops early.
+  - Controls: **Fit** (`0`) and **1:1** (`a`) carry `class:active` / `aria-pressed`, the
+    ± buttons are disabled until the frame's own pixel size is known, and the
+    percentage is a separate non-clickable readout — never the label of a button. A
+    size that is not known prints `?` and says so on hover; it must never print
+    `0×0 px` or a fabricated 100%. (The size was read *after*
+    `transferFromImageBitmap` for a while, and a detached `ImageBitmap` reports `0×0`:
+    that is what made 1:1 disabled itself, the bar read `zoom 100%` for a picture drawn
+    at 45%, and the info line said `0×0 px, shown at ?%`.)
 
 ## 7. Release-ish notes for contributors
 

@@ -379,7 +379,12 @@ async function main() {
       if (!s.one.err && biggerThanStage) {
         if (s.one.media.w === s.opened.media.w && s.one.media.h === s.opened.media.h) notes.push('1:1 did not change the drawn size');
         const own = ownPixels(s.opened);
-        if (own && s.one.media.w !== own.w) notes.push(`1:1 drew ${s.one.media.w}px wide, own is ${own.w}px`);
+        // a couple of px is the sub-pixel rounding of the transform; anything more
+        // means the box moved under the zoom (the scrollbar feedback bug)
+        if (own && Math.abs(s.one.media.w - own.w) > 3) notes.push(`1:1 drew ${s.one.media.w}px wide, own is ${own.w}px`);
+        if (s.one.stageVisible && s.one.stageVisible.sw + 4 < s.one.media.w) {
+          notes.push(`1:1 does not make the stage scrollable (scroll ${s.one.stageVisible.sw}, drawn ${s.one.media.w}): the picture cannot be panned`);
+        }
       }
       if (s.one.err) notes.push(`1:1 unusable: ${s.one.err}`);
       if (s.fit.err) notes.push(`Fit unusable: ${s.fit.err}`);
