@@ -157,6 +157,17 @@
   const scalePct = $derived(onScreenPercent(zoom, natural, stageBox));
   const atFit = $derived(isFitted(zoom));
   const atOne = $derived(isOneToOne(zoom, natural, stageBox));
+  /** Do we know how big this picture is at all? A frame that has not decoded yet,
+   * or one whose bitmap came back empty, has no size to talk about - and the UI
+   * has to say "not known" rather than print `0×0 px, shown at ?%`. */
+  const sized = $derived(!!natural && natural.w > 0 && natural.h > 0);
+  /**
+   * The picture is no larger than the space the stage has, so there is nothing for
+   * "Fit" to shrink and Fit / 1:1 are the same state. That is true by definition
+   * (fit never enlarges a picture), and the UI says so: the 2026-11-22 report read
+   * two lit buttons as a bug, and the honest answer is a sentence, not a guess.
+   */
+  const smallerThanStage = $derived(sized && fit >= 0.999);
 
   function setZoom(z: number) {
     zoom = clampZoom(z, ceiling);
@@ -184,10 +195,12 @@
 
   /** the zoom buttons' shared tooltip: what this picture is, and where we are */
   const zoomHint = $derived(
-    natural
-      ? `this frame is ${natural.w}x${natural.h} px · shown at ${scalePct ?? "?"}% of that` +
-        ` · Fit (0) = whole picture, 1:1 (a) = one picture pixel per screen pixel`
-      : "the picture's own pixel size is not known yet",
+    natural && natural.w > 0 && natural.h > 0
+      ? `this frame is ${natural.w}×${natural.h} px · shown at ${scalePct ?? "?"}% of that` +
+        ` · Fit (0) = the whole picture inside the window, never enlarged` +
+        ` · 1:1 (a) = one picture pixel per screen pixel` +
+        (smallerThanStage ? " · this picture is smaller than the window, so Fit already is 1:1" : "")
+      : "this picture's own pixel size is not known yet, so Fit and 1:1 cannot be measured",
   );
 
   // #44: bumped on every navigation. A payload that lands after the user moved
@@ -459,13 +472,22 @@
           bmp.close(); // a newer navigation won while this was decoding
           return;
         }
-        cv.width = bmp.width;
-        cv.height = bmp.height;
+        // The size has to be read BEFORE the transfer: `transferFromImageBitmap`
+        // detaches the bitmap, and a detached ImageBitmap reports 0x0. Reading it
+        // after (which is what shipped) made every full-res frame report 0x0, so
+        // the fit factor was 0, 1:1 was disabled, the readout fell back to
+        // "zoom 100%" and the info line said "0×0 px, shown at ?%" — measured live
+        // on 2026-11-22 with tools\viewer-layout-probe.js (a 2400x1600 frame drawn
+        // at 1085x723 reported no size at all).
+        const w = bmp.width;
+        const h = bmp.height;
+        cv.width = w;
+        cv.height = h;
         ctx.transferFromImageBitmap(bmp);
         painted = cv;
         frameReady = true;
-        // the numbers the 1:1 button and the strip's title need
-        natural = { w: bmp.width, h: bmp.height };
+        // the numbers the Fit / 1:1 buttons and the info line need
+        natural = { w, h };
       })
       .catch(() => {
         // decoder refused this image: keep the stand-in rather than a spinner.
@@ -657,7 +679,7 @@
         {#if frames.length > 1}· picture {f + 1}/{frames.length}{/if}
         {#if shown?.kind === "full"}· full-res in vault{:else if shown?.kind === "video"}· stored video{:else if shown}· preview only{/if}
         {#if shown}· {shown.mime}{/if}
-        {#if natural}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{/if}
+        {#if natural && natural.w > 0 && natural.h > 0}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{#if smallerThanStage} · Fit and 1:1 are the same here: the picture is smaller than the window{/if}{/if}
         {#if mediaCache.entries > 0}· {mediaCache.entries} in cache · {Math.round(mediaCache.bytes / 1048576)} MB{/if}
       </span>
     </div>
@@ -680,17 +702,28 @@
         <button
           class:active={atOne}
           aria-pressed={atOne}
-          disabled={fit <= 0}
+          disabled={!sized}
           onclick={actualPixels}
-          title={natural
-            ? `1:1: one screen pixel per picture pixel — this frame is ${natural.w}x${natural.h} px (a)`
-            : "1:1 needs the picture's own pixel size, which is not known yet"}
+          title={smallerThanStage
+            ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px and already fits the window, so Fit has it at 1:1 already (a)`
+            : sized
+              ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px (a)`
+              : "1:1 needs the picture's own pixel size, which is not known yet"}
         >
           1:1
         </button>
         <button onclick={() => setZoom(zoom * 1.25)} title="zoom in (+)">+</button>
-        <span class="zoom-readout" title={zoomHint}>
-          {scalePct === null ? `zoom ${Math.round(zoom * 100)}%` : `${scalePct}%`}
+        <!-- The number is the picture's scale against its own pixels, never the
+             transform: "100%" used to be a button label that meant "fit", which is
+             how the 2026-11-15 "Actual is NaN%" report and its follow-up both read
+             as broken. Unknown is shown as "?" and explained on hover. -->
+        <span
+          class="zoom-readout"
+          class:unknown={scalePct === null}
+          title={zoomHint}
+          aria-label="scale against the picture's own pixels"
+        >
+          {scalePct === null ? "?" : `${scalePct}%`}
         </span>
       </span>
       <button onclick={() => item && onEdit(item)} title="open the editor (i)">Edit</button>

@@ -73,6 +73,18 @@ for (const [n, b] of junk) {
   const p = onScreenPercent(1, n, b);
   eq(p === null || Number.isFinite(p), true, `${label}: percent`);
 }
+// The 2026-11-22 shape of the bug: `transferFromImageBitmap` detaches the bitmap,
+// and a detached ImageBitmap reports 0x0, so reading the size *after* the transfer
+// handed the viewer a 0x0 "picture". Nothing may be printed from that: fit is 0,
+// 1:1 is uncomputable, and the UI has to say "not known" instead of `0×0 px`.
+eq(fitScale({ w: 0, h: 0 }, stage), 0, "a detached bitmap's 0x0 is not a fit");
+eq(oneToOneZoom({ w: 0, h: 0 }, stage), 0, "and it cannot give a 1:1 zoom");
+eq(onScreenPercent(1, { w: 0, h: 0 }, stage), null, "and no percentage at all");
+// A picture that fits the stage already: Fit and 1:1 are the same state, and the
+// UI has to say so rather than look like two buttons stuck on.
+eq(zoomCeiling(small, stage), ZOOM_MAX, "a small picture keeps the ordinary ceiling");
+eq(oneToOneZoom(small, stage) <= 1.001, true, "so 1:1 needs no zoom past fit");
+
 // The old shape of the bug: a divisor that is undefined instead of a number.
 eq(Number.isNaN(clampZoom((big.w * 1) / undefined, ZOOM_MAX)), false, "NaN zoom falls back to fit");
 eq(clampZoom((big.w * 1) / undefined, ZOOM_MAX), 1, "NaN zoom falls back to fit (value)");
