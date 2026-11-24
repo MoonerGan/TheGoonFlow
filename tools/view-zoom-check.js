@@ -8,14 +8,19 @@
 // The model changed on 2026-11-22 (see the header of view-zoom.ts): scale is now
 // screen pixels per picture pixel, applied as the media box's own size, so fit is
 // only the state "Fit" picks and 1:1 is scale 1 whatever the picture is.
+//
+// It changed again on 2026-11-23, after `tools/viewer-real-media-probe.js` measured
+// the viewer on the user's own bookmarked material: `fit` was capped at 1, so "Fit"
+// did nothing at all for anything smaller than the window (see fitScale).
 import {
   MAX_DRAWN_PX,
   SCALE_MAX,
   SCALE_MIN,
   clampScale,
   drawnSize,
+  fitEnlarges,
+  fitIsOneToOne,
   fitScale,
-  fitsTheStage,
   isOneToOne,
   oneToOneScale,
   scaleCeiling,
@@ -48,14 +53,45 @@ eq(JSON.stringify(drawnSize(big, 1)), JSON.stringify(big), "1:1 lays the picture
 eq(JSON.stringify(drawnSize(big, fitScale(big, stage))), JSON.stringify({ w: 1085, h: 723 }),
   "fit lays it out at 1085x723, the number the live stage drew");
 
-// A picture smaller than the box: fitting does not upscale it, so fit is 1 and
-// Fit and 1:1 are the same state - and the UI has to say so.
-const small = { w: 600, h: 400 };
-eq(fitScale(small, stage), 1, "a small picture is not upscaled to fit");
-eq(fitsTheStage(small, stage), true, "so it is reported as fitting the stage");
-eq(fitsTheStage(big, stage), false, "and the big one is not");
-eq(JSON.stringify(drawnSize(small, fitScale(small, stage))), JSON.stringify(small),
-  "and Fit draws it at its own size");
+// The cases the 2026-11-23 report is about, measured in the live viewer on the
+// user's own downloads: a 1200x850 gelbooru jpeg in a 1888x1105 stage (Fit drew it
+// 1200x850 - 64% x 77% of the box - with Fit and 1:1 both lit), and a 176x256 gif in
+// the same stage (drew 176x256, 23% of the box). Fit now fills the box in whichever
+// direction binds, and the bar prints the number it used.
+const wideStage = { w: 1888, h: 1105 };
+const jpeg = { w: 1200, h: 850 };
+const gif = { w: 176, h: 256 };
+near(fitScale(jpeg, wideStage), 1.3, "the 1200x850 jpeg in a 1888x1105 stage is enlarged by 1.3");
+eq(JSON.stringify(drawnSize(jpeg, fitScale(jpeg, wideStage))), JSON.stringify({ w: 1560, h: 1105 }),
+  "and Fit lays it out filling the height of that stage");
+eq(scalePercent(fitScale(jpeg, wideStage)), 130, "which the bar prints as 130%, not 100%");
+near(fitScale(gif, wideStage), 4.316, "the 176x256 gif in that stage is enlarged by 4.3");
+eq(JSON.stringify(drawnSize(gif, fitScale(gif, wideStage))), JSON.stringify({ w: 760, h: 1105 }),
+  "so it is laid out 760x1105 rather than a 176x256 stamp");
+eq(fitEnlarges(gif, wideStage), true, "which the info line calls enlarging, not zooming");
+eq(fitEnlarges(big, stage), false, "and a frame larger than the stage is not enlargement");
+eq(fitEnlarges(jpeg, wideStage), true, "nor is the smaller-than-the-window jpeg");
+eq(fitIsOneToOne(gif, wideStage), false, "so Fit is not 1:1 there either");
+eq(fitIsOneToOne(big, stage), false, "nor for the big frame");
+eq(fitIsOneToOne({ w: 1348, h: 723 }, stage), true, "Fit is 1:1 only when the stage is the picture's own size");
+
+// Fit may never lay a picture out bigger than the space the stage has, whatever the
+// numbers: that is what makes letting it past 100% safe.
+for (const n of [big, jpeg, gif, { w: 8, h: 8 }, { w: 1, h: 4000 }, { w: 9999, h: 3 }, wideStage]) {
+  const d = drawnSize(n, fitScale(n, wideStage));
+  const ok = d && d.w <= wideStage.w + 1 && d.h <= wideStage.h + 1;
+  if (!ok) fails += 1;
+  console.log(`${ok ? "ok  " : "FAIL"} fit of ${n.w}x${n.h} in ${wideStage.w}x${wideStage.h} stays inside the box: drew ${d && d.w}x${d && d.h}`);
+}
+
+// Fit can end up well past the manual + ceiling for a tiny stamp in a big window, and
+// pressing - after Fit has to be one step out, not a jump: the component's ceiling is
+// max(scaleCeiling, fit).
+const tiny = { w: 8, h: 8 };
+near(fitScale(tiny, wideStage), 138.125, "a tiny stamp is enlarged to fill the box");
+eq(scaleCeiling(tiny), SCALE_MAX, "while its manual ceiling stays the ordinary one");
+near(Math.max(scaleCeiling(tiny), fitScale(tiny, wideStage)), fitScale(tiny, wideStage),
+  "and the ceiling used in the viewer never drops below where Fit already put the picture");
 
 // Zoom past 1:1 stops at the compositor limit, but 1:1 itself is never clamped
 // away: a frame wider than that limit is still drawn at exactly its own pixels,
@@ -86,6 +122,8 @@ for (const [n, b] of junk) {
   const p = scalePercent(fitScale(n, b));
   eq(p === null || Number.isFinite(p), true, `${label}: percent`);
   eq(Number.isFinite(clampScale(fitScale(n, b) / 0, scaleCeiling(n))), true, `${label}: clamped scale`);
+  eq(fitEnlarges(n, b), false, `${label}: not reported as enlarging`);
+  eq(fitIsOneToOne(n, b), false, `${label}: not reported as Fit being 1:1`);
 }
 
 // The 2026-11-22 shape of the bug: `transferFromImageBitmap` detaches the bitmap,
@@ -96,7 +134,7 @@ for (const [n, b] of junk) {
 eq(fitScale({ w: 0, h: 0 }, stage), 0, "a detached bitmap's 0x0 is not a fit");
 eq(drawnSize({ w: 0, h: 0 }, 1), null, "and it lays out nothing");
 eq(scalePercent(fitScale({ w: 0, h: 0 }, stage)), 0, "fit 0 prints 0, and the bar checks sized first");
-eq(fitsTheStage({ w: 0, h: 0 }, stage), false, "and a 0x0 frame is not 'fits the stage'");
+eq(fitIsOneToOne({ w: 0, h: 0 }, stage), false, "and a 0x0 frame is not 'Fit is 1:1'");
 
 // The old shape of the bug: a divisor that is undefined instead of a number.
 eq(Number.isNaN(clampScale(big.w / undefined, SCALE_MAX)), false, "NaN scale falls back");

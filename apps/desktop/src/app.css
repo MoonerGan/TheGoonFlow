@@ -1054,6 +1054,13 @@ textarea:focus {
   position: absolute;
   inset: 1rem;
   display: grid;
+  /* The one cell has to be a *definite* size or the media inside it is not
+     contained at all: with auto tracks, `max-height: 100%` on the child resolves
+     against a track sized by that child, so the cap is vacuous. Measured live on
+     2026-11-23: a stored 1280x954 mp4 was laid out 1280x954 inside a 1338x712 box
+     (1.34x the box height), with Fit doing nothing at all. */
+  grid-template-rows: 100%;
+  grid-template-columns: 100%;
   min-width: 0;
   min-height: 0;
 }

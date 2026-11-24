@@ -301,7 +301,8 @@ proxy if you set one).
 - **Media viewer**: the real image from the encrypted vault (full-res when it
   was stored), not a re-download. **← / →** step through the pictures *inside* one
   item first and then through the current grid (filters included). **Zoom** with
-  `+` / `-`; **Fit** (`0`) puts the whole picture inside the window, **1:1** (`a`)
+  `+` / `-`; **Fit** (`0`) puts the whole picture inside the window — shrinking a
+  big one, **enlarging a small one so it actually fills the space** — **1:1** (`a`)
   puts one picture pixel on one screen pixel, and whichever of the two you are at
   is the button that is highlighted. The number next to them is the picture's scale
   **against its own pixels** — a 6000×4000 frame fitted into a normal window reads
@@ -309,9 +310,12 @@ proxy if you set one).
   At 1:1 the frame is laid out at its exact pixel count, so the stage's scrollbars
   reach every edge of it rather than hiding part of the picture; `+` keeps going past
   1:1 (to eight screen pixels per picture pixel) and stops there. A picture *smaller*
-  than the window has nothing to fit: **Fit** already shows it at 1:1, so both buttons
-  are lit and the bar says so — `Fit and 1:1 are the same here: the picture is smaller
-  than the window`.
+  than the window is what **Fit** enlarges, so that number legitimately goes above
+  100% — a 176×256 gif opens at `299%`, filling the window's height, still animating —
+  and the bar says which of the two it did (`176×256 px, shown at 299% · Fit is
+  enlarging it to fill the window`). Press **1:1** and the same picture is laid out at
+  its true 176×256, with the bar adding `· Fit would be 299%` so the two buttons can
+  always be told apart.
   **space** starts a **slideshow**
   (4 s per picture, wraps), `f` (or the ⛶ button) **fullscreen** — the image fills
   the window, chrome hidden, `Esc` or `f` back out — `i` opens the item's

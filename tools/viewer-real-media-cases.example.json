@@ -1,0 +1,36 @@
+{
+  "_how": "Copy this to tools/viewer-real-media-cases.json (gitignored: it holds the links from your own library) and put in links you actually have. Each case: key (label in the output), note (why this one is interesting), url, how ('clip' = clip_url into the vault, 'video' = import a local file and store it), cookie (optional: 'ehentai' or 'f95', read from the file named in GOON_EH_COOKIE / GOON_F95_COOKIE). Keep the order you measured: --reuse re-measures the vault an earlier run filled, and items are opened by index.",
+  "cases": [
+    {
+      "key": "smaller than the window",
+      "note": "the case Fit used to leave at its own pixels: a jpeg whose height is below the stage's",
+      "url": "https://example.org/images/aa/bb/aabbccddeeff00112233445566778899.jpeg",
+      "how": "clip"
+    },
+    {
+      "key": "larger than the window",
+      "note": "bigger than the stage in both directions, so Fit has to shrink",
+      "url": "https://example.org/images/11/22/11223344556677889900aabbccddeeff.jpg",
+      "how": "clip"
+    },
+    {
+      "key": "animated gif",
+      "note": "far smaller than the stage and animated: the second case in the 2026-11-23 report",
+      "url": "https://example.org/images/33/44/3344556677889900aabbccddeeff112233.gif?1234567",
+      "how": "clip"
+    },
+    {
+      "key": "cookie-gated gallery page",
+      "note": "one page of a gallery on a host that needs a cookie",
+      "url": "https://example.org/s/1234abcd/1234567-1",
+      "how": "clip",
+      "cookie": "ehentai"
+    },
+    {
+      "key": "stored mp4",
+      "note": "a video inside the vault: the third case, where the tile had claimed the size",
+      "url": "https://example.org/images/55/66/556677889900aabbccddeeff1122334455.mp4?7654321",
+      "how": "video"
+    }
+  ]
+}

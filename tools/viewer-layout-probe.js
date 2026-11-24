@@ -33,7 +33,8 @@ const VAULT = path.join(SCRATCH, 'vault');
 const PASSPHRASE = 'layout-probe-throwaway-not-a-real-one';
 
 /** Pictures of exact pixel size; one wider than the stage, one taller, one small
- *  enough that Fit and 1:1 legitimately are the same state. */
+ *  enough that Fit has to enlarge it to fill the stage - the case the 2026-11-23
+ *  report was about, where Fit used to leave the picture at its own pixels. */
 const CASES = [
   { want: 'wide', w: 2400, h: 1600 },
   { want: 'tall', w: 1200, h: 3000 },

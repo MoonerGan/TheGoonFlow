@@ -329,11 +329,43 @@ the board's *In review* column is the current list.
       must draw them at exactly 2400×1600 and 1200×3000 (`drawn/own 1.000`, bar `100%`)
       and leave the stage scrollable to **every** part of the frame — top edge and left
       edge reachable, not clipped behind a centred zoom. **Fit** returns them to the
-      opening size in one press. The 600×400 picture is smaller than the window, so both
-      buttons are lit and it must say why: `600×400 px, shown at 100% · Fit and 1:1 are
-      the same here: the picture is smaller than the window`. Nothing in this sequence
-      may print `0×0 px` (the size was read off a detached `ImageBitmap`) or `zoom 100%`
-      (the transform standing in for a scale the app did not know).
+      opening size in one press. The 600×400 picture is *smaller* than the window, so
+      **Fit** has to enlarge it: it opens at `181%` filling the stage's height
+      (`1085×723` drawn), **Fit** the only lit button, and the bar saying
+      `600×400 px, shown at 181% · Fit is enlarging it to fill the window`. Pressing
+      **1:1** draws it at exactly 600×400 — smaller than the stage, `100%`, **1:1** the
+      only lit button, and the bar adds `· Fit would be 181%`, so the difference between
+      the two buttons is stated rather than implied. Nothing in this sequence may print
+      `0×0 px` (the size was read off a detached `ImageBitmap`) or `zoom 100%` (the
+      transform standing in for a scale the app did not know).
+   36. The same buttons on **the material a real library holds**, not generated fixtures
+      (2026-11-23 report, #65: the gelbooru jpeg named there "still has the same bug… it
+      also seems to recur with anything animated and some e-hentai images").
+      `tools\viewer-real-media-probe.js` clips the links in
+      `tools\viewer-real-media-cases.json` (gitignored, see DEVELOPMENT §5) plus a stored mp4
+      into a throwaway vault and measures every item at two window sizes; run it by hand
+      (cookie-gated hosts read `GOON_F95_COOKIE` / `GOON_EH_COOKIE`). What it must show, in a
+      1380×860 window with a 1348×765 box:
+
+      - **1200×850 jpeg** — opens at `90%` filling the height (`1079×765` drawn), and at
+        `130%` / `1559×1105` in a 1920×1200 window. Before the fix: drawn 1200×850 in the
+        big window, 77% of the box, Fit and 1:1 both lit, pressing Fit doing nothing.
+      - **176×256 gif** — opens enlarged to fill the height (`299%`, `526×765` drawn,
+        still animating), and **1:1** drops it to exactly 176×256. Before: 176×256 at Fit,
+        36% of the box; `431%` / `759×1105` in the big window.
+      - **stored mp4** — the bar prints its own `1280×954`, read from `loadedmetadata`,
+        and Fit contains it inside the box (`80%`, `1026×765`). The tile that stood in for
+        it while the file decrypted must never be described as the picture: before, the
+        bar read `360×268 px, shown at 100%` above a clip laid out **past the bottom of
+        the stage** (954 px in a box with 712 px), with Fit, 1:1 and ± doing nothing at
+        all.
+      - **e-hentai gallery page** (`image/webp`, 1280×1811) — shrinks to fit (`42%`,
+        `540×765`), reaches exactly its own pixels at 1:1, `full-res in vault` in the
+        info line.
+
+      For every item the info line's `N×M px` must equal the frame actually on screen,
+      ± and 1:1 must be enabled for a gif and a video, and nothing may spill out of the
+      stage while Fit is selected. `--reuse` re-measures a vault an earlier run filled.
 
 ## 4. House rules that prevent whole classes of damage
 

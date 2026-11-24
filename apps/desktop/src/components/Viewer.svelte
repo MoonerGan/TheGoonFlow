@@ -18,8 +18,9 @@
   import {
     clampScale,
     drawnSize,
+    fitEnlarges,
+    fitIsOneToOne,
     fitScale,
-    fitsTheStage,
     isOneToOne,
     oneToOneScale,
     scaleCeiling,
@@ -106,6 +107,12 @@
    */
   const INLINE_MAX_MB = 96;
 
+  /** own pixels of a <video>, once the container header has been read */
+  function sizeOfVideo(el: EventTarget | null): Size | null {
+    if (!(el instanceof HTMLVideoElement) || !el.videoWidth) return null;
+    return { w: el.videoWidth, h: el.videoHeight };
+  }
+
   /** natural size of an <img> that just loaded (the tile stand-in, or a gif) */
   function sizeOf(el: EventTarget | null): Size | null {
     if (!(el instanceof HTMLImageElement) || !el.naturalWidth) return null;
@@ -159,29 +166,70 @@
     return () => ro.disconnect();
   });
 
+  /**
+   * A video's own pixels, and nothing else's. The tile that stands in for a clip
+   * while it decrypts is the wrong thing to describe — measured live on 2026-11-23,
+   * the bar read "360×268 px, shown at 285%" about a clip that is 1280×954 — so the
+   * claim is dropped as soon as the `<video>` takes the stage and only comes back
+   * from its own `loadedmetadata`.
+   */
+  let videoEl = $state<HTMLVideoElement | null>(null);
+  $effect(() => {
+    const v = videoEl;
+    if (!v) return;
+    natural = null;
+    const claim = () => {
+      natural = sizeOfVideo(v);
+    };
+    if (v.readyState >= 1 /* HAVE_METADATA: the header is already read */) claim();
+    v.addEventListener("loadedmetadata", claim);
+    return () => v.removeEventListener("loadedmetadata", claim);
+  });
+
   /** Do we know how big this picture is at all? A frame that has not decoded yet,
    * or one whose bitmap came back empty, has no size to talk about — and the UI
    * has to say "not known" rather than print `0×0 px, shown at ?%`. */
   const sized = $derived(!!natural && natural.w > 0 && natural.h > 0);
-  /** the scale that puts the whole picture inside the stage, never enlarging it */
+  /** the scale that puts the whole picture inside the stage: it shrinks a frame
+   *  bigger than the window and enlarges one smaller than it (2026-11-23) */
   const fit = $derived(fitScale(natural, stageBox));
-  const ceiling = $derived(scaleCeiling(natural));
+  /** Manual + stops at the ordinary ceiling, but never below where Fit already put
+   *  the picture: pressing − after Fit has to be one step out, not a jump from 299%
+   *  to 800% or back down past what the button in front of the user just did. */
+  const ceiling = $derived(Math.max(scaleCeiling(natural), fit));
   /** screen pixels per picture pixel, right now */
   const scale = $derived(fitMode ? fit : clampScale(absScale, ceiling));
   /** the box the media is laid out at, in CSS px; null means "let CSS contain it",
-   *  which is what a video gets, since its pixel size is not read here */
+   *  which is what a frame whose own size is not known yet gets */
   const drawn = $derived(drawnSize(natural, scale));
   const frameStyle = $derived(drawn ? `width: ${drawn.w}px; height: ${drawn.h}px` : "");
   /** the honest readout: the picture's own pixels, never the transform */
   const scalePct = $derived(sized ? scalePercent(scale) : null);
+  const fitPct = $derived(sized ? scalePercent(fit) : null);
   const atOne = $derived(sized && isOneToOne(scale));
   /**
-   * The picture is no larger than the space the stage has, so there is nothing for
-   * "Fit" to shrink and Fit / 1:1 are the same state. That is true by definition
-   * (fit never enlarges a picture), and the UI says so: the 2026-11-22 report read
-   * two lit buttons as a bug, and the honest answer is a sentence, not a guess.
+   * Fit lands on 1:1 only when the stage is already the picture's own size, which is
+   * rare, and the bar says so in words rather than leaving two lit buttons to be read
+   * as a bug. The other case worth naming is the one the 2026-11-23 report was about:
+   * a picture smaller than the window, where Fit has to enlarge it and the readout is
+   * therefore above 100%.
    */
-  const smallerThanStage = $derived(fitsTheStage(natural, stageBox));
+  const fitAtOne = $derived(fitIsOneToOne(natural, stageBox));
+  const fitUpscales = $derived(fitEnlarges(natural, stageBox));
+  /**
+   * One clause, printed after the percentage, that says how this zoom relates to the
+   * window. Two cases are worth the words: Fit has enlarged a picture smaller than
+   * the window, so a number above 100% is the honest answer and not a broken zoom;
+   * and the user has zoomed by hand, in which case the bar says what Fit itself would
+   * have done.
+   */
+  const zoomNote = $derived.by(() => {
+    if (!sized) return "";
+    if (fitMode && fitUpscales) return " · Fit is enlarging it to fill the window";
+    if (fitMode && fitAtOne) return " · at this window size Fit is 1:1";
+    if (fitPct !== null && scalePct !== null && fitPct !== scalePct) return ` · Fit would be ${fitPct}%`;
+    return "";
+  });
 
   /** + / −: leaving Fit means the user owns the number from here on. */
   function zoomBy(factor: number) {
@@ -190,7 +238,8 @@
     absScale = clampScale(scale * factor, ceiling);
   }
 
-  /** Fit (key `0`): the whole picture inside the stage, never enlarged. */
+  /** Fit (key `0`): the whole picture inside the stage, enlarged to fill it if it is
+   *  smaller than the space the window gives. */
   function fitToWindow() {
     fitMode = true;
   }
@@ -212,19 +261,26 @@
   }
 
   /** New picture on screen, so start at Fit: whatever zoom the last frame was left
-   *  at must not decide how this one opens. */
+   *  at must not decide how this one opens. The size goes with it: a stale number
+   *  from the previous frame is what made a 25 MB video open as "360×268 px" — the
+   *  tile that stood in for it had claimed the size, and nothing took it back. */
   function resetView() {
     fitMode = true;
     absScale = 1;
+    natural = null;
   }
 
   /** the zoom buttons' shared tooltip: what this picture is, and where we are */
   const zoomHint = $derived(
     natural && natural.w > 0 && natural.h > 0
       ? `this frame is ${natural.w}×${natural.h} px · shown at ${scalePct ?? "?"}% of that` +
-        ` · Fit (0) = the whole picture inside the window, never enlarged` +
+        ` · Fit (0) = the whole picture inside the window, enlarged to fill it if it is smaller` +
         ` · 1:1 (a) = one picture pixel per screen pixel` +
-        (smallerThanStage ? " · this picture is smaller than the window, so Fit already is 1:1" : "")
+        (fitAtOne
+          ? " · at this window size Fit is 1:1"
+          : fitUpscales && fitMode
+            ? " · Fit is enlarging this picture to fill the window"
+            : "")
       : "this picture's own pixel size is not known yet, so Fit and 1:1 cannot be measured",
   );
 
@@ -618,7 +674,21 @@
     <div class="frame-box">
       {#if isVideo && elementSrc}
         <!-- svelte-ignore a11y_media_has_caption -->
-        <video src={elementSrc} controls loop autoplay></video>
+        <!-- A video is sized like every other frame: its own pixels come from
+             loadedmetadata, so Fit / 1:1 / + / - have a number to work against
+             (see videoEl below). Measured live on 2026-11-23 without this: the
+             element was laid out at 1280×954 inside a stage that had 712 px of
+             height, Fit and 1:1 did nothing, and the bar described the tile that
+             had stood in for it ("360×268 px"). -->
+        <video
+          src={elementSrc}
+          controls
+          loop
+          autoplay
+          bind:this={videoEl}
+          class:sized={!!drawn}
+          style={frameStyle}
+        ></video>
       {:else if isGif && elementSrc}
         <img
           src={elementSrc}
@@ -646,12 +716,19 @@
           style={frameStyle}
         ></canvas>
       {:else if poster && !err}
+        <!-- The tile is genuinely what is on screen here, so its pixels are the
+             honest size - except for a video, where this tile is only the stand-in
+             while the file decrypts, and the video element reports its own size
+             when it arrives. Claiming the tile's size for the video is how a
+             25 MB clip opened as "360×268 px". -->
         <img
           class="frame-poster"
           class:sized={!!drawn}
           src={poster}
           alt={item?.title ?? ""}
-          onload={(e) => (natural = sizeOf(e.currentTarget))}
+          onload={(e) => {
+            if (!isVideo) natural = sizeOf(e.currentTarget);
+          }}
           style={frameStyle}
         />
       {/if}
@@ -708,7 +785,7 @@
         {#if frames.length > 1}· picture {f + 1}/{frames.length}{/if}
         {#if shown?.kind === "full"}· full-res in vault{:else if shown?.kind === "video"}· stored video{:else if shown}· preview only{/if}
         {#if shown}· {shown.mime}{/if}
-        {#if natural && natural.w > 0 && natural.h > 0}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{#if smallerThanStage}{' '}· Fit and 1:1 are the same here: the picture is smaller than the window{/if}{/if}
+        {#if natural && natural.w > 0 && natural.h > 0}· {natural.w}×{natural.h} px, shown at {scalePct ?? "?"}%{zoomNote}{/if}
         {#if mediaCache.entries > 0}· {mediaCache.entries} in cache · {Math.round(mediaCache.bytes / 1048576)} MB{/if}
       </span>
     </div>
@@ -732,7 +809,7 @@
           class:active={fitMode}
           aria-pressed={fitMode}
           onclick={fitToWindow}
-          title="Fit: the whole picture inside the window, never enlarged (0)"
+          title="Fit: the whole picture inside the window, enlarged to fill it if it is smaller (0)"
         >
           Fit
         </button>
@@ -741,11 +818,11 @@
           aria-pressed={atOne}
           disabled={!sized}
           onclick={actualPixels}
-          title={smallerThanStage
-            ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px and already fits the window, so Fit has it at 1:1 already (a)`
-            : sized
-              ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px, drawn at exactly that (a)`
-              : "1:1 needs the picture's own pixel size, which is not known yet"}
+          title={sized
+            ? `1:1: one screen pixel per picture pixel — this frame is ${natural?.w}×${natural?.h} px, drawn at exactly that` +
+              (fitUpscales ? ` · Fit shows it bigger than that, at ${fitPct ?? "?"}%` : "") +
+              " (a)"
+            : "1:1 needs the picture's own pixel size, which is not known yet"}
         >
           1:1
         </button>

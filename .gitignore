@@ -19,6 +19,9 @@ goonflow-vault/
 # scratch build logs (tools/) and the one-build-at-a-time lock run-release.ps1 holds
 tools/*.log
 tools/last-build.lock
+# the links the live probes measure: they come out of someone's actual library, and
+# this repository is public (tools/viewer-real-media-cases.example.json is the shape)
+tools/viewer-real-media-cases.json
 # machine-local evidence written by tools/run-test.ps1 + run-release.ps1
 tools/last-*.txt
 

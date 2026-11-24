@@ -16,8 +16,9 @@
 //                 raised the stage's scrollbars, which shrank the box, which
 //                 changed the fit factor the 1:1 button had just used (a 2400 px
 //                 frame was drawn 2367 px wide - 98.6% while the bar said 99%);
-//   * `fit`     - the scale that puts the whole picture inside that box. Always
-//                 <= 1: "Fit" means the whole picture, never one pixel per pixel;
+//   * `fit`     - the scale that puts the whole picture inside that box, in whichever
+//                 direction that needs: it shrinks a big frame and enlarges a small
+//                 one, so pressing Fit always fills the stage (2026-11-23, see below);
 //   * `scale`   - what is on screen: screen pixels per picture pixel. 1 is 1:1.
 //
 // It used to be `fit` x `zoom`, with `zoom` applied as a CSS `transform: scale()`.
@@ -27,6 +28,16 @@
 // width 1868 for a picture drawn 2367). So `scale` is now applied as the media box's
 // own size in CSS px: 1:1 is exactly one pixel per pixel, and the whole picture
 // stays inside the stage's scroll area.
+//
+// What was wrong on 2026-11-23, measured by `tools/viewer-real-media-probe.js` on
+// the user's own bookmarked material: `fit` was capped at 1 ("never enlarge"), and
+// that is the bug the report is about. A 1200x850 jpeg in a 1888x1105 stage was laid
+// out at 1200x850 - 64% x 77% of the box - with Fit and 1:1 both lit and pressing Fit
+// doing nothing at all; a 176x256 gif was laid out at 176x256, 23% of the box. So
+// "Fit" was only a fit for pictures bigger than the window, which is most of an
+// imageboard library (gifs, short videos, smaller gallery pages). Fit now enlarges as
+// well as shrinks; the drawn box is still bounded by the stage, so the upscale factor
+// can never lay out more pixels than the window has.
 
 export type Size = { w: number; h: number };
 
@@ -44,16 +55,17 @@ const positive = (n: unknown): n is number =>
   typeof n === "number" && Number.isFinite(n) && n > 0;
 
 /**
- * How much the picture has to be shrunk to sit inside the box. 0 means "not
+ * How much the picture has to be scaled to sit inside the box: shrunk when it is
+ * bigger than the space the stage has, enlarged when it is smaller. 0 means "not
  * computable" (no picture on screen yet, or a box with no size), never "invisible".
- * It never enlarges: a picture smaller than the box is left at its own size, which
- * is why Fit and 1:1 are the same state for such a picture.
+ * The enlargement is bounded by the box, so it can never lay out more pixels than
+ * the window can show - that is what makes "Fit" safe to let past 100%.
  */
 export function fitScale(natural: Size | null, box: Size | null): number {
   if (!natural || !box) return 0;
   if (!positive(natural.w) || !positive(natural.h)) return 0;
   if (!positive(box.w) || !positive(box.h)) return 0;
-  const s = Math.min(box.w / natural.w, box.h / natural.h, 1);
+  const s = Math.min(box.w / natural.w, box.h / natural.h);
   return Number.isFinite(s) && s > 0 ? s : 0;
 }
 
@@ -88,8 +100,8 @@ export function clampScale(scale: number, ceiling: number): number {
 
 /**
  * The box the media is laid out at, in CSS px. null means "nothing to lay out"
- * (no frame, or its own size is not known), and plain CSS containment is left to
- * do the work - which is what a video gets, since its pixel size is not read here.
+ * (no frame on screen yet, or its own size is not known), and plain CSS containment
+ * is left to do the work until it is.
  */
 export function drawnSize(natural: Size | null, scale: number): Size | null {
   const n = natural && positive(natural.w) && positive(natural.h) ? natural : null;
@@ -116,11 +128,21 @@ export function isOneToOne(scale: number): boolean {
 }
 
 /**
- * Is this picture no larger than the space the stage has? Then there is nothing
- * for Fit to shrink and Fit *is* 1:1 - the UI has to say that in words rather than
- * leave two lit buttons to be read as a bug (2026-11-22 report).
+ * Does "Fit" land exactly on 1:1 for this picture in this box? That can only happen
+ * when the stage is already the picture's own size in whichever direction binds, so
+ * it is rare, and the info line says it in words rather than leaving two lit buttons
+ * to be read as a bug (2026-11-22 report).
  */
-export function fitsTheStage(natural: Size | null, box: Size | null): boolean {
+export function fitIsOneToOne(natural: Size | null, box: Size | null): boolean {
   const f = fitScale(natural, box);
-  return f >= 0.999;
+  return Number.isFinite(f) && Math.abs(f - ONE_TO_ONE) < 0.005;
+}
+
+/**
+ * Does "Fit" have to enlarge this picture to fill the stage? Then the bar prints a
+ * number above 100%, and it has to say so: a 299% readout is the honest answer for a
+ * gif smaller than the window, not a broken zoom.
+ */
+export function fitEnlarges(natural: Size | null, box: Size | null): boolean {
+  return fitScale(natural, box) > ONE_TO_ONE + 0.005;
 }

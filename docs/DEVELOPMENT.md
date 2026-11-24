@@ -576,6 +576,24 @@ Set-Location apps\desktop
   the readout or the info line. The copy has no `flow.cfg`, so no real vault is ever
   attached, and like the other live tools it stops running instances first because the
   single-instance plugin would otherwise hand off.
+- Generated fixtures pass for arithmetic the engine agrees with, which is not the same
+  as the library. `tools\viewer-real-media-probe.js` is the probe for **the material
+  users actually keep**: it clips the links in
+  `tools\viewer-real-media-cases.json` (a booru file link, an animated gif, a
+  cookie-gated gallery page, an mp4 it imports and then stores) and measures every
+  item at two window sizes in a throwaway vault
+  (`%TEMP%\goon-viewer-probe-real`). That cases file is **gitignored on purpose** —
+  the links come out of someone's real library and this repository is public; copy
+  `tools\viewer-real-media-cases.example.json` to it. Cookie-gated hosts read their
+  cookie from `GOON_F95_COOKIE` / `GOON_EH_COOKIE`, which are never printed or
+  committed. What the probe asserts: the info line
+  describes the frame that is on screen (not the tile that stood in for it), that **Fit
+  fills the box whatever the picture's size**, that 1:1 draws the frame's own pixels,
+  that ± and 1:1 are usable for a video and a gif, and that nothing spills out of the
+  stage at Fit. That is how the 2026-11-23 report was pinned: the generated PNGs were
+  still green while a real 1200×850 jpeg was drawn at 77% of the box, a 176×256 gif at
+  23%, and a stored clip was laid out past the bottom of the stage. `--reuse` re-measures
+  the vault an earlier run filled.
 
 ## 6. Adding things (patterns)
 
@@ -706,12 +724,27 @@ Set-Location apps\desktop
 - **Zoom and other on-screen arithmetic is a pure module.** `lib/view-zoom.ts` owns
   fit / scale / ceiling / percent and `tools\view-zoom-check.js` asserts it, because a
   component cannot be tested. Model (rewritten 2026-11-22, measured by
-  `tools\viewer-layout-probe.js`): `scale` is *screen pixels per picture pixel*, so
+  `tools\viewer-layout-probe.js`; fit re-measured 2026-11-23 by
+  `tools\viewer-real-media-probe.js`): `scale` is *screen pixels per picture pixel*, so
   **1:1 is scale 1 whatever the picture is** and the readout is `round(scale × 100)`;
-  `fit = min(box.w/natural.w, box.h/natural.h, 1)` is only the scale the **Fit** button
-  picks, and picking it is a mode (`fitMode`) that any manual zoom leaves. A picture
-  that already fits has `fit == 1`, so Fit and 1:1 are the same state — the UI says that
-  in words instead of leaving two lit buttons to be read as a bug.
+  `fit = min(box.w/natural.w, box.h/natural.h)` is only the scale the **Fit** button
+  picks, and picking it is a mode (`fitMode`) that any manual zoom leaves.
+  - **Fit fills the stage in whichever direction that needs: it shrinks a frame bigger
+    than the window and enlarges one smaller than it.** The `min(..., 1)` cap was the
+    2026-11-23 bug: a 1200×850 jpeg in a 1888×1105 stage was laid out at 1200×850
+    (77% of the box) and a 176×256 gif at 176×256 (23%), with Fit and 1:1 both lit and
+    pressing Fit doing nothing — which is most of an imageboard library. Fit is still
+    bounded by the box, so it can never lay out more pixels than the window has; the
+    bar prints what it used (`278%`) and says `Fit is enlarging it to fill the window`.
+    `fitIsOneToOne` is the only case where Fit and 1:1 coincide, and it needs the stage
+    to be exactly the picture's own size.
+  - **The frame's own pixels come from the thing that is actually on screen.** For a
+    still that is the decoded `ImageBitmap`; for a gif the `<img>`'s `naturalWidth`; for
+    a video the `<video>`'s `loadedmetadata` (`videoWidth`/`videoHeight`). A stand-in
+    tile may not claim a size for a media kind it is not: measured live, the tile that
+    stood in for a 25 MB clip set `natural` to 360×268 and nothing took it back, so the
+    bar described a 1280×954 picture as `360×268 px, shown at 100%` while Fit and 1:1
+    had nothing to measure against. `resetView()` clears the size on every navigation.
   - `box` is measured from the **stage's border box less its padding**, never from the
     media box. The media box used to be a flex item sized by its own content, so a
     zoomed picture raised the stage's scrollbars, which shrank the box, which changed
@@ -723,7 +756,11 @@ Set-Location apps\desktop
     picture drawn 2367). `.frame-box` is pinned to the stage
     (`position: absolute; inset: 1rem`, `inset: 0` in fullscreen) and is a grid; the
     media takes `margin: auto`, which centres it while it fits and start-aligns it when
-    it does not, so the whole frame stays reachable.
+    it does not, so the whole frame stays reachable. The grid's single track must be a
+    **definite** size (`grid-template-rows/columns: 100%`): with `auto` tracks,
+    `max-height: 100%` on the child resolves against a track sized by that same child,
+    so the cap is vacuous — measured 2026-11-23, a stored 1280×954 clip was laid out
+    1280×954 inside a box that had 712 px of height, and Fit could not touch it.
   - `scaleCeiling` caps zoom *past* 1:1 at `MAX_DRAWN_PX` (the WebView2 texture limit),
     but 1:1 itself is never clamped away — a button that silently refuses to reach 1:1
     is worse than one that stops early.
