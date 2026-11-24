@@ -330,12 +330,16 @@ the board's *In review* column is the current list.
       and leave the stage scrollable to **every** part of the frame — top edge and left
       edge reachable, not clipped behind a centred zoom. **Fit** returns them to the
       opening size in one press. The 600×400 picture is *smaller* than the window, so
-      **Fit** has to enlarge it: it opens at `181%` filling the stage's height
-      (`1085×723` drawn), **Fit** the only lit button, and the bar saying
-      `600×400 px, shown at 181% · Fit is enlarging it to fill the window`. Pressing
+      **Fit** has to enlarge it: it opens at `168%` filling the stage height —
+      `1006×670` drawn in the `1348×670` box that measurement had — **Fit** the only
+      lit button, and the bar saying
+      `600×400 px, shown at 168% · Fit is enlarging it to fill the window`. Pressing
       **1:1** draws it at exactly 600×400 — smaller than the stage, `100%`, **1:1** the
-      only lit button, and the bar adds `· Fit would be 181%`, so the difference between
-      the two buttons is stated rather than implied. Nothing in this sequence may print
+      only lit button — and the bar adds `· Fit would be 181%`, quoted against the
+      `1348×723` box that measurement had (the stage had 53 px more of itself at
+      that moment, and Fit is always quoted against the box as it is then), so the
+      difference between the two buttons is stated rather than implied. Nothing in this
+      sequence may print
       `0×0 px` (the size was read off a detached `ImageBitmap`) or `zoom 100%` (the
       transform standing in for a scale the app did not know).
    36. The same buttons on **the material a real library holds**, not generated fixtures
