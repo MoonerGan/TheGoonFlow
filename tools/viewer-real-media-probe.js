@@ -257,6 +257,12 @@ function report(label, s) {
     return;
   }
   const own = s.own ? `${s.own.w}x${s.own.h}` : 'unknown';
+  if (!s.media) {
+    // No media element at all: an item whose bytes the app never stored. The stage
+    // should be holding a sentence that says so, not a picture and not a number.
+    console.log(`  ${label.padEnd(9)} nothing on the stage  info ${JSON.stringify(s.info)}`);
+    return;
+  }
   const fill = s.own && s.box ? `${(s.media.w / s.box.w).toFixed(2)}x${(s.media.h / s.box.h).toFixed(2)} of box` : '?';
   const pressed = s.buttons.map((b) => `${b.label}${b.pressed === 'true' ? '[on]' : ''}${b.disabled ? '[off]' : ''}`).join(' ');
   console.log(`  ${label.padEnd(9)} box ${s.box.w}x${s.box.h}  ${s.mediaTag} drawn ${s.media.w}x${s.media.h}  own ${own}  ${fill}`);
@@ -418,6 +424,10 @@ async function main() {
         // lands, once the preview-to-full swap and any metadata have settled
         await new Promise((r) => setTimeout(r, 1500));
         const settled = await ev(withMeasure('measure()'));
+        // the stage's own sentence, for the case where there is no picture at all
+        const stageNote = await ev(
+          `(() => { const n = document.querySelector('.viewer-note'); return n ? (n.textContent || '').trim() : null; })()`,
+        );
         const one = await ev(withMeasure(PAGE.clickZoom('1:1')));
         const fit = await ev(withMeasure(PAGE.clickZoom('Fit')));
         await ev(PAGE.close);
@@ -430,7 +440,25 @@ async function main() {
         report('after Fit', fit);
 
         const notes = [];
+        const skips = [];
         const base = settled;
+        if (!base.media) {
+          // The app never stored this item's bytes (a file too large for the vault,
+          // or a video kept as a link). That is a real state the viewer has to
+          // describe, so it is reported separately from a broken zoom.
+          skips.push(`not on stage: ${JSON.stringify(stageNote || '(the stage said nothing at all)')}`);
+          if (!stageNote) notes.push('an item with no bytes leaves an empty stage: no sentence saying why');
+          if (base.info && /\d+×\d+ px/.test(base.info)) {
+            notes.push(`the bar claims a pixel size for an item with no bytes: ${JSON.stringify(base.info)}`);
+          }
+          if (base.readout && base.readout !== '?') {
+            notes.push(`the readout says ${JSON.stringify(base.readout)} for an item with no bytes on stage`);
+          }
+          dumps.push({ size: size.label, label, opened, settled, one, fit, notes, skips });
+          if (notes.length) console.log(`  PROBLEMS: ${notes.join(' · ')}`);
+          else console.log(`  ${skips[0]} (honest: the stage says so, nothing is claimed)`);
+          continue;
+        }
         if (!base.own) notes.push(`the stage has no pixel size for this frame (${base.mediaTag})`);
         if (!base.readout || !/^\d+%$/.test(base.readout)) {
           notes.push(`readout says ${JSON.stringify(base.readout)}, not a percentage`);
@@ -481,7 +509,14 @@ async function main() {
     }
 
     const bad = dumps.filter((d) => d.notes.length).length;
+    const quiet = dumps.filter((d) => d.skips && d.skips.length).length;
     console.log(`\nVERDICT: ${bad} of ${dumps.length} cases broken`);
+    if (quiet) {
+      console.log(`(${quiet} measurement(s) had no picture on the stage at all: the app never stored those bytes)`);
+      for (const d of dumps.filter((x) => x.skips && x.skips.length)) {
+        console.log(`  ${d.size} | ${d.label} | ${d.skips.join(' / ')}`);
+      }
+    }
     process.exitCode = bad ? 1 : 0;
   } finally {
     try {

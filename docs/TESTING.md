@@ -367,9 +367,19 @@ the board's *In review* column is the current list.
         `540×765`), reaches exactly its own pixels at 1:1, `full-res in vault` in the
         info line.
 
-      For every item the info line's `N×M px` must equal the frame actually on screen,
+      For every item the info line’s `N×M px` must equal the frame actually on screen,
       ± and 1:1 must be enabled for a gif and a video, and nothing may spill out of the
       stage while Fit is selected. `--reuse` re-measures a vault an earlier run filled.
+
+      The run on 2026-11-23 covered 12 items × 2 window sizes and printed
+      `VERDICT: 0 of 24 cases broken`. Six of those measurements had **no picture on the
+      stage at all** — two 18–19 MB gifs and a video link, none of which the app stores — and
+      the probe reports those separately instead of failing them, because the stage says
+      so in words (`nothing viewable is stored for this item … Press *Store* under
+      Sources`). That storage gap is #72 (the 16 MiB cover-art ceiling applied to booru
+      originals) and #64 (videos), not a geometry bug: an item whose bytes were never
+      stored must show the sentence, must not print a pixel size, and must leave the zoom
+      buttons disabled with the readout at `?`.
 
 ## 4. House rules that prevent whole classes of damage
 
