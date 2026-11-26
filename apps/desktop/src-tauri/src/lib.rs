@@ -2505,4 +2505,64 @@ mod integration_tests {
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    /// v10 (#76) backfills `media.bytes = length(data)` and every `size>` query
+    /// reads that column, so the fact is only honest if the encrypted engine
+    /// reports the same length as the plaintext. Measured here against a body
+    /// big enough to span many SQLCipher pages, on a real encrypted vault.
+    #[test]
+    fn encrypted_media_length_equals_the_plaintext_length() {
+        let tmp = std::env::temp_dir().join(format!("goonflow-bytes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let vault = tmp.join("vault");
+
+        let key = goon_vault::create_keyfile(&vault, "hunter2").unwrap();
+        let conn = goon_vault::open_db(&vault, &key).unwrap();
+        goon_core::db::init_schema(&conn).unwrap();
+        assert!(goon_core::db::schema_version(&conn).unwrap() >= goon_core::SCHEMA_VERSION);
+
+        conn.execute(
+            "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES ('m1','post','t','0','0')",
+            [],
+        )
+        .unwrap();
+        let mut blob = b"\x89PNG\r\n\x1a\n".to_vec();
+        blob.resize(1024 * 1024 + 37, 0x5a);
+
+        assert!(goon_core::media::put_full_image(&conn, "m1", &blob));
+        let written: i64 = conn
+            .query_row("SELECT bytes FROM media WHERE item_id = 'm1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(written as usize, blob.len(), "writer's byte count");
+
+        // and the exact statement the v10 backfill runs
+        conn.execute("UPDATE media SET bytes = NULL WHERE item_id = 'm1'", [])
+            .unwrap();
+        conn.execute(
+            "UPDATE media SET bytes = length(data) WHERE bytes IS NULL",
+            [],
+        )
+        .unwrap();
+        let backfilled: i64 = conn
+            .query_row("SELECT bytes FROM media WHERE item_id = 'm1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            backfilled as usize,
+            blob.len(),
+            "length(data) under SQLCipher must match the plaintext"
+        );
+        let stored: Vec<u8> = conn
+            .query_row("SELECT data FROM media WHERE item_id = 'm1'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored, blob, "the bytes themselves round-trip");
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 }

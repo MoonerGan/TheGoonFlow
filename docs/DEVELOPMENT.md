@@ -234,7 +234,7 @@ tools/
   make-icon.ps1     regenerates src-tauri/icons
 ```
 
-## 3. Data model cheat sheet (schema v9, `goon-core/src/db.rs`)
+## 3. Data model cheat sheet (schema v10, `goon-core/src/db.rs`)
 
 - `items` — one row per tracked thing. `kind`: game/gallery/post. `status`:
   pipeline stage (seen/tracking/wishlist/downloaded/played). `version` is a
@@ -253,13 +253,29 @@ tools/
   would collide with the keeper's own rows). `delete_source(item_id, row_id)`
   detaches one link from the item editor.
 - `tags`/`tag_types`/`item_tags` — types 1 `user_status`, 2 `site_flag`,
-  3 `content`. `add_item_tag` / `remove_item_tag` / `top_tags` are the M1
-  read+write paths; `list_items(…, tag)` filters on them.
+  3 `content`, 4 `extension` (v10, #76: what the file calls itself). A tag row
+  is *(site, name)* with `ns` and `fold` derived from the name (v10): e-hentai's
+  `female:big_breasts` and gelbooru's `big_breasts` are two rows whose `fold` is
+  the same, which is what one bare token matches. `site = ''` means "the user
+  typed it / provenance unknown" — the backfill never guesses a site.
+  `tag_get_or_create_site` is the write path (`tag_get_or_create` is the `''`
+  case); `add_item_tag` / `remove_item_tag` / `top_tags` are the read+write paths
+  the UI uses.
 - `media` — thumbnails (`kind='thumb'`, one per item, replaced on update) and
-  originals (`kind='full'`), content-hash deduped BLOBs. Keeping them in the
-  DB keeps the wipe story to "shred one directory". Media dupe suggestions
+  originals (`kind='full'`, `kind='video'`), content-hash deduped BLOBs. Keeping
+  them in the DB keeps the wipe story to "shred one directory". Media dupe suggestions
   (`pairing_suggestions(conn, Some("media"))`) pair *different items sharing
   one stored hash* — titles are useless for `1743761874698456.jpg`.
+  v10 adds the **facts** the filter's meta predicates read: `bytes` (written by
+  every writer, backfilled as `length(data)` — measured exact under SQLCipher,
+  TESTING item 39), `duration_ms` (NULL until the facts probe measures it) and
+  `animated` (read from the container: gif frame count, PNG `acTL`, WebP
+  `ANMF`; NULL = not probed). A thumb row gets `bytes` but never `animated`: a
+  re-encoded tile says nothing about the original.
+- `sources` v10 fact columns — `bytes`, `duration_ms`, `width`, `height`,
+  `probed_at`: the same facts for a file the vault does **not** hold (a
+  `file:///` path stat'ed and cached, or a link measured by a ranged probe).
+  Nothing writes them yet (stage S7); NULL means unprobed and never matches.
 - `site_settings` (v2) — per site: `enabled`, `cookie`, `rate_ms`. Read with
   `site_enabled(conn, site, default)` — the default differs per site (repack
   mirrors ship **off**, D8), so never assume `true`.
@@ -290,11 +306,17 @@ tools/
   If you really do have more than a dozen games under one title, the rest are
   paired by hand from the item editor.
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
-  `if v < N` steps up to `SCHEMA_VERSION` (v9). v3 renames hosts-labeled sites
+  `if v < N` steps up to `SCHEMA_VERSION` (v10). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
   `allthefallen`); v4 adds `items.launch_path`; v5 `match_suggestions`; v6/v7
   the `mods` table and its deploy columns; v8 `pair_dismissals`; v9
-  `source_images`. Any new schema change is a new numbered step — never edit the
+  `source_images`; v10 (#76) rebuilds `tags` with provenance, adds the media and
+  source fact columns, seeds the `extension` tag type and creates the planner's
+  indexes. The v10 tag rebuild is the one structural migration: it reuses every
+  old tag id so `item_tags` never moves, and it runs with `PRAGMA foreign_keys`
+  off for exactly the `DROP`/`RENAME` swap (a `DROP TABLE tags` would otherwise
+  cascade every tag link away), followed by `PRAGMA foreign_key_check` to prove
+  it did not. Any new schema change is a new numbered step — never edit the
   `CREATE TABLE` batch for existing columns.
 
 ## 4. Invariants (do not break without updating DESIGN.md)
@@ -549,6 +571,23 @@ tools/
     may never silently truncate. If #64's range delivery changes what the delivery
     path can carry, `INLINE_MAX` and `MAX_MEDIA_BYTES` move together — storing more
     than the viewer can be shown is not allowed.
+
+27. **An unprobed fact is NULL and never matches (#76, schema v10).** Every
+    computed media/source fact column — `media.bytes` / `duration_ms` /
+    `animated`, `sources.bytes` / `duration_ms` / `width` / `height` — means
+    *measured* when it holds a value and *never measured* when it is NULL, and
+    NULL never satisfies a filter predicate (`size>10mb`, `length<1:30`,
+    `type:gif` all miss an un-probed item). Nothing may invent a value to make a
+    query return rows:
+    `bytes` is written by every media writer and backfilled as `length(data)`
+    (measured exact through SQLCipher, TESTING item 39); `animated` is read from
+    the container's own chunks (gif frame count, PNG `acTL`, WebP `ANIM`/`ANMF`),
+    never from the file name or from a thumbnail — a re-encoded tile says nothing
+    about the original, so thumb rows keep `animated` NULL; durations and the
+    dimensions of a link or a disk file exist only once the facts probe measured
+    them, stamped in `sources.probed_at`. A merge or a re-store must carry the
+    facts it already had — a row may never become un-probed. And the UI says
+    *not measured* (`?`), never a pixel size, for the same reason (#65).
 
 29. **A check that cannot fail is worse than no check** (found 2026-11-26 while
     reviewing #76). `tools/char-audit.js` read only its file arguments, so

@@ -120,6 +120,128 @@ pub fn thumbnailable(mime: &str) -> bool {
     )
 }
 
+/// Is this file animated, read out of its **own container chunk table** — no
+/// frame is decoded (76-rulings A). `Some(true)` for a gif with more than one
+/// frame, an APNG (`acTL`) or an animated WebP (`ANIM`/`ANMF`); `Some(false)`
+/// for the same containers saying otherwise; `None` when the container cannot
+/// answer — an mp4 or a motion-poster still image is not probed here, and the
+/// note says "not probed" rather than "not animated".
+pub fn is_animated(bytes: &[u8]) -> Option<bool> {
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return gif_frames(bytes).map(|frames| frames > 1);
+    }
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return png_chunks(bytes).map(|chunks| chunks.iter().any(|c| c == "acTL"));
+    }
+    if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        let chunks = webp_chunks(bytes)?;
+        return Some(chunks.iter().any(|c| c == "ANMF" || c == "ANIM"));
+    }
+    None
+}
+
+/// GIF block walk -> the number of image descriptors. A single-frame gif is a
+/// still, and saying so is what makes `type:gif` mean something.
+fn gif_frames(bytes: &[u8]) -> Option<u32> {
+    let mut i = 6usize; // header
+    if bytes.len() < 13 {
+        return None;
+    }
+    // logical screen descriptor: width(2) height(2) packed(1) bg(1) aspect(1)
+    let packed = bytes[10];
+    i += 7;
+    if packed & 0x80 != 0 {
+        // a colour table holds 2^((size field)+1) entries of 3 bytes
+        i += 3 * (1 << ((packed & 0x07) + 1));
+    }
+    let mut frames = 0u32;
+    while i < bytes.len() {
+        match bytes[i] {
+            0x3B => return Some(frames), // trailer
+            0x21 => {
+                i += 2; // extension introducer + label
+                i = skip_sub_blocks(bytes, i)?;
+            }
+            0x2C => {
+                frames += 1;
+                if bytes.len() < i + 10 {
+                    return None;
+                }
+                let flags = bytes[i + 9];
+                i += 10; // image descriptor (9) + next block byte
+                if flags & 0x80 != 0 {
+                    i += 3 * (1 << ((flags & 0x07) + 1)); // local colour table
+                }
+                i += 1; // LZW minimum code size
+                i = skip_sub_blocks(bytes, i)?;
+            }
+            _ => return None, // not a block: this file is not the shape we parse
+        }
+    }
+    Some(frames) // ran out cleanly at a block boundary (no trailer written)
+}
+
+/// LZW / extension data: a run of length-prefixed sub-blocks ended by a zero byte.
+fn skip_sub_blocks(bytes: &[u8], mut i: usize) -> Option<usize> {
+    while i < bytes.len() {
+        let n = bytes[i] as usize;
+        if n == 0 {
+            return Some(i + 1);
+        }
+        i += 1 + n;
+    }
+    None
+}
+
+/// PNG chunk FourCCs, walking the real chunk table (length, type, data, CRC).
+fn png_chunks(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut i = 8usize;
+    let mut out = Vec::new();
+    while i + 8 <= bytes.len() {
+        let len = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]) as usize;
+        let kind = String::from_utf8_lossy(&bytes[i + 4..i + 8]).to_string();
+        out.push(kind);
+        i += 8 + len + 4;
+    }
+    // A walk that stops in the middle of a chunk is a truncated or forged file;
+    // its animation state is then unknown, not false.
+    if i == bytes.len() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// WebP RIFF chunk FourCCs (payloads are padded to an even length).
+fn webp_chunks(bytes: &[u8]) -> Option<Vec<String>> {
+    let mut i = 12usize;
+    let mut out = Vec::new();
+    while i + 8 <= bytes.len() {
+        let kind = String::from_utf8_lossy(&bytes[i..i + 4]).to_string();
+        let len =
+            u32::from_le_bytes([bytes[i + 4], bytes[i + 5], bytes[i + 6], bytes[i + 7]]) as usize;
+        out.push(kind);
+        i += 8 + len + (len % 2);
+    }
+    if i == bytes.len() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// The picture's own pixel size, read from its header without decoding a frame
+/// (`ImageReader::into_dimensions`). v10 writes this on `full` rows so a
+/// `width>`/`height>` query measures the art and not the 360 px tile — the lie
+/// the review round named (76-map §10 note 1).
+pub fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let mut cursor = Cursor::new(bytes);
+    let reader = image::ImageReader::new(&mut cursor)
+        .with_guessed_format()
+        .ok()?;
+    reader.into_dimensions().ok()
+}
+
 pub struct Thumbnail {
     pub mime: &'static str,
     pub width: u32,
@@ -230,15 +352,16 @@ pub fn set_thumbnail(conn: &Connection, item_id: &str, t: &Thumbnail) -> bool {
         params![item_id],
     );
     conn.execute(
-        "INSERT INTO media (item_id, kind, hash, mime, width, height, data)
-         VALUES (?1, 'thumb', ?2, ?3, ?4, ?5, ?6)",
+        "INSERT INTO media (item_id, kind, hash, mime, width, height, data, bytes, animated)
+         VALUES (?1, 'thumb', ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
         params![
             item_id,
             sha256_hex(&t.bytes),
             t.mime,
             t.width as i64,
             t.height as i64,
-            t.bytes
+            t.bytes,
+            t.bytes.len() as i64
         ],
     )
     .is_ok()
@@ -306,12 +429,22 @@ pub fn video_mime(ext: &str) -> Option<&'static str> {
 /// caller's mime — usually read off a file name or URL suffix — is only the
 /// fallback for containers we cannot sniff, so a row never claims to be an
 /// mp4 it is not.
+///
+/// `bytes` is written because we are holding them; `duration_ms`/`width`/
+/// `height` are not guessed here — the facts probe (76-rulings B) fills them
+/// from the container, and NULL means "not probed, never matches".
 pub fn put_video(conn: &Connection, item_id: &str, mime: &str, bytes: &[u8]) -> bool {
     let sniffed = detect_video_mime(bytes).unwrap_or(mime);
     conn.execute(
-        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data)
-         VALUES (?1, 'video', ?2, ?3, NULL, NULL, ?4)",
-        params![item_id, sha256_hex(bytes), sniffed, bytes],
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes)
+         VALUES (?1, 'video', ?2, ?3, NULL, NULL, ?4, ?5)",
+        params![
+            item_id,
+            sha256_hex(bytes),
+            sniffed,
+            bytes,
+            bytes.len() as i64
+        ],
     )
     .is_ok()
 }
@@ -371,14 +504,34 @@ pub fn delete_video(conn: &Connection, item_id: &str) {
 
 /// Store original image bytes as a `full` media row (deduped by content hash).
 /// Returns false for unknown/undetectable formats.
+///
+/// The v10 facts ride along because the bytes are already in hand: `bytes` is
+/// their length, `width`/`height` come from the header without a decode, and
+/// `animated` is read from the container's own chunks (`Some(true)` for APNG /
+/// animated WebP / multi-frame gif, `None` for a container that cannot answer).
 pub fn put_full_image(conn: &Connection, item_id: &str, bytes: &[u8]) -> bool {
     let Some(mime) = detect_mime(bytes) else {
         return false;
     };
+    let (w, h) = image_dimensions(bytes)
+        .map(|(w, h)| (w as i64, h as i64))
+        .unwrap_or((0, 0));
+    let animated = is_animated(bytes).map(|a| a as i64);
     conn.execute(
-        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data)
-         VALUES (?1, 'full', ?2, ?3, NULL, NULL, ?4)",
-        params![item_id, sha256_hex(bytes), mime, bytes],
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, animated)
+         VALUES (?1, 'full', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            item_id,
+            sha256_hex(bytes),
+            mime,
+            // 0 is not a size: an undecodable header leaves the fact unknown
+            // rather than claiming a 0 px picture.
+            (w > 0).then_some(w),
+            (h > 0).then_some(h),
+            bytes,
+            bytes.len() as i64,
+            animated
+        ],
     )
     .is_ok()
 }
@@ -551,6 +704,201 @@ mod tests {
             detect_mime(b"<html><body>Access denied</body></html>"),
             None
         );
+    }
+
+    /// A real gif written by `image`'s own encoder, with `n` frames.
+    fn gif_with_frames(n: u8) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
+            let frames: Vec<image::Frame> = (0..n)
+                .map(|i| {
+                    // deliberately different colours: the gif encoder drops a
+                    // frame that quantizes to the last one, and a fixture that
+                    // quietly becomes one frame would test nothing
+                    let shade = (u16::from(i) * 120) as u8;
+                    image::Frame::new(image::RgbaImage::from_pixel(
+                        4,
+                        4,
+                        image::Rgba([shade, 50, 90, 255]),
+                    ))
+                })
+                .collect();
+            enc.encode_frames(frames).unwrap();
+            drop(enc);
+        }
+        buf.into_inner()
+    }
+
+    /// N image descriptors in a real GIF block structure, written by hand. The
+    /// LZW payloads are placeholders — this fixture proves the block **walk**
+    /// (where one block ends and the next starts), which the encoder-produced
+    /// file above cannot pin on its own.
+    fn gif_with_descriptors(n: u8) -> Vec<u8> {
+        let mut out = b"GIF89a".to_vec();
+        out.extend_from_slice(&[4, 0, 4, 0, 0x80, 0, 0]); // 4x4, 2-entry global colour table
+        out.extend_from_slice(&[10, 50, 90, 0, 0, 0]);
+        for _ in 0..n {
+            // graphic control extension: introducer, label, one sub-block of
+            // four bytes, and the block terminator a real GIF always writes
+            out.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 0x0A, 0x00, 0x00, 0x00]);
+            out.push(0x2C); // image descriptor
+            out.extend_from_slice(&[0, 0, 0, 0, 4, 0, 4, 0, 0x00]);
+            out.push(2); // LZW minimum code size
+            out.push(3); // one data sub-block
+            out.extend_from_slice(&[0x44, 0x04, 0x00]);
+            out.push(0); // end of sub-blocks
+        }
+        out.push(0x3B); // trailer
+        out
+    }
+
+    /// A PNG chunk spliced into a real PNG after IHDR — which is exactly how a
+    /// PNG says it is animated (`acTL`), and the reader walks the chunk table,
+    /// it does not decode a frame.
+    fn png_with_chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = sample_png();
+        let at = 8 + 8 + 13 + 4; // signature + IHDR header/len + data + CRC
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(body);
+        chunk.extend_from_slice(&[0, 0, 0, 0]); // the reader never checks the CRC
+        out.splice(at..at, chunk);
+        out
+    }
+
+    fn webp(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        for (kind, data) in chunks {
+            body.extend_from_slice(*kind);
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            body.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                body.push(0); // RIFF chunks are padded to an even length
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+
+    /// #76 rulings A: animation is read from the container's own chunk table,
+    /// so it is a fact from the file for gif, APNG and animated WebP — and an
+    /// admitted unknown for everything else.
+    #[test]
+    fn animation_comes_from_the_container_chunks() {
+        let one = gif_with_frames(1);
+        let two = gif_with_frames(2);
+        assert_eq!(detect_mime(&one), Some("image/gif"), "the fixture is a gif");
+        assert!(
+            image::load_from_memory(&two).is_ok(),
+            "the two-frame fixture is a decodable file, not parser-shaped bytes"
+        );
+        assert_eq!(is_animated(&one), Some(false));
+        assert_eq!(is_animated(&two), Some(true));
+        // a hand-built block table pins the walk itself: extensions, colour
+        // tables and data sub-blocks all have to be stepped over correctly
+        assert_eq!(is_animated(&gif_with_descriptors(3)), Some(true));
+        assert_eq!(is_animated(&gif_with_descriptors(1)), Some(false));
+        assert_eq!(is_animated(&sample_png()), Some(false));
+        assert_eq!(
+            is_animated(&png_with_chunk(b"acTL", &[0, 0, 0, 3, 0, 0, 0, 1])),
+            Some(true)
+        );
+        assert_eq!(
+            is_animated(&webp(&[(b"VP8X", &[0x10, 0, 0, 0, 9, 0, 0, 9, 0, 0])])),
+            Some(false)
+        );
+        assert_eq!(
+            is_animated(&webp(&[
+                (b"VP8X", &[0x12, 0, 0, 0, 9, 0, 0, 9, 0, 0]),
+                (b"ANIM", &[0, 0, 0, 0, 2, 0]),
+                (b"ANMF", &[0, 0, 0, 0, 1, 0, 1, 0, 0, 0]),
+            ])),
+            Some(true)
+        );
+        // not guessed: a motion-picture container is not probed here
+        assert_eq!(is_animated(b"\x00\x00\x00\x18ftypisom\0\0\0\0"), None);
+        // a truncated container is unknown, not "not animated"
+        assert_eq!(is_animated(b"GIF89a"), None);
+        assert_eq!(is_animated(b"\x89PNG\r\n\x1a\n\x05"), None);
+        assert_eq!(is_animated(b"RIFFxxWEBP"), None);
+    }
+
+    /// v10 writes the original's own pixels and byte size on a `full` row, so a
+    /// `width>` query measures the art instead of the 360 px tile (76-map §10).
+    #[test]
+    fn stored_facts_are_written_with_the_row() {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        insert_post(&conn, "f1");
+        let png = sample_png();
+        assert!(put_full_image(&conn, "f1", &png));
+        let (bytes, w, h, animated): (i64, Option<i64>, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT bytes, width, height, animated FROM media WHERE item_id = 'f1' AND kind = 'full'",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap(), r.get(3).unwrap())),
+            )
+            .unwrap();
+        assert_eq!(bytes, png.len() as i64);
+        assert_eq!((w, h), (Some(8), Some(8)));
+        assert_eq!(animated, Some(0));
+
+        // an animated original says so on the row that holds it
+        insert_post(&conn, "f2");
+        assert!(put_full_image(&conn, "f2", &gif_with_descriptors(2)));
+        let (bytes, animated, mime): (i64, Option<i64>, String) = conn
+            .query_row(
+                "SELECT bytes, animated, mime FROM media WHERE item_id = 'f2' AND kind = 'full'",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap())),
+            )
+            .unwrap();
+        assert_eq!(animated, Some(1));
+        assert_eq!(mime, "image/gif");
+        assert!(bytes > 10);
+
+        // a stored video knows its size but not yet its duration: the probe
+        // (S7) fills that, and until then the fact is NULL, never a guess
+        insert_post(&conn, "f3");
+        let mp4 = b"\x00\x00\x00\x18ftypisom\0\0\x00\x00isom";
+        assert!(put_video(&conn, "f3", "video/mp4", mp4));
+        let (bytes, duration, animated): (i64, Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT bytes, duration_ms, animated FROM media WHERE item_id = 'f3' AND kind = 'video'",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap())),
+            )
+            .unwrap();
+        assert_eq!(bytes, mp4.len() as i64);
+        assert_eq!(duration, None);
+        assert_eq!(animated, None);
+
+        // a tile carries its own byte size and deliberately no animation fact:
+        // a re-encoded tile says nothing about whether the original moved
+        insert_post(&conn, "f4");
+        assert!(put_thumbnail(&conn, "f4", &gif_with_frames(2)));
+        let (bytes, animated): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT bytes, animated FROM media WHERE item_id = 'f4' AND kind = 'thumb'",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap())),
+            )
+            .unwrap();
+        assert!(bytes > 100);
+        assert_eq!(animated, None);
+    }
+
+    #[test]
+    fn dimensions_come_from_the_header_not_a_decode() {
+        let (w, h) = image_dimensions(&sample_png()).unwrap();
+        assert_eq!((w, h), (8, 8));
+        // a PNG head with no IHDR body answers nothing, and the row stores NULL
+        assert_eq!(image_dimensions(&fake_png(7)), None);
+        assert_eq!(image_dimensions(b"not an image at all"), None);
     }
 
     /// #46: f95zone answers `image/avif` for a URL ending in `.jpg`. The type

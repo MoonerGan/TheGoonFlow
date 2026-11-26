@@ -254,7 +254,213 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             COMMIT;",
         )?;
     }
+    if v < 10 {
+        migrate_v10(conn)?;
+    }
     Ok(())
+}
+
+/// #76: the data model the query box reads. Three changes in one step:
+///
+/// * `tags` rebuilt so one row is *(origin site, the name that site spells)* —
+///   `site` / `ns` / `name` / `fold` — which is what lets e-hentai's
+///   `female:big_breasts` and gelbooru's `big_breasts` stay two rows and still
+///   answer one bare token (plan §3.1).
+/// * The **facts** the meta predicates read. In `media` for bytes the vault
+///   holds (`bytes`, `duration_ms`, `animated`) and in `sources` for bytes it
+///   does not (a disk path or a bare link: `bytes`, `duration_ms`, `width`,
+///   `height`, `probed_at`). Every one of them is NULL until something measured
+///   it — an unknown fact never matches a predicate (76-rulings B).
+/// * The `extension` tag type (76-rulings A): "what the file calls itself",
+///   kept separate from `type:`, which is what GoonFlow computed from bytes.
+///
+/// Idempotent: each ALTER is guarded on `pragma_table_info` and the tags
+/// rebuild only runs while `tags.fold` is missing.
+fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
+    // ---- facts columns, guarded so a half-finished upgrade is a no-op --------
+    let mut adds: Vec<String> = Vec::new();
+    for (table, col, decl) in [
+        ("media", "bytes", "INTEGER"),
+        ("media", "duration_ms", "INTEGER"),
+        ("media", "animated", "INTEGER"),
+        ("sources", "bytes", "INTEGER"),
+        ("sources", "duration_ms", "INTEGER"),
+        ("sources", "width", "INTEGER"),
+        ("sources", "height", "INTEGER"),
+        ("sources", "probed_at", "TEXT"),
+    ] {
+        if !has_column(conn, table, col) {
+            adds.push(format!("ALTER TABLE {table} ADD COLUMN {col} {decl};"));
+        }
+    }
+    if !adds.is_empty() {
+        conn.execute_batch(&format!("BEGIN;\n{}\nCOMMIT;", adds.join("\n")))?;
+    }
+
+    // ---- the tags rebuild ---------------------------------------------------
+    if !has_column(conn, "tags", "fold") {
+        rebuild_tags_v10(conn)?;
+    }
+
+    conn.execute_batch(
+        "BEGIN;
+        -- 76-rulings A: 'what the file calls itself' is its own tag type, so an
+        -- mp4/gif/webp tag can never be mistaken for site vocabulary. Low
+        -- priority: it must not crowd the Complete chip (D9).
+        INSERT OR IGNORE INTO tag_types (id, key, label, priority, color) VALUES
+            (4, 'extension', 'File', 5, NULL);
+
+        -- f95's [Completed] prefix is a site fact, not a content tag (D9); it
+        -- arrived as content and is corrected here (plan §9 decision 11).
+        UPDATE tags SET type_id = 2 WHERE name = 'f95-completed' AND type_id = 3;
+
+        -- Facts we already know from what the vault holds: the byte size of a
+        -- stored row, and gif-ness from the mime that was sniffed from its bytes
+        -- (media.rs::detect_mime). A single-frame gif is not animated, and this
+        -- says 'gif container'; the facts job re-reads the container chunks and
+        -- corrects it to 0 for a one-frame file. Everything else stays NULL.
+        UPDATE media SET bytes = length(data) WHERE bytes IS NULL;
+        UPDATE media SET animated = 1 WHERE animated IS NULL AND mime = 'image/gif';
+
+        -- The planner's index set (plan §6). media(item_id,kind) is deliberately
+        -- missing: media_hash_idx already covers that prefix.
+        CREATE INDEX IF NOT EXISTS tags_fold_idx ON tags (fold);
+        CREATE INDEX IF NOT EXISTS tags_name_idx ON tags (name);
+        CREATE INDEX IF NOT EXISTS tags_site_name_idx ON tags (site, name);
+        CREATE INDEX IF NOT EXISTS item_tags_tag_idx ON item_tags (tag_id, item_id);
+        CREATE INDEX IF NOT EXISTS sources_site_item_idx ON sources (site, item_id);
+
+        UPDATE meta SET value = '10' WHERE key = 'schema_version';
+        COMMIT;",
+    )?;
+    Ok(())
+}
+
+fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
+    conn.prepare("SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2")
+        .and_then(|mut s| s.exists(params![table, col]))
+        .unwrap_or(false)
+}
+
+/// Rebuild `tags` with provenance, reusing every old id so `item_tags` needs no
+/// remapping. Dropping the parent table would cascade-delete every tag link
+/// (`ON DELETE CASCADE`), and `PRAGMA foreign_keys` cannot change inside a
+/// transaction — so it goes off before `BEGIN` and is restored straight after
+/// `COMMIT`, which is SQLite's documented sequence for this kind of rebuild.
+fn rebuild_tags_v10(conn: &Connection) -> rusqlite::Result<()> {
+    let mut rows: Vec<(i64, String, i64)> = Vec::new();
+    {
+        let mut stmt = conn.prepare("SELECT id, name, type_id FROM tags")?;
+        for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+            rows.push(row?);
+        }
+    }
+    conn.execute_batch("PRAGMA foreign_keys = OFF;")?;
+    let rebuilt = (|| -> rusqlite::Result<()> {
+        conn.execute_batch(
+            "BEGIN;
+            CREATE TABLE tags_new (
+                id      INTEGER PRIMARY KEY,
+                site    TEXT NOT NULL DEFAULT '',
+                ns      TEXT,
+                name    TEXT NOT NULL,
+                fold    TEXT NOT NULL,
+                type_id INTEGER NOT NULL REFERENCES tag_types(id),
+                UNIQUE (site, name)
+            );",
+        )?;
+        let mut ins = conn.prepare(
+            "INSERT INTO tags_new (id, site, ns, name, fold, type_id)
+             VALUES (?1, '', ?2, ?3, ?4, ?5)",
+        )?;
+        for (id, name, type_id) in &rows {
+            let (ns, fold) = tag_ns_fold(name);
+            ins.execute(params![id, ns, name, fold, type_id])?;
+        }
+        conn.execute_batch(
+            "DROP TABLE tags;
+            ALTER TABLE tags_new RENAME TO tags;
+            COMMIT;",
+        )
+    })();
+    if rebuilt.is_err() {
+        // leave no half-rebuild behind; the next open runs v10 again
+        let _ = conn.execute_batch("ROLLBACK;");
+    }
+    conn.execute_batch("PRAGMA foreign_keys = ON;")?;
+    rebuilt?;
+    // Cheap proof the swap did not orphan a link: with FKs back on, a violated
+    // or dangling key shows up here, and an upgrade that quietly lost every tag
+    // would be a far worse bug than a failed one.
+    let mut chk = conn.prepare("PRAGMA foreign_key_check")?;
+    let broken = chk
+        .query_map([], |r| r.get::<_, String>(1))?
+        .collect::<Result<Vec<String>, _>>()?;
+    if !broken.is_empty() {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(1),
+            Some(format!(
+                "v10 tag rebuild left bad keys: {}",
+                broken.join(", ")
+            )),
+        ));
+    }
+    Ok(())
+}
+
+/// Tag namespaces the source sites spell in front of the name: e-hentai keeps
+/// them inside the tag string it hands us (`female:big_breasts`, `artist:x`),
+/// e621/danbooru use the same category words. The list is closed and code-owned
+/// — it decides what `fold` strips, and a prefix that is not here is part of the
+/// tag (`foo:bar` folds to itself), which is what keeps unknown namespaces from
+/// silently merging two different facts (plan §9 decision 4).
+pub const TAG_NAMESPACES: &[&str] = &[
+    "artist",
+    "character",
+    "copyright",
+    "species",
+    "class",
+    "meta",
+    "general",
+    "lore",
+    "fanapp",
+    "dragon",
+    "container",
+    "occasion",
+    "background",
+    "location",
+    "parody",
+    "language",
+    "costuming",
+    "cosmetics",
+    "mixed",
+    "non-h",
+    "male",
+    "female",
+    "other",
+    "temp",
+    "invalid",
+    "error",
+    "solved",
+    "reply",
+    "image",
+    "sound",
+    "video",
+];
+
+/// Split a site-spelled tag name into its namespace and the folded name the
+/// cross-site union matches on: `female:big_breasts` -> (`female`,
+/// `big_breasts`), `f95-completed` -> (None, `f95-completed`). Only the leading
+/// namespace is stripped, and only when it is one we know; the fold keeps the
+/// site's spelling apart from it, so `big:breasts` still folds to `big:breasts`.
+pub fn tag_ns_fold(name: &str) -> (Option<&str>, &str) {
+    if let Some((ns, rest)) = name.split_once(':') {
+        let lowered = ns.trim().to_ascii_lowercase();
+        if !rest.is_empty() && TAG_NAMESPACES.iter().any(|n| *n == lowered) {
+            return (Some(ns), rest);
+        }
+    }
+    (None, name)
 }
 
 pub fn schema_version(conn: &Connection) -> rusqlite::Result<i64> {
@@ -819,15 +1025,76 @@ pub fn has_mods(conn: &Connection, item_id: &str) -> rusqlite::Result<bool> {
 pub const TYPE_USER_STATUS: i64 = 1;
 pub const TYPE_SITE_FLAG: i64 = 2;
 pub const TYPE_CONTENT: i64 = 3;
+/// v10 (76-rulings A): what the file calls itself — `mp4`, `gif`, `png`… Taken
+/// from the source that names a file, never from the bytes: `type:` is what
+/// GoonFlow computed from the bytes, `ext:` is the file's own claim, and the two
+/// are allowed to disagree honestly (a `.jpg` link that serves AVIF is both).
+pub const TYPE_EXTENSION: i64 = 4;
+
+/// Find or make the row for *(site, name)*. `site` is the site that spells the
+/// name — `''` for a tag the user typed or one of unknown provenance, because
+/// invariant 21 forbids inventing provenance the app never recorded.
+pub fn tag_get_or_create_site(
+    conn: &Connection,
+    site: &str,
+    name: &str,
+    type_id: i64,
+) -> rusqlite::Result<i64> {
+    let (ns, fold) = tag_ns_fold(name);
+    conn.execute(
+        "INSERT OR IGNORE INTO tags (site, ns, name, fold, type_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![site, ns, name, fold, type_id],
+    )?;
+    conn.query_row(
+        "SELECT id FROM tags WHERE site = ?1 AND name = ?2",
+        params![site, name],
+        |r| r.get(0),
+    )
+}
 
 pub fn tag_get_or_create(conn: &Connection, name: &str, type_id: i64) -> rusqlite::Result<i64> {
-    conn.execute(
-        "INSERT OR IGNORE INTO tags (name, type_id) VALUES (?1, ?2)",
-        params![name, type_id],
-    )?;
-    conn.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |r| {
-        r.get(0)
-    })
+    tag_get_or_create_site(conn, "", name, type_id)
+}
+
+/// Record what the file calls itself (76-rulings A). `url_or_path` is any string
+/// that ends in the file's own name — a `sources.url`, a `file:///` path — and
+/// the extension is stored as an `extension` tag, lowercased, on its own. A name
+/// with no usable extension returns Ok(None) rather than inventing one.
+pub fn set_item_extension_tag(
+    conn: &Connection,
+    item_id: &str,
+    url_or_path: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let Some(ext) = extension_of(url_or_path) else {
+        return Ok(None);
+    };
+    let id = tag_get_or_create_site(conn, "", &ext, TYPE_EXTENSION)?;
+    link_item_tag(conn, item_id, id)?;
+    Ok(Some(id))
+}
+
+/// The extension a path or url calls its file: lowercased, alnum only, 1..8
+/// characters, query string and fragment stripped. `…/1743761874698456.jpg?x=1`
+/// becomes `jpg`; a site page url (`/g/1234/`) or a bare host yields None.
+pub fn extension_of(url_or_path: &str) -> Option<String> {
+    let path = url_or_path
+        .split(['?', '#'])
+        .next()
+        .unwrap_or(url_or_path)
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    let (_, ext) = path.rsplit_once('.')?;
+    let ext = ext.trim().to_ascii_lowercase();
+    if ext.is_empty()
+        || ext.len() > 8
+        || !ext
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(ext)
 }
 
 pub fn link_item_tag(conn: &Connection, item_id: &str, tag_id: i64) -> rusqlite::Result<()> {
@@ -1574,10 +1841,11 @@ pub fn merge_items(conn: &Connection, keep_id: &str, drop_id: &str) -> rusqlite:
         params![keep_id, drop_id],
     )?;
     conn.execute("DELETE FROM item_tags WHERE item_id = ?1", params![drop_id])?;
-    // Media rows: keep hashes distinct (UNIQUE item/kind/hash).
+    // Media rows: keep hashes distinct (UNIQUE item/kind/hash). The v10 fact
+    // columns travel with the row — a merge must not un-probe what was measured.
     conn.execute(
-        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data)
-         SELECT ?1, kind, hash, mime, width, height, data FROM media WHERE item_id = ?2",
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, duration_ms, animated)
+         SELECT ?1, kind, hash, mime, width, height, data, bytes, duration_ms, animated FROM media WHERE item_id = ?2",
         params![keep_id, drop_id],
     )?;
     conn.execute("DELETE FROM media WHERE item_id = ?1", params![drop_id])?;
@@ -1620,6 +1888,278 @@ mod tests {
             .query_row("SELECT count(*) FROM source_images", [], |r| r.get(0))
             .unwrap();
         assert_eq!(candidates, 0);
+        // v10 (#76): the tag rows carry provenance, the media facts columns
+        // exist, and the extension tag type is seeded.
+        assert!(has_column(&conn, "tags", "site"));
+        assert!(has_column(&conn, "tags", "ns"));
+        assert!(has_column(&conn, "tags", "fold"));
+        for col in ["bytes", "duration_ms", "animated"] {
+            assert!(has_column(&conn, "media", col), "media.{col} missing");
+        }
+        for col in ["bytes", "duration_ms", "width", "height", "probed_at"] {
+            assert!(has_column(&conn, "sources", col), "sources.{col} missing");
+        }
+        let ext_type: i64 = conn
+            .query_row(
+                "SELECT id FROM tag_types WHERE key = 'extension'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ext_type, TYPE_EXTENSION);
+    }
+
+    /// #76: the v10 rebuild must keep every `item_tags` link (the old id space
+    /// is reused, and DROP TABLE tags would otherwise cascade them away), split
+    /// namespaced names into ns + fold, and backfill the facts the vault already
+    /// holds. Built on a hand-made v9-shaped vault, the same shape a field-test
+    /// vault arrives as.
+    #[test]
+    fn v10_rebuild_keeps_links_folds_names_and_backfills_facts() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             CREATE TABLE items (
+                 id TEXT PRIMARY KEY,
+                 kind TEXT NOT NULL CHECK (kind IN ('game','gallery','post')),
+                 title TEXT NOT NULL, original_title TEXT, circle TEXT,
+                 status TEXT NOT NULL DEFAULT 'seen', dnf INTEGER NOT NULL DEFAULT 0,
+                 rating INTEGER, notes TEXT NOT NULL DEFAULT '', version TEXT,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+             CREATE TABLE sources (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                 site TEXT NOT NULL, url TEXT NOT NULL, source_id TEXT,
+                 fetched_at TEXT, raw TEXT, dead INTEGER NOT NULL DEFAULT 0,
+                 UNIQUE (site, url));
+             CREATE TABLE tag_types (
+                 id INTEGER PRIMARY KEY, key TEXT NOT NULL UNIQUE, label TEXT NOT NULL,
+                 priority INTEGER NOT NULL DEFAULT 0, color TEXT);
+             CREATE TABLE tags (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL UNIQUE,
+                 type_id INTEGER NOT NULL REFERENCES tag_types(id));
+             CREATE TABLE item_tags (
+                 item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                 tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+                 PRIMARY KEY (item_id, tag_id));
+             CREATE TABLE media (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 item_id TEXT NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                 kind TEXT NOT NULL DEFAULT 'thumb', hash TEXT NOT NULL,
+                 mime TEXT NOT NULL, width INTEGER, height INTEGER, data BLOB NOT NULL);
+             INSERT INTO tag_types VALUES
+                 (1,'user_status','Personal',100,'#4ade80'),
+                 (2,'site_flag','Site',50,NULL),
+                 (3,'content','Content',10,NULL);
+             INSERT INTO items (id,kind,title,created_at,updated_at) VALUES
+                 ('eh1','post','eh gallery','0','1'),('gb1','post','gelbooru post','0','1');
+             INSERT INTO tags (id,name,type_id) VALUES
+                 (10,'female:big_breasts',3),(11,'big_breasts',3),
+                 (12,'f95-completed',3),(13,'complete',1),(14,'other:variant_set',3),
+                 (15,'foo:bar',3);
+             INSERT INTO item_tags (item_id,tag_id) VALUES
+                 ('eh1',10),('eh1',12),('gb1',11),('gb1',13),('gb1',14),('gb1',15);
+             INSERT INTO media (item_id,kind,hash,mime,data) VALUES
+                 ('eh1','full','h1','image/gif',X'474946383961'),
+                 ('gb1','full','h2','image/jpeg',X'ffd8ff00112233');
+             INSERT INTO meta (key,value) VALUES ('schema_version','9');",
+        )
+        .unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), 9);
+
+        init_schema(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
+        // idempotent: running the whole thing again changes nothing
+        let links_before: i64 = conn
+            .query_row("SELECT count(*) FROM item_tags", [], |r| r.get(0))
+            .unwrap();
+        init_schema(&conn).unwrap();
+        assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM item_tags", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            links_before
+        );
+
+        // every old link still points at the tag it used to
+        for (item, name) in [
+            ("eh1", "female:big_breasts"),
+            ("eh1", "f95-completed"),
+            ("gb1", "big_breasts"),
+            ("gb1", "complete"),
+            ("gb1", "other:variant_set"),
+            ("gb1", "foo:bar"),
+        ] {
+            let hit: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM item_tags it JOIN tags t ON t.id = it.tag_id
+                     WHERE it.item_id = ?1 AND t.name = ?2",
+                    params![item, name],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(hit, 1, "{item} lost its tag {name}");
+        }
+
+        // provenance: nothing is guessed (every backfilled row is site ''),
+        // namespaced names are split, and unknown prefixes stay part of the name
+        for (name, ns, fold) in [
+            ("female:big_breasts", Some("female"), "big_breasts"),
+            ("big_breasts", None, "big_breasts"),
+            ("other:variant_set", Some("other"), "variant_set"),
+            ("foo:bar", None, "foo:bar"),
+            ("f95-completed", None, "f95-completed"),
+        ] {
+            let (got_ns, got_fold): (Option<String>, String) = conn
+                .query_row(
+                    "SELECT site, ns, fold FROM tags WHERE name = ?1",
+                    params![name],
+                    |r| Ok((r.get(1)?, r.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(got_ns.as_deref(), ns, "ns of {name}");
+            assert_eq!(got_fold, fold, "fold of {name}");
+        }
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM tags WHERE site <> ''", [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            0,
+            "backfill must not invent provenance (invariant 21)"
+        );
+
+        // f95's [Completed] prefix is a site fact, not a content tag (D9)
+        let type_id: i64 = conn
+            .query_row(
+                "SELECT type_id FROM tags WHERE name = 'f95-completed'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(type_id, TYPE_SITE_FLAG);
+
+        // facts the vault already proves: bytes of each stored row, and the gif
+        // container says animated; the jpeg does not get a fact it never had.
+        let (bytes, animated): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT bytes, animated FROM media WHERE hash = 'h1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 6);
+        assert_eq!(animated, Some(1));
+        let (bytes, animated): (i64, Option<i64>) = conn
+            .query_row(
+                "SELECT bytes, animated FROM media WHERE hash = 'h2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(bytes, 7);
+        assert_eq!(animated, None);
+
+        // the planner's indexes exist
+        for idx in [
+            "tags_fold_idx",
+            "tags_name_idx",
+            "tags_site_name_idx",
+            "item_tags_tag_idx",
+            "sources_site_item_idx",
+        ] {
+            let n: i64 = conn
+                .query_row(
+                    "SELECT count(*) FROM sqlite_master WHERE name = ?1",
+                    params![idx],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(n, 1, "index {idx} missing");
+        }
+    }
+
+    #[test]
+    fn tag_ns_fold_is_closed_and_byte_exact() {
+        assert_eq!(
+            tag_ns_fold("female:big_breasts"),
+            (Some("female"), "big_breasts")
+        );
+        assert_eq!(tag_ns_fold("artist:horosuke"), (Some("artist"), "horosuke"));
+        // a prefix we do not know is part of the tag, not a namespace
+        assert_eq!(tag_ns_fold("foo:bar"), (None, "foo:bar"));
+        // no namespace without something behind it
+        assert_eq!(tag_ns_fold("female:"), (None, "female:"));
+        // only the leading one comes off
+        let (_, fold) = tag_ns_fold("female:porn:gif");
+        assert_eq!(fold, "porn:gif");
+        // the site's spelling survives in the name
+        assert_eq!(tag_ns_fold("Female:x"), (Some("Female"), "x"));
+    }
+
+    #[test]
+    fn extension_tags_come_from_what_the_file_calls_itself() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id,kind,title,created_at,updated_at) VALUES ('m1','post','clip','0','1')",
+            [],
+        )
+        .unwrap();
+        // a CDN file link with the post id in the query, and a windows path
+        assert_eq!(
+            set_item_extension_tag(
+                &conn,
+                "m1",
+                "https://img3.gelbooru.com/images/00/00000000000000000000000000000000.jpg?9999999"
+            )
+            .unwrap(),
+            Some(
+                conn.query_row("SELECT id FROM tags WHERE name = 'jpg'", [], |r| r.get(0))
+                    .unwrap()
+            )
+        );
+        assert!(
+            set_item_extension_tag(&conn, "m1", r"file:///D:/video/clip.mp4")
+                .unwrap()
+                .is_some(),
+            "a file path names its own file type"
+        );
+        // a page url names no file, so no tag is invented
+        assert_eq!(
+            set_item_extension_tag(&conn, "m1", "https://e-hentai.org/g/1234/abcd/").unwrap(),
+            None
+        );
+        // and a nonsense "extension" is refused rather than stored
+        assert_eq!(
+            set_item_extension_tag(&conn, "m1", "https://x.to/1.averylongthing").unwrap(),
+            None
+        );
+        let linked: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM item_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.item_id = 'm1' AND t.name IN ('jpg','mp4')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(linked, 2);
+        let total: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM item_tags it JOIN tags t ON t.id = it.tag_id WHERE it.item_id = 'm1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 2, "no invented tag should have been written");
+        let kind: String = conn
+            .query_row(
+                "SELECT tt.key FROM tags t JOIN tag_types tt ON tt.id = t.type_id WHERE t.name = 'mp4'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kind, "extension");
     }
 
     #[test]

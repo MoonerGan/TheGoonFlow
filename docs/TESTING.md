@@ -394,15 +394,43 @@ the board's *In review* column is the current list.
       holding the CAPTCHA. The replay lives in `http::live_probe` (ignored, live):
       `store_video replay, referer https://rule34 -> 403` while the URL's own origin
       and `https://rule34.xxx` both give `200 video/mp4 59 083 373 B`.
-     38. **A picture is sized against the right ceiling** (#72, 2026-11-25 report:
-        ordinary booru gifs of 19 185 473 and 18 910 422 bytes were refused outright,
-        leaving the item with no bytes *and* no tile). Clip a booru post whose file is
-        a big gif: it must store, and the tile must exist. The regression is asserted
-        in `sniffed_bytes_not_the_url_decide_what_is_stored`: the same 19 MB gif is
-        accepted as the artwork (`media::MAX_MEDIA_BYTES`, 96 MB) and still refused as
-        **cover art** (`MAX_COVER_BYTES`, 16 MB). A refusal must name the size, the
-        limit and what to do instead (`is 18 MB, over this app's 16 MB limit for cover
-        art`, `… save the file and add it with + Images`), never a raw byte count.
+   38. **A picture is sized against the right ceiling** (#72, 2026-11-25 report:
+      ordinary booru gifs of 19 185 473 and 18 910 422 bytes were refused outright,
+      leaving the item with no bytes *and* no tile). Clip a booru post whose file is
+      a big gif: it must store, and the tile must exist. The regression is asserted
+      in `sniffed_bytes_not_the_url_decide_what_is_stored`: the same 19 MB gif is
+      accepted as the artwork (`media::MAX_MEDIA_BYTES`, 96 MB) and still refused as
+      **cover art** (`MAX_COVER_BYTES`, 16 MB). A refusal must name the size, the
+      limit and what to do instead (`is 18 MB, over this app's 16 MB limit for cover
+      art`, `… save the file and add it with + Images`), never a raw byte count.
+
+   39. **Schema v10: an old vault upgrades without losing one tag** (#76 stage
+      S1). Unlock a field-test vault made before this change: the grid holds the
+      same items, every item's tag chips are the tags it had (the rebuild reuses
+      the old tag ids, so `item_tags` never moves), and the schema is at v10. The
+      automated trio that pins it, measured 2026-11-26 with `cargo test
+      --workspace` = **146 passed, 0 failed, 8 ignored** (goon-core 40, desktop
+      100 + 8 ignored, vault 4, locator 2):
+
+      - `v10_rebuild_keeps_links_folds_names_and_backfills_facts` builds a
+        v9-shaped vault by hand (6 tags, 6 item-links, 2 media rows), runs the
+        migration twice, and asserts all **6** links still point at the tags they
+        used to; `female:big_breasts` folds to `big_breasts` while `foo:bar`
+        folds to **itself** (an unknown prefix is part of the tag); **0** rows
+        gained a site (the backfill never invents provenance, invariant 21);
+        `f95-completed` became `site_flag`; and the two media rows came back with
+        `bytes` **6** and **7** — the exact plaintext lengths — the gif
+        `animated = 1` and the jpeg `animated = NULL`.
+      - `encrypted_media_length_equals_the_plaintext_length` runs the very
+        statement the backfill uses (`bytes = length(data)`) inside a **real
+        SQLCipher vault** on a body of **1 048 613 bytes** (1 MiB + 37, many
+        pages deep) and gets **1 048 613** back, and the BLOB round-trips byte
+        for byte. Every `size>` query depends on that being true.
+      - `animation_comes_from_the_container_chunks` proves `animated` is read
+        from the file rather than its name: `image`'s own encoder gives
+        `Some(false)` for a 1-frame gif and `Some(true)` for a 2-frame one; a PNG
+        with an `acTL` chunk and a WebP with an `ANMF` chunk are `Some(true)`; an
+        mp4 is **`None`** — not probed, which is not the same as "not animated".
 
 ## 4. House rules that prevent whole classes of damage
 
