@@ -148,15 +148,41 @@ const PAGE = {
       }
       await sleep(1500);
     }
-    // anything the import made is stored in the vault: the viewer only plays a
-    // video whose bytes are inside it, which is the case the report is about
+    // anything new gets the treatment its kind allows: a video clip is stored in
+    // the vault (the viewer only plays bytes that are inside it), and a video
+    // import is stored the same way. video_info first, because the #64 403
+    // report needs to know what the app believes about the source BEFORE it asks
+    // the host for a single byte.
     const now = await ids();
     for (const id of [...now].filter((x) => !before.has(x))) {
+      try {
+        const info = await inv('video_info', { itemId: id });
+        out.push('video_info ' + id + ': ' + JSON.stringify(info));
+      } catch (e) {
+        out.push('video_info ' + id + ': ' + String(e));
+      }
       try {
         const r = await inv('store_video', { itemId: id });
         out.push('store_video ' + id + ': ' + JSON.stringify(r));
       } catch (e) {
         out.push('store_video ' + id + ': ' + String(e));
+        // #64, 2026-11-25: the reported failure was an http 403 Forbidden on a
+        // rule34 mp4 clip, while the file host answers 200 to the same request
+        // (measured in http.rs live_site_answers). Retry after a re-enrich and
+        // print both verdicts, so the answer says whether the block moves with
+        // the metadata call or sits on the file host.
+        try {
+          const en = await inv('re_enrich_item', { itemId: id });
+          out.push('re_enrich ' + id + ': ' + JSON.stringify(en));
+        } catch (e) {
+          out.push('re_enrich ' + id + ': ' + String(e));
+        }
+        try {
+          const r2 = await inv('store_video', { itemId: id });
+          out.push('store_video retry ' + id + ': ' + JSON.stringify(r2));
+        } catch (e) {
+          out.push('store_video retry ' + id + ': ' + String(e));
+        }
       }
     }
     for (let i = 0; i < 90; i += 1) {

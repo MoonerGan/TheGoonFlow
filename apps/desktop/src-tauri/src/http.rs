@@ -192,7 +192,9 @@ mod ua_policy_tests {
         String::new()
     }
 
-    fn locked_down_state() -> Core {
+    /// Shared with the live probe below: a Core with no vault attached, so the
+    /// clients carry no proxy and the probe measures the plain route.
+    pub(crate) fn locked_down_state() -> Core {
         Core {
             inner: Arc::new(Mutex::new(Inner {
                 vault_root: None,
@@ -509,9 +511,114 @@ mod live_probe {
             crate::ingest::UA,
             Some("https://rule34.xxx"),
             None,
+            true,
+        )
+        .await;
+
+        // 2026-11-25, the URL the user reported as `http 403 Forbidden` when
+        // `store_video` asked for it (video.rs:133-137: file_client_for +
+        // REFERER "https://{site}"). The same URL answers 200 / 59 MB to a
+        // browser and to a plain node fetch with those exact headers, so the
+        // question this probe answers is: what does the *app's* stack get, and
+        // does the answer carry Cloudflare markers (a bot check) or not.
+        let mp4 = "https://ahri2mp4.rule34.xxx//images/7158/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771";
+        println!("--- rule34 mp4 host: the reported 403, replayed on our stack ---");
+        ask(
+            "ahri2mp4, file UA + referer site (h2)",
+            mp4,
+            FILE_UA,
+            Some("https://ahri2mp4.rule34.xxx"),
+            None,
             false,
         )
         .await;
+        ask(
+            "ahri2mp4, file UA + referer site (http1)",
+            mp4,
+            FILE_UA,
+            Some("https://ahri2mp4.rule34.xxx"),
+            None,
+            true,
+        )
+        .await;
+        ask(
+            "ahri2mp4, file UA, referer rule34.xxx",
+            mp4,
+            FILE_UA,
+            Some("https://rule34.xxx"),
+            None,
+            false,
+        )
+        .await;
+        ask("ahri2mp4, file UA, no referer", mp4, FILE_UA, None, None, false).await;
+        ask(
+            "ahri2mp4, honest UA, no referer",
+            mp4,
+            crate::ingest::UA,
+            None,
+            None,
+            false,
+        )
+        .await;
+        // The store_video request replayed **verbatim** (video.rs:133-139):
+        // file_client_for(state, 600) + REFERER formatted from the item's site
+        // key. clip_url stores the site as the key `rule34`, not a hostname, so
+        // the referer this sends is `https://rule34`. If this line 403s while the
+        // `ask` rows above 200, the bug is ours and it is the referer.
+        {
+            let state = crate::http::ua_policy_tests::locked_down_state();
+            for site in ["rule34", "ahri2mp4.rule34.xxx", "rule34.xxx"] {
+                let client = file_client_for(&state, 600).expect("file client");
+                let r = client
+                    .get(mp4)
+                    .header(reqwest::header::REFERER, format!("https://{site}"))
+                    .send()
+                    .await;
+                match r {
+                    Ok(r) => {
+                        let st = r.status().as_u16();
+                        let ct = r
+                            .headers()
+                            .get(reqwest::header::CONTENT_TYPE)
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or("?")
+                            .to_string();
+                        let landed = r.url().to_string();
+                        let n = r.bytes().await.map(|b| b.len()).unwrap_or(0);
+                        let hop = if landed != mp4 {
+                            format!("  (landed on {landed})")
+                        } else {
+                            String::new()
+                        };
+                        println!("store_video replay, referer https://{site:<22} {st:<3} {ct} {n} B{hop}");
+                    }
+                    Err(e) => println!("store_video replay, referer https://{site:<22} TRANSPORT {e}"),
+                }
+            }
+        }
+        // A range request is what a streaming player would send (#64): does this
+        // host honour `Range` at all, and does that change what answers 403?
+        {
+            let r = client(FILE_UA, true, false)
+                .get(mp4)
+                .header(reqwest::header::RANGE, "bytes=0-65535")
+                .send()
+                .await;
+            match r {
+                Ok(r) => {
+                    let st = r.status().as_u16();
+                    let ar = r
+                        .headers()
+                        .get(reqwest::header::ACCEPT_RANGES)
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or("-")
+                        .to_string();
+                    let n = r.bytes().await.map(|b| b.len()).unwrap_or(0);
+                    println!("ahri2mp4, file UA + Range 0-65535            {st:<3} {n} B accept-ranges={ar}");
+                }
+                Err(e) => println!("ahri2mp4, file UA + Range 0-65535            TRANSPORT {e}"),
+            }
+        }
 
         println!("--- e621: api json, then the file that json names ---");
         if ask(

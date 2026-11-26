@@ -53,7 +53,60 @@ fn local_path(url: &str) -> Option<PathBuf> {
 }
 
 fn human_mb(bytes: u64) -> String {
-    format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    format!("{:.1} MB", bytes as f64 / 1024.0 / 1024.0)
+}
+
+/// `host[:port]` of an http(s) URL, lower-cased. Hand-rolled on purpose: no need
+/// to fail a download because a URL parsed imperfectly, and this binary has no
+/// URL-craving dependency here.
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r)?;
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    (!authority.is_empty()).then(|| authority.to_ascii_lowercase())
+}
+
+/// What the request ends up answering for, once redirects are followed.
+fn redirect_hop(from: &str, to: &str) -> bool {
+    url_host(from).is_some() && url_host(to).is_some() && url_host(from) != url_host(to)
+}
+
+/// Does this `Content-Type` mean "an HTML page answered", i.e. an interstitial
+/// (CAPTCHA / hotlink warning / login wall) rather than the file we asked for?
+/// A file host that does not name a type at all is not an HTML page.
+fn is_html_ct(ct: Option<&str>) -> bool {
+    match ct {
+        Some(v) => {
+            let v = v.to_ascii_lowercase();
+            v.contains("text/html") || v.contains("application/xhtml")
+        }
+        None => false,
+    }
+}
+
+/// The `Referer` a file request must carry (#64, measured 2026-11-25).
+///
+/// The old line formatted `https://{site}` from the **site key** the sources row
+/// stores — `rule34`, not a hostname. Measured against the URL the user reported
+/// (`…/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771`, live in `http.rs`'s
+/// `live_site_answers`):
+///
+/// ```text
+/// referer https://rule34                -> 403 text/html 77 684 B  (Rule34.xxx CAPTCHA page)
+/// referer https://ahri2mp4.rule34.xxx   -> 200 video/mp4 59 083 373 B
+/// referer https://rule34.xxx            -> 200 video/mp4 59 083 373 B
+/// ```
+///
+/// rule34's hotlink check treats a referer that is not a real page as a hotlink:
+/// it 302s to `hl.rule34.xxx/public/hotlink.php`, and reqwest follows that hop
+/// into a CAPTCHA page whose status is 403 — which is the `http 403 Forbidden`
+/// the user saw for a file that plays fine in a browser. So the referer is
+/// derived from **the URL that names the file**: the site key never enters it.
+fn referer_for(url: &str) -> String {
+    let origin_end = url
+        .find("://")
+        .and_then(|i| url[i + 3..].find(['/', '?', '#']).map(|j| i + 3 + j))
+        .unwrap_or(url.len());
+    url[..origin_end].trim_end_matches('/').to_string()
 }
 
 pub fn video_info(state: &Core, item_id: &str) -> Result<VideoInfo, String> {
@@ -128,17 +181,56 @@ pub async fn store_video(
             return Err("stopped".into());
         }
         // #50: this is file bytes from a content host, so the CDN sees an
-        // ordinary browser UA. The referer (which boorus check) is unchanged,
-        // and the polite lane above still spaces the requests.
+        // ordinary browser UA. The polite lane above still spaces the requests.
+        // #64: and the referer comes from the URL that names the file, never
+        // from the app's site key — that is what got us the hotlink CAPTCHA.
         let client = crate::http::file_client_for(state, 600)?;
         let resp = client
             .get(&url)
-            .header(reqwest::header::REFERER, format!("https://{site}"))
+            .header(reqwest::header::REFERER, referer_for(&url))
             .send()
             .await
             .map_err(|e| format!("download failed: {e}"))?;
+        let final_url = resp.url().to_string();
+        let ct = resp
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         if !resp.status().is_success() {
-            return Err(format!("http {}", resp.status()));
+            // A file host that means "no" usually says so with an HTML page
+            // (CAPTCHA, hotlink warning, login wall). Say which host answered,
+            // and from where, instead of a bare status the user cannot act on.
+            let hop = if redirect_hop(&url, &final_url) {
+                format!(
+                    " The host redirected the request to {} and that answered {}.",
+                    url_host(&final_url).unwrap_or_else(|| "?".into()),
+                    resp.status()
+                )
+            } else {
+                String::new()
+            };
+            return Err(format!(
+                "{} refused the download (http {}).{hop} Nothing was stored.",
+                url_host(&url).unwrap_or_else(|| "the host".into()),
+                resp.status()
+            ));
+        }
+        if is_html_ct(ct.as_deref()) {
+            // 200 with an HTML body is the other shape of the same answer.
+            return Err(format!(
+                "{} sent a web page instead of the video (content-type {}, from {}), \
+                 so nothing was stored. Its hotlink protection does not accept this \
+                 app's request — save the file in your browser and use + Video, \
+                 or report the link so the ingestor can be taught.",
+                url_host(&final_url).unwrap_or_else(|| "the host".into()),
+                ct.unwrap_or_else(|| "?".into()),
+                if redirect_hop(&url, &final_url) {
+                    "a redirect hop"
+                } else {
+                    "the same url"
+                }
+            ));
         }
         if let Some(cl) = resp.content_length() {
             if cl > STORE_CAP {
@@ -314,5 +406,41 @@ mod tests {
         assert_eq!(media::video_mime("WEBM"), Some("video/webm"));
         assert_eq!(media::video_mime("exe"), None);
         assert_eq!(STORE_CAP, 512 * 1024 * 1024);
+    }
+
+    /// #64, the 403 the user reported: the referer must be built from the URL
+    /// that names the file, never from the app's site key. `https://rule34` is
+    /// not a page any hotlink check can accept, and rule34 answers it with a
+    /// redirect into a CAPTCHA (measured in http.rs::live_site_answers: 403 /
+    /// 77 684 B of HTML, where the URL's own origin gives 200 / 59 MB).
+    #[test]
+    fn referer_is_the_file_origin_not_the_site_key() {
+        let cdn = "https://ahri2mp4.rule34.xxx//images/7158/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771";
+        assert_eq!(referer_for(cdn), "https://ahri2mp4.rule34.xxx");
+        assert_eq!(
+            referer_for("https://api-cdn-us-mp4.rule34.xxx/images/1440/x.mp4?10938771"),
+            "https://api-cdn-us-mp4.rule34.xxx"
+        );
+        assert_eq!(referer_for("https://host.example"), "https://host.example");
+        assert_eq!(
+            referer_for("http://127.0.0.1:8080/a/b.webm"),
+            "http://127.0.0.1:8080"
+        );
+        // the shape that caused the bug: a site key is not a hostname
+        assert_ne!(referer_for(cdn), format!("https://{}", "rule34"));
+        assert_eq!(url_host(cdn).as_deref(), Some("ahri2mp4.rule34.xxx"));
+    }
+
+    #[test]
+    fn html_answers_are_named_not_guessed() {
+        assert!(is_html_ct(Some("text/html; charset=UTF-8")));
+        assert!(is_html_ct(Some("application/xhtml+xml")));
+        assert!(!is_html_ct(Some("video/mp4")));
+        assert!(!is_html_ct(None), "no content-type is not a web page");
+        let mp4 = "https://ahri2mp4.rule34.xxx//images/7158/x.mp4?8161771";
+        let hop = "https://hl.rule34.xxx/public/hotlink.php?img=x.mp4";
+        assert!(redirect_hop(mp4, hop));
+        assert!(!redirect_hop(mp4, mp4));
+        assert!(!redirect_hop(mp4, "https://ahri2mp4.rule34.xxx/other.mp4"));
     }
 }

@@ -381,6 +381,19 @@ the board's *In review* column is the current list.
       stored must show the sentence, must not print a pixel size, and must leave the zoom
       buttons disabled with the readout at `?`.
 
+   37. **A linked video file can be stored in the vault** (#64, 2026-11-25: the
+      report was `http 403 Forbidden` on a rule34 `.mp4` link that plays in a
+      browser). Press *Store copy in vault* on an item whose source is a direct
+      file link: it must store and report its size`or, if the host really
+      refuses, the message must name the host that answered, the status, and where
+      a redirect took the request`never a bare `http 403 Forbidden`. To check the
+      wording without a real download, point the source at a local stub that
+      answers `200` with `text/html` (rule34's real answer to a wrong referer is
+      exactly that, behind a `302` to `hotlink.php`): the store must refuse,
+      say it was a web page rather than a video, and leave **no** `kind=video` row
+      holding the CAPTCHA. The replay lives in `http::live_probe` (ignored, live):
+      `store_video replay, referer https://rule34 -> 403` while the URL's own origin
+      and `https://rule34.xxx` both give `200 video/mp4 59 083 373 B`.
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

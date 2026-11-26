@@ -511,6 +511,29 @@ tools/
       * `endVaultSession()` calls `clearToasts()` next to `clearMediaCache()`: a
         toast can name an item, a site or a path, so it dies with the session like
         every other decrypted string. Nothing here is persisted anywhere.
+25. **A file request carries the referer of the origin that **names the file**,
+    never the app's site key (#64, measured 2026-11-25).**
+`store_video` used to send `REFERER: https://{site}` where `site` is
+    the **key** the `sources` row stores (`rule34`), which is not a hostname. Replay
+    with this app's own client (`http::live_probe`):
+
+      ```text
+      referer https://rule34                403 text/html 77 684 B  (Rule34.xxx CAPTCHA)
+      referer https://ahri2mp4.rule34.xxx   200 video/mp4 59 083 373 B
+      referer https://rule34.xxx            200 video/mp4 59 083 373 B
+      referer (none)                        200 video/mp4 59 083 373 B
+      ```
+
+    rule34's hotlink check answers the site-key shape with `302 ->
+    hl.rule34.xxx/public/hotlink.php`, and following that hop lands on a
+    CAPTCHA page whose status is 403 - the `http 403 Forbidden` the report
+    named, for a file that plays in a browser. Note this does **not** reverse
+    item 10 for images (`wimg.rule34.xxx` answers `200 image/jpeg` to both the
+    CDN and the site referer); hosts validate differently per route, so re-measure
+    rather than generalise. Two rules follow: a download error must name the host
+    that answered, the status, and where a redirect took the request (never a bare
+`http {}`); and a `200` whose `Content-Type` is HTML is a web page, not a
+    file, so it is refused instead of being stored as a video row.
 
 ## 5. Testing
 
