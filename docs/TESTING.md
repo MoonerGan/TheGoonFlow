@@ -800,6 +800,71 @@ the board's *In review* column is the current list.
          `OFFSET` in `crates/goon-core/src/db.rs`: the only hits are `list_items`, which
          stage S5 deletes, and this counter-example.
 
+    45. **What a filtered page costs, and what a keystroke may pay** (#76 plan open
+       decision 9, measured 2026-11-26; DEVELOPMENT invariants 30 and 31). The budget in
+       plan §6 was written before anything was measured, so this item is where the
+       real numbers live: 100k items, 21 reps, p50/p95, plaintext SQLite (a floor, same
+       caveat item 41 carries), logged in `tools/filter-scale-20261126h.log`. Four probe
+       sections, each printing `EXPLAIN QUERY PLAN` and the row count beside every
+       timing, because a fast empty page is not a measurement:
+       - **An index on the grid’s own pair is not the fix.** `CREATE INDEX
+         items_updated_id_idx ON items (updated_at DESC, id)` does what the review
+         predicted for the plans that can use it (`size>100mb type:image` page 1 goes to
+         `SCAN items USING INDEX items_updated_id_idx` with no temp B-tree, 3 ms → 2 ms;
+         the `OR` cursor becomes two seeks, `(updated_at<?)` and
+         `(updated_at=? AND id>?)`) and does nothing at all to the slow query:
+         `big_breasts` (64 092 matches) is 196 ms page 1 with the index and 196 ms
+         without it. Not added.
+       - **A row-value cursor really can seek, and really is the wrong comparison here.**
+         With `(updated_at DESC, id DESC)` and an index on that pair, the plan says
+         `SEARCH items USING INDEX items_updated_id_desc_idx ((updated_at,id)<(?,?))` —
+         a range seek, exactly the thing the `OR` form cannot do. But for the shipping
+         order (`updated_at DESC, items.id`) a row value compares the id in the wrong
+         direction: `a_row_value_cursor_is_the_wrong_comparison_for_a_mixed_direction_order`
+         runs both forms over a batch stamped in one second and shows the row-value read
+         dropping `q_small` — and the probe cannot show that on its own, because its 100k
+         fixture stamps every row with a different second, so all three page reads agree
+         there and the tie only exists in a fixture built like this test. Made correct by ordering both halves `DESC`, it wins nothing
+         measurable (page 214 of `big_breasts`: 89/94 ms by row-value, 90/91 ms by the shipping cursor). `db::AFTER_CURSOR`
+         stays.
+       - **The count is the part a keystroke must not pay, and now it can be skipped.**
+         `db::page_items` is the page without the paired total, and `search_items` takes
+         `with_count`. Measured cost of the split at 100k items:
+
+         | query | page alone | count alone | page + total |
+         | --- | --- | --- | --- |
+         | `size>100mb type:image` (17 018 matches) | 3/3 ms | 151/152 ms | 155/155 ms | |
+         | `width<400 type:image -has:thumb` (646) | 80/80 ms | 149/150 ms | 227/229 ms | |
+         | `big_breasts` (64 092) | 196/197 ms | 86/86 ms | 282/283 ms | |
+
+         `a_page_without_the_count_says_it_has_no_number` pins that the page is identical
+         either way and that an uncounted page carries no number, and
+         `a_page_without_a_count_crosses_as_null_and_never_as_zero` (desktop) pins the
+         wire spelling: `"total":null`, never `"total":0`.
+       - **The 196 ms is the predicate’s shape, not the index and not the paging.**
+         Tag-first (`items.id IN (SELECT …)`, plan §6) against row-first (`EXISTS (…
+         WHERE it.item_id = items.id …)`), page 1 p50, at six cardinalities built by
+         synthetic alias tags (created and dropped inside the section, so the rest of the
+         log still describes the schema the app creates):
+
+         | items matched | tag-first | row-first |
+         | --- | --- | --- |
+         | 1 | 0 ms | 97 ms |
+         | 157 | 0 ms | 101 ms |
+         | 1 588 | 3 ms | 100 ms |
+         | 7 995 | 19 ms | 86 ms |
+         | 32 002 | 85 ms | 38 ms |
+         | 64 092 | **196 ms** | **1 ms** |
+
+         The curves cross at about a fifth of the library; the decision query that would
+         pick between them costs 0-1 ms. Recorded as plan open decision 13, and the
+         reason §6’s ~50 ms is still reachable without FTS5.
+       - `the_stamp_is_one_width_so_the_text_order_and_the_numeric_order_agree` is the
+         check for invariant 31: it pins the width of what `now_epoch_text()` writes *and*
+         demonstrates the disagreement on a mixed-width fixture (TEXT ranks
+         `'999999999'` above `'1000000000'`, a number ranks it below), so the test can
+         actually fail rather than restate a comment.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

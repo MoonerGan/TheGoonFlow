@@ -343,6 +343,13 @@ CREATE INDEX media_item_kind_idx  ON media(item_id, kind);        -- has:/stored
   (`WHERE items.id IN (SELECT it.item_id FROM item_tags it JOIN tags t …WHERE t.fold = ?)`)
   instead of a per-row EXISTS probe per item; with `item_tags_tag_idx` an AND of
   five tags is five index seeks + intersect.
+  **Measured 2026-11-26, and it is half right** (`filter_scale_probe`, plan §9
+  decision 9): tag-first is the cheap shape while a token matches a small share of
+  the library — 0 ms at 157 items, 19 ms at 7 995 — and the expensive one once it
+  matches a large share, because the id list has to be sorted before `LIMIT` can
+  stop: 196 ms at 64 092 items, where the row-side `EXISTS` probe over the same
+  index pages the identical rows in 1 ms. The plan's shape stays the default; the
+  case where it loses is open decision 13.
 - Title LIKE stays un-indexed: a 100k-row `LIKE '%…%'` scan under SQLCipher is
   ~tens of ms and honest; FTS5 is not bought this pass (open decision 9).
 - Range predicates read `media.bytes/width/height/duration_ms` — plain columns,
@@ -444,6 +451,45 @@ New checks this card needs:
    vanishing. Recommendation: keep them as presets.
 9. **FTS5 or LIKE.** LIKE un-indexed at ≤100k (recommended; measure at S3/S7
    before buying an index), FTS5 only if the scale probe misses the budget.
+   **Measured 2026-11-26. FTS5 is still not the answer — the predicate's *shape*
+   is.** Three options through `filter_scale_probe` at 100k items (its `index
+   options`, `both halves DESC`, `tag predicate shape` and `cross over` sections;
+   `tools/filter-scale-20261126h.log`, plaintext SQLite, so a floor):
+   - an index on the grid's own pair, `items (updated_at DESC, id)`: it does remove
+     the `USE TEMP B-TREE FOR ORDER BY` from the fact-driven plans (`size>100mb
+     type:image` page 1 becomes `SCAN items USING INDEX items_updated_id_idx`, 3 ms →
+     2 ms) and it does turn the `OR` cursor into two seeks (`(updated_at<?)` plus
+     `(updated_at=? AND id>?)`) — and it changes **nothing** on the query that is
+     actually slow: `big_breasts` (64 092 matches) pages in 196 ms with it and 196 ms
+     without it, because that plan starts from the tag side and sorts the id list.
+     **Not bought**: ~1 ms on the queries it touches, nothing on the one that needs it.
+   - a row-value cursor, `(updated_at, id) < (?, ?)`: the mechanism is real — the plan
+     says `SEARCH items USING INDEX items_updated_id_desc_idx ((updated_at,id)<(?,?))`,
+     a range seek the `OR` form cannot get. It is also the **wrong comparison** for
+     `updated_at DESC, items.id`, because a row value compares every component in one
+     direction: `a_row_value_cursor_is_the_wrong_comparison_for_a_mixed_direction_order`
+     shows it dropping a row out of a batch stamped in the same second. Made correct by
+     ordering both halves `DESC` (the tie-break direction is free, the ids are opaque),
+     it buys nothing measurable — page 214 of `big_breasts` 90 ms against the `OR`
+     form's 95 ms. `db::AFTER_CURSOR` stays as it is.
+   - the predicate's **shape**, which is where the 196 ms actually lives. Tag-first
+     (`items.id IN (SELECT …)`, the choice plan §6 made) is right for the long tail and
+     wrong for a popular tag: it materialises the whole match list and sorts it.
+     Row-first (`EXISTS (… WHERE it.item_id = items.id …)`) walks `items` in the grid's
+     own order and probes per row, so it stops once the page is full. Page 1, p50:
+
+     | items matched | tag-first | row-first |
+     | --- | --- | --- |
+     | 1 → 157 | 0 ms | 97-101 ms |
+     | 1 588 | 3 ms | 100 ms |
+     | 7 995 | 19 ms | 86 ms |
+     | 32 002 | 85 ms | 38 ms |
+     | 64 092 | **196 ms** | **1 ms** |
+
+     The curves cross at roughly a fifth of the library, and the decision itself —
+     count the token's postings — costs 0-1 ms. So §6's ~50 ms is reachable for every
+     query shape with no new index and no FTS5, by choosing the shape per token: that
+     is open decision 13.
 10. **Pagination** — **closed 2026-11-26 by measurement, not by preference.** The
     grid pages by cursor (`after = { updatedAt, id }`, the sort key of the last row on
     screen); there is no `OFFSET` anywhere in the query path. Cost, at 100k items,
@@ -465,6 +511,15 @@ New checks this card needs:
     `status:`). Alternative kept on the table: Games keeps its status rails and
     only the rest is replaced — smaller change, but two filter mental models live
     on, which is what the user asked to end.
+13. **Tag predicate shape, chosen per token** (opened 2026-11-26 by the measurements
+   under decision 9). Tag-first for the long tail, row-first once a token's postings
+   pass a threshold — suggested ~20% of the view's rows, where the two curves cross,
+   so a wrong guess near the line costs tens of ms rather than hundreds. Needs: the
+   plan to carry the shape, so the page, the paired count, `search_item_ids`, the tag
+   cloud and the site counts all run one predicate as they do today; `db` to answer
+   "how many postings does this token have" (measured at 0-1 ms); and a test that the
+   two shapes select the same rows, because they are only equivalent if the `fold`
+   test is identical.
 
 ---
 

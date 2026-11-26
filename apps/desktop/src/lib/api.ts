@@ -264,12 +264,15 @@ export type QueryView = "media" | "games";
 
 /** One grid page **plus** the size of the whole result it came from. `total` is
  *  not the page length: 300 rows out of 64 000 matches has to say 64 000
- *  (rulings C). `needsFacts` means the query read a fact this vault may never
- *  have measured, so `total === 0` is "not measured yet", not an answer
- *  (invariant 27). */
+ *  (rulings C). `null` means the call asked for the page only (`withCount: false`)
+ *  — the shape a keystroke pays, because the count is a second statement over the
+ *  whole result (measured at 100k items: 46-151 ms of count, against a page that is
+ *  3 ms for a fact query and 196 ms for a dense tag).
+ *  means the query read a fact this vault may never have measured, so a zero
+ *  `total` is "not measured yet", not an answer (invariant 27). */
 export type SearchPage = {
   items: ItemSummary[];
-  total: number;
+  total: number | null;
   needsFacts: boolean;
 };
 
@@ -296,12 +299,14 @@ export const searchItems = (
   query?: string,
   limit = 300,
   after?: PageCursor,
+  withCount = true,
 ) =>
   invoke<SearchPage>("search_items", {
     view,
     query: query ?? null,
     limit,
     after: after ?? null,
+    withCount,
   });
 
 /** Every id the query matches, in grid order, no page limit: what "select all"

@@ -107,7 +107,7 @@ fn main() -> Result<(), String> {
             .plan();
         let matches = db::count_matches(&conn, Scope::Media, &plan).expect("counts");
         let page =
-            timed(|| db::search_items(&conn, Scope::Media, &plan, PAGE, None).expect("page"));
+            timed(|| db::search_items(&conn, Scope::Media, &plan, PAGE, None, true).expect("page"));
         let total = timed(|| db::count_matches(&conn, Scope::Media, &plan).expect("counts"));
         println!(
             "{:<44} {:>8} ms {:>8} ms {:>8} ms {:>8} ms {:>9}",
@@ -132,9 +132,24 @@ fn main() -> Result<(), String> {
     explain(&conn, "size>100mb");
     explain(&conn, "type:video");
 
-    // Last, because this section ends by deleting rows: decision 10 (plan §9),
-    // measured instead of argued.
+    // Decision 9 and the two cursor forms, measured with and without an index on the
+    // grid sort key. Each of these sections creates and drops what it needs, so the
+    // ones after it still describe the schema the app creates.
+    index_and_cursor_forms(&conn).map_err(|e| format!("index options: {e}"))?;
+    descending_pair(&conn).map_err(|e| format!("descending pair: {e}"))?;
+    // The last unmeasured option in plan §9 decision 9, and the one that decides
+    // whether the ~50 ms target is a budget the board has to restate or one the
+    // code can meet.
+    tag_predicate_shape(&conn).map_err(|e| format!("tag predicate shape: {e}"))?;
+
+    // Last of the read-only sections, because it ends by deleting rows: decision 10
+    // (plan §9), measured instead of argued.
     paging(&conn).map_err(|e| format!("paging: {e}"))?;
+
+    // After everything else, because it is the only section that adds rows: the
+    // synthetic alias tags its cardinality ladder needs are dropped again before it
+    // returns.
+    cardinality_crossover(&conn).map_err(|e| format!("cardinality crossover: {e}"))?;
 
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
@@ -385,6 +400,690 @@ fn explain_shape(conn: &Connection, label: &str, sql: &str, params: &[query::Val
     {
         println!("  {:<12} {}", label, row.expect("explain row"));
     }
+}
+
+/// The composite index the review asked about, by name and by DDL. An index's column
+/// list takes bare column names, so the DDL writes `id` where the SQL writes `items.id`.
+const COMPOSITE_INDEX: &str = "items_updated_id_idx";
+const COMPOSITE_DDL: &str = "CREATE INDEX items_updated_id_idx ON items (updated_at DESC, id)";
+
+fn index_exists(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+        [name],
+        |r| r.get::<_, bool>(0),
+    )
+}
+
+/// Puts the schema in one of the two worlds and refreshes the planner's statistics,
+/// because comparing plans without re-running `ANALYZE` compares one informed planner
+/// against one guessing.
+fn set_index(conn: &Connection, want: bool) -> rusqlite::Result<()> {
+    if index_exists(conn, COMPOSITE_INDEX)? == want {
+        return Ok(());
+    }
+    if want {
+        conn.execute_batch(COMPOSITE_DDL)?;
+    } else {
+        conn.execute_batch(&format!("DROP INDEX {COMPOSITE_INDEX}"))?;
+    }
+    conn.execute("ANALYZE", [])?;
+    Ok(())
+}
+
+/// The page on its own, read through the shipping function rather than a copy of
+/// its SQL: `db::page_items` is what a keystroke calls when `with_count` is false,
+/// and `db::search_items` is that plus the count. Timing the two is the split the
+/// review asked for - what a keystroke can afford, and what it cannot.
+fn page_only(
+    conn: &Connection,
+    plan: &query::Plan,
+    cursor: Option<&db::PageCursor>,
+) -> Vec<String> {
+    db::page_items(conn, Scope::Media, plan, PAGE, cursor)
+        .expect("page runs")
+        .into_iter()
+        .map(|row| row.id)
+        .collect()
+}
+
+/// The other cursor form: SQLite's row-value comparison, legal since 3.15, which
+/// compares componentwise with **one operator for every component**. Whether that
+/// means the same thing as `updated_at DESC, items.id ASC` is exactly the question, so
+/// it is measured here and pinned by a fixture test.
+fn row_value_page(
+    conn: &Connection,
+    where_sql: &str,
+    plan: &query::Plan,
+    cursor: &db::PageCursor,
+) -> Result<Vec<String>, String> {
+    let sql = row_value_sql(where_sql);
+    let mut params = plan.params.clone();
+    params.push(query::Value::Text(cursor.updated_at.clone()));
+    params.push(query::Value::Text(cursor.id.clone()));
+    params.push(query::Value::Int(PAGE));
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(s) => s,
+        Err(e) => return Err(format!("row-value form does not prepare: {e}")),
+    };
+    stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        r.get::<_, String>(0)
+    })
+    .map(|rows| rows.collect::<Result<Vec<_>, _>>().expect("row-value rows"))
+    .map_err(|e| format!("row-value form does not run: {e}"))
+}
+
+fn row_value_sql(where_sql: &str) -> String {
+    format!(
+        "{}{where_sql} AND (items.updated_at, items.id) < (?,?){ORDER} LIMIT ?",
+        db::PAGE_COLUMNS
+    )
+}
+
+fn row_value_params(plan: &query::Plan, cursor: &db::PageCursor) -> Vec<query::Value> {
+    let mut params = plan.params.clone();
+    params.push(query::Value::Text(cursor.updated_at.clone()));
+    params.push(query::Value::Text(cursor.id.clone()));
+    params.push(query::Value::Int(PAGE));
+    params
+}
+
+/// Plan §9 decision 9, measured rather than argued. Two hypotheses and one split:
+///
+/// * does an index on the grid's **own** sort key (`updated_at DESC, id`) remove the
+///   `USE TEMP B-TREE FOR ORDER BY` the tag queries pay, and what does it do to a
+///   query matching most of the library versus one matching 646 rows;
+/// * does a row-value cursor become a range **seek** where the `OR` form filters - and
+///   is it even the same comparison as a mixed-direction order;
+/// * how much of a grid call is the page and how much is the paired `COUNT(*)`.
+///
+/// Every timing is printed beside its row count, because a deep page that returns
+/// nothing is fast for a reason that has nothing to do with the question. The index is
+/// left exactly as `init_schema` made it, so `paging` and `delete_shift` still
+/// describe what ships.
+fn index_and_cursor_forms(conn: &Connection) -> rusqlite::Result<()> {
+    let version: String = conn.query_row("SELECT sqlite_version()", [], |r| r.get(0))?;
+    let shipped = index_exists(conn, COMPOSITE_INDEX)?;
+    println!("\nsqlite {version}; the app schema creates {COMPOSITE_INDEX}: {shipped}");
+
+    for want_index in [false, true] {
+        set_index(conn, want_index)?;
+        println!(
+            "\n=== cursor page, {} the composite index ===",
+            if want_index { "WITH" } else { "WITHOUT" }
+        );
+        for text in [
+            "big_breasts",
+            "female:big_breasts",
+            "size>100mb type:image",
+            "width<400 type:image -has:thumb",
+        ] {
+            let plan = query::parse(text, Scope::Media)
+                .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
+                .plan();
+            let where_sql = db::planned_where(Scope::Media, &plan);
+            let total = db::count_matches(conn, Scope::Media, &plan)?;
+            let pages = (total + PAGE - 1) / PAGE;
+            println!("\n{text:?}: {total} matches in {pages} pages of {PAGE}");
+
+            let (p1_sql, p1_params) = db::page_statement(Scope::Media, &plan, None, PAGE);
+            explain_shape(conn, "page 1", &p1_sql, &p1_params);
+
+            // A cursor for the **last** page, built from the last row of the page
+            // before it. The cursor is a value, and walking 213 pages to get one would
+            // time the walk instead of the seek; taking it from the last page itself
+            // would ask for the page after the end and time an empty result.
+            let mut deep: Option<db::PageCursor> = None;
+            if pages >= 2 {
+                if let Some((id, at)) =
+                    offset_page(conn, &where_sql, &plan, (pages - 2) * PAGE).last()
+                {
+                    deep = Some(db::PageCursor {
+                        updated_at: at.clone(),
+                        id: id.clone(),
+                    });
+                }
+            }
+            if let Some(cursor) = &deep {
+                let (sql, params) = db::page_statement(Scope::Media, &plan, Some(cursor), PAGE);
+                explain_shape(conn, "deep cursor", &sql, &params);
+                explain_shape(
+                    conn,
+                    "row-value",
+                    &row_value_sql(&where_sql),
+                    &row_value_params(&plan, cursor),
+                );
+            }
+
+            let first = timed(|| page_only(conn, &plan, None));
+            let first_rows = page_only(conn, &plan, None).len();
+            let deep_page = deep.as_ref().map(|c| {
+                (
+                    timed(|| page_only(conn, &plan, Some(c))),
+                    page_only(conn, &plan, Some(c)).len(),
+                )
+            });
+            let with_total =
+                timed(|| db::search_items(conn, Scope::Media, &plan, PAGE, None, true));
+            let count_only = timed(|| db::count_matches(conn, Scope::Media, &plan));
+            println!(
+                "  page alone, page 1: {} rows, {} ms p50 / {} ms p95",
+                first_rows, first.0, first.1
+            );
+            if let Some(((p50, p95), rows)) = deep_page {
+                println!(
+                    "  page alone, page {pages} (deep cursor): {rows} rows, {p50} ms p50 / {p95} ms p95"
+                );
+            }
+            println!(
+                "  page + total (the call the grid makes today): {} ms p50 / {} ms p95; count alone {} ms / {} ms",
+                with_total.0, with_total.1, count_only.0, count_only.1
+            );
+
+            // Are the two cursor forms the same question? They have to answer with the
+            // same rows in the same order, or one of them is paging a different order,
+            // and the timings below are not comparable.
+            if let Some(cursor) = &deep {
+                let truth: Vec<String> = offset_page(conn, &where_sql, &plan, (pages - 1) * PAGE)
+                    .into_iter()
+                    .map(|(id, _)| id)
+                    .collect();
+                let by_or = page_only(conn, &plan, Some(cursor));
+                match row_value_page(conn, &where_sql, &plan, cursor) {
+                    Ok(by_row) => {
+                        let shared = by_or.iter().filter(|id| by_row.contains(id)).count();
+                        println!(
+                            "  page {pages} by three reads: offset {} rows; shipping cursor {} rows {}; row-value {} rows {}",
+                            truth.len(),
+                            by_or.len(),
+                            if by_or == truth { "matches" } else { "DIFFERS FROM" },
+                            by_row.len(),
+                            if by_row == truth { "matches" } else { "DIFFERS FROM" },
+                        );
+                        if by_or != by_row {
+                            let first_only = by_row
+                                .iter()
+                                .find(|id| !by_or.contains(id))
+                                .cloned()
+                                .unwrap_or_else(|| "none".to_string());
+                            println!(
+                                "    the forms disagree: {shared} rows in common, first row the row-value read shows and the cursor read does not: {first_only}"
+                            );
+                        }
+                    }
+                    Err(e) => println!("  {e}"),
+                }
+            }
+        }
+    }
+
+    set_index(conn, shipped)?;
+    println!("\nindex left as the app schema makes it: {shipped}");
+    Ok(())
+}
+
+/// The cursor form that can be correct **and** seekable. A row-value comparison uses
+/// one direction for every component, so it means the grid's order only when both
+/// halves of that order go the same way - and the tie-break direction is a free
+/// choice, because the ids are opaque. So: order `updated_at DESC, items.id DESC`,
+/// compare `(updated_at, id) < (?, ?)`, and index exactly that pair.
+///
+/// This SQL is written **here**, not in `db.rs`, because it is the candidate, not the
+/// decision. If it wins, `GRID_ORDER`, `AFTER_CURSOR` and `page_statement` take it
+/// over and this section calls them instead of writing its own. The correctness check
+/// is an offset read on the same order: a form that paged a different order gets
+/// caught here rather than timed.
+const DESC_INDEX: &str = "items_updated_id_desc_idx";
+const DESC_INDEX_DDL: &str =
+    "CREATE INDEX items_updated_id_desc_idx ON items (updated_at DESC, id DESC)";
+const DESC_ORDER: &str = " ORDER BY updated_at DESC, items.id DESC";
+
+fn desc_page(
+    conn: &Connection,
+    where_sql: &str,
+    plan: &query::Plan,
+    cursor: Option<&(String, String)>,
+    offset: Option<i64>,
+) -> Vec<(String, String)> {
+    let filter = if cursor.is_some() {
+        " AND (items.updated_at, items.id) < (?,?)"
+    } else {
+        ""
+    };
+    let tail = if offset.is_some() {
+        " LIMIT ? OFFSET ?"
+    } else {
+        " LIMIT ?"
+    };
+    let sql = format!("{}{where_sql}{filter}{DESC_ORDER}{tail}", db::PAGE_COLUMNS);
+    let mut params = plan.params.clone();
+    if let Some((_, at)) = cursor {
+        params.push(query::Value::Text(at.clone()));
+    }
+    if let Some((id, _)) = cursor {
+        params.push(query::Value::Text(id.clone()));
+    }
+    params.push(query::Value::Int(PAGE));
+    if let Some(off) = offset {
+        params.push(query::Value::Int(off));
+    }
+    let mut stmt = conn.prepare_cached(&sql).expect("desc page prepares");
+    stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        Ok((r.get(0)?, r.get(UPDATED_AT_COLUMN)?))
+    })
+    .expect("desc page runs")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("desc page rows")
+}
+
+fn desc_params(plan: &query::Plan, cursor: Option<&(String, String)>) -> Vec<query::Value> {
+    let mut params = plan.params.clone();
+    if let Some((_, at)) = cursor {
+        params.push(query::Value::Text(at.clone()));
+    }
+    if let Some((id, _)) = cursor {
+        params.push(query::Value::Text(id.clone()));
+    }
+    params.push(query::Value::Int(PAGE));
+    params
+}
+
+fn descending_pair(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(DESC_INDEX_DDL)?;
+    conn.execute("ANALYZE", [])?;
+    println!("\n=== both halves DESC, row-value cursor, index on that pair ===");
+    for text in [
+        "big_breasts",
+        "female:big_breasts",
+        "size>100mb type:image",
+        "width<400 type:image -has:thumb",
+    ] {
+        let plan = query::parse(text, Scope::Media)
+            .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
+            .plan();
+        let where_sql = db::planned_where(Scope::Media, &plan);
+        let total = db::count_matches(conn, Scope::Media, &plan)?;
+        let pages = (total + PAGE - 1) / PAGE;
+        println!("\n{text:?}: {total} matches in {pages} pages of {PAGE}");
+
+        let seed = if pages >= 2 {
+            desc_page(conn, &where_sql, &plan, None, Some((pages - 2) * PAGE))
+                .last()
+                .cloned()
+        } else {
+            None
+        };
+        explain_shape(
+            conn,
+            "page 1",
+            &format!("{}{where_sql}{DESC_ORDER} LIMIT ?", db::PAGE_COLUMNS),
+            &desc_params(&plan, None),
+        );
+        let mut deep: Vec<(String, String)> = Vec::new();
+        if let Some(cursor) = &seed {
+            explain_shape(
+                conn,
+                "row-value",
+                &format!(
+                    "{}{where_sql} AND (items.updated_at, items.id) < (?,?){DESC_ORDER} LIMIT ?",
+                    db::PAGE_COLUMNS
+                ),
+                &desc_params(&plan, Some(cursor)),
+            );
+            deep = desc_page(conn, &where_sql, &plan, Some(cursor), None);
+        }
+        let truth: Vec<String> = desc_page(conn, &where_sql, &plan, None, Some((pages - 1) * PAGE))
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        let deep_ids: Vec<String> = deep.iter().map(|(id, _)| id.clone()).collect();
+        println!(
+            "  page {pages}: offset read {} rows, row-value cursor {} rows {}",
+            truth.len(),
+            deep_ids.len(),
+            if deep_ids == truth {
+                "matches"
+            } else {
+                "DIFFERS FROM"
+            }
+        );
+        let first = timed(|| desc_page(conn, &where_sql, &plan, None, None).len());
+        println!(
+            "  page 1, no cursor predicate: {} ms p50 / {} ms p95",
+            first.0, first.1
+        );
+        if seed.is_some() {
+            let deep_time = timed(|| desc_page(conn, &where_sql, &plan, seed.as_ref(), None).len());
+            println!(
+                "  page {pages} by row-value cursor: {} ms p50 / {} ms p95",
+                deep_time.0, deep_time.1
+            );
+        }
+    }
+    conn.execute_batch(&format!("DROP INDEX {DESC_INDEX}"))?;
+    conn.execute("ANALYZE", [])?;
+    Ok(())
+}
+
+/// The third option plan §9 never wrote down. The dense-tag page is slow because the
+/// predicate is **tag-first**: `items.id IN (SELECT it.item_id FROM item_tags ...)`
+/// hands SQLite a list of every matching id (64 092 of them) which it then sorts to
+/// apply `LIMIT`. The other shape is **row-first**: walk `items` in the grid's own
+/// order and ask each row whether it carries the tag, which can stop as soon as the
+/// page is full. Row-first is what the fact predicates already do, and it is the
+/// shape plan §6 rejected for tags without a number beside it.
+///
+/// Measured dense and rare, with and without the composite index, because a shape
+/// that wins on `big_breasts` and loses on a tag only 30 items carry is not a win.
+/// Both shapes are written out **here**: `TAG_FIRST` is a copy of `query.rs::TAG_SEMI`
+/// with the same `fold`/`name` test, `ROW_FIRST` is the candidate, and the only
+/// difference between them is which side of the join the planner starts from. The
+/// rare tags are read out of the fixture instead of named, so the sparse rows are
+/// real rows and not a guess about the data.
+const TAG_FIRST: &str = "items.id IN (SELECT it.item_id FROM item_tags AS it \
+                         JOIN tags AS t ON t.id = it.tag_id \
+                         WHERE (t.fold = ? OR t.name = ?))";
+const ROW_FIRST: &str = "EXISTS (SELECT 1 FROM item_tags AS it \
+                          JOIN tags AS t ON t.id = it.tag_id \
+                          WHERE it.item_id = items.id AND (t.fold = ? OR t.name = ?))";
+
+fn tag_sql(predicate: &str, with_cursor: bool) -> String {
+    format!(
+        "{} WHERE items.kind IN ('gallery','post') AND ({}){}{ORDER} LIMIT ?",
+        db::PAGE_COLUMNS,
+        predicate,
+        if with_cursor { db::AFTER_CURSOR } else { "" },
+    )
+}
+
+fn tag_params(fold: &str, cursor: Option<&db::PageCursor>) -> Vec<query::Value> {
+    let mut params = vec![
+        query::Value::Text(fold.to_string()),
+        query::Value::Text(fold.to_string()),
+    ];
+    if let Some(c) = cursor {
+        params.push(query::Value::Text(c.updated_at.clone()));
+        params.push(query::Value::Text(c.updated_at.clone()));
+        params.push(query::Value::Text(c.id.clone()));
+    }
+    params.push(query::Value::Int(PAGE));
+    params
+}
+
+fn tag_page(
+    conn: &Connection,
+    predicate: &str,
+    fold: &str,
+    cursor: Option<&db::PageCursor>,
+) -> Vec<String> {
+    let sql = tag_sql(predicate, cursor.is_some());
+    let params = tag_params(fold, cursor);
+    let mut stmt = conn
+        .prepare_cached(&sql)
+        .unwrap_or_else(|e| panic!("{fold:?} tag page prepares: {e}"));
+    stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        r.get::<_, String>(0)
+    })
+    .unwrap_or_else(|e| panic!("{fold:?} tag page runs: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .expect("tag page rows")
+}
+
+fn tag_count(conn: &Connection, predicate: &str, fold: &str) -> i64 {
+    let sql = format!(
+        "SELECT COUNT(*) FROM items WHERE items.kind IN ('gallery','post') AND ({predicate})"
+    );
+    let mut stmt = conn
+        .prepare_cached(&sql)
+        .unwrap_or_else(|e| panic!("{fold:?} tag count prepares: {e}"));
+    stmt.query_row(rusqlite::params![fold, fold], |r| r.get::<_, i64>(0))
+        .unwrap_or_else(|e| panic!("{fold:?} tag count runs: {e}"))
+}
+
+/// The sparsest tags in the fixture, so the "rare" half of this comparison is data
+/// the library actually has rather than a tag name that happens to match nothing.
+fn sparse_folds(conn: &Connection) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.fold, COUNT(*) AS c FROM tags AS t \
+         JOIN item_tags AS it ON it.tag_id = t.id \
+         WHERE t.fold IS NOT NULL GROUP BY t.fold HAVING c BETWEEN 3 AND 200 \
+         ORDER BY c ASC LIMIT 3",
+    )?;
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect::<Result<Vec<_>, _>>()
+}
+
+fn tag_predicate_shape(conn: &Connection) -> rusqlite::Result<()> {
+    let mut rare = sparse_folds(conn)?;
+    rare.push("big_breasts".to_string());
+    rare.push("anal".to_string());
+    println!("\n=== tag predicate shape: tag-first (`IN`) against row-first (`EXISTS`) ===");
+    for want_index in [false, true] {
+        set_index(conn, want_index)?;
+        println!(
+            "\n=== {} the composite index ===",
+            if want_index { "WITH" } else { "WITHOUT" }
+        );
+        for fold in &rare {
+            let total = tag_count(conn, TAG_FIRST, fold);
+            let pages = (total + PAGE - 1) / PAGE;
+            println!("\n{fold:?}: {total} matched items in {pages} pages of {PAGE}");
+            if total == 0 {
+                println!("  no such tag in the fixture - nothing to time, skipped");
+                continue;
+            }
+            for (label, predicate) in [("tag-first", TAG_FIRST), ("row-first", ROW_FIRST)] {
+                let rows = tag_page(conn, predicate, fold, None);
+                let page1 = timed(|| tag_page(conn, predicate, fold, None).len());
+                let count = timed(|| tag_count(conn, predicate, fold));
+                println!(
+                    "  {label:<10} page 1: {} rows, {} ms p50 / {} ms p95; count alone {} ms / {} ms",
+                    rows.len(),
+                    page1.0,
+                    page1.1,
+                    count.0,
+                    count.1
+                );
+                if pages >= 2 {
+                    let seed_sql = format!(
+                        "SELECT items.id, items.updated_at FROM items WHERE items.kind IN \
+                         ('gallery','post') AND ({predicate}){ORDER} LIMIT ? OFFSET ?"
+                    );
+                    let mut stmt = conn.prepare_cached(&seed_sql).expect("seed prepares");
+                    let seed = stmt
+                        .query_map(
+                            rusqlite::params![fold, fold, PAGE, (pages - 2) * PAGE],
+                            |r| {
+                                Ok(db::PageCursor {
+                                    updated_at: r.get(1)?,
+                                    id: r.get(0)?,
+                                })
+                            },
+                        )
+                        .expect("seed runs")
+                        .collect::<Result<Vec<_>, _>>()
+                        .expect("seed rows")
+                        .last()
+                        .cloned()
+                        .expect("a page before the last one");
+                    drop(stmt);
+                    let deep = tag_page(conn, predicate, fold, Some(&seed));
+                    let deep_time = timed(|| tag_page(conn, predicate, fold, Some(&seed)).len());
+                    println!(
+                        "             page {pages} by cursor: {} rows, {} ms p50 / {} ms p95",
+                        deep.len(),
+                        deep_time.0,
+                        deep_time.1
+                    );
+                }
+                let plan_sql = tag_sql(predicate, false);
+                let mut stmt = conn.prepare(&plan_sql).expect("plan prepares");
+                let details = stmt
+                    .query_map(rusqlite::params![fold, fold, PAGE], |r| {
+                        r.get::<_, String>(3)
+                    })
+                    .expect("plan runs")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("plan rows");
+                drop(stmt);
+                for line in details {
+                    if line.contains("items") || line.contains("TEMP") || line.contains("SCAN") {
+                        println!("    plan: {line}");
+                    }
+                }
+            }
+        }
+    }
+    set_index(conn, false)?;
+    Ok(())
+}
+
+/// Where the two tag shapes cross over, measured.
+///
+/// `tag_predicate_shape` shows the two shapes disagree about which queries are cheap:
+/// `big_breasts` (64 092 matches) pages in 204 ms tag-first and 1 ms row-first, while
+/// a tag 8 items carry pages in 0 ms tag-first and 145 ms row-first. Neither shape may
+/// be shipped as the only shape, so the plan has to choose between them, and a
+/// threshold that is chosen by the planner needs a number under it.
+///
+/// The fixture's own tag pool sits at ~50 postings per tag, which is one point on the
+/// curve, so this section builds the rest of the curve: synthetic alias tags that point
+/// at the first *n* postings of `big_breasts`, for n in a ladder. They are added here
+/// and dropped here, so every other section still measures the schema the app creates.
+///
+/// The last row of each measurement is the price of deciding at all: the posting-count
+/// query the planner would have to run before it picks a shape. A decision that costs
+/// 40 ms per keystroke is not a decision, it is a second query.
+const CARDINALITY_LADDER: [i64; 6] = [1, 20, 200, 2_000, 10_000, 40_000];
+
+fn add_alias_tags(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
+    let mut made = Vec::new();
+    for n in CARDINALITY_LADDER {
+        let name = format!("fixture_alias_{n}");
+        let (ns, fold) = db::tag_ns_fold(&name);
+        conn.execute(
+            "INSERT INTO tags (name, type_id, site, ns, fold) VALUES (?1, 3, 'fixture', ?2, ?3)",
+            rusqlite::params![&name, ns, fold],
+        )?;
+        conn.execute(
+            // `DISTINCT`, because the fold `big_breasts` belongs to **two** tags in the
+            // fixture (`big_breasts` and `female:big_breasts`), and an item carrying
+            // both spellings would otherwise be offered twice to one alias tag. That
+            // duplication is the fold semantics the query box relies on, and it is the
+            // reason the ladder counts items and not postings.
+            "INSERT INTO item_tags (tag_id, item_id) \
+             SELECT (SELECT id FROM tags WHERE fold = ?1), it.item_id \
+             FROM item_tags AS it JOIN tags AS t ON t.id = it.tag_id \
+             WHERE t.fold = 'big_breasts' GROUP BY it.item_id LIMIT ?2",
+            rusqlite::params![&name, n],
+        )?;
+        made.push((name, n));
+    }
+    conn.execute("ANALYZE", [])?;
+    Ok(made)
+}
+
+fn drop_alias_tags(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM item_tags WHERE tag_id IN \
+         (SELECT id FROM tags WHERE fold LIKE 'fixture_alias_%')",
+        [],
+    )?;
+    conn.execute("DELETE FROM tags WHERE fold LIKE 'fixture_alias_%'", [])?;
+    conn.execute("ANALYZE", [])?;
+    Ok(())
+}
+
+/// What the planner would pay to know the shape: count the postings for one token, the
+/// way `item_tags_tag_idx` can answer it.
+fn decision_cost(conn: &Connection, fold: &str) -> (u128, u128, i64) {
+    let sql = "SELECT COUNT(*) FROM item_tags AS it JOIN tags AS t ON t.id = it.tag_id \
+               WHERE t.fold = ? OR t.name = ?";
+    let count = timed(|| {
+        let mut stmt = conn.prepare_cached(sql).expect("decision prepares");
+        stmt.query_row(rusqlite::params![fold, fold], |r| r.get::<_, i64>(0))
+            .expect("decision runs")
+    });
+    let mut stmt = conn.prepare_cached(sql).expect("decision prepares");
+    let rows = stmt
+        .query_row(rusqlite::params![fold, fold], |r| r.get::<_, i64>(0))
+        .expect("decision runs");
+    (count.0, count.1, rows)
+}
+
+fn cardinality_crossover(conn: &Connection) -> rusqlite::Result<()> {
+    let ladder = add_alias_tags(conn)?;
+    println!("\n=== where the two tag shapes cross over ===");
+    for (fold, wanted) in &ladder {
+        let total = tag_count(conn, TAG_FIRST, fold);
+        let pages = (total + PAGE - 1) / PAGE;
+        println!(
+            "\n{fold:?}: asked for {wanted} postings, the tag matches {total} items in {pages} pages"
+        );
+        if total == 0 {
+            println!("  the alias has no postings - nothing to time");
+            continue;
+        }
+        for (label, predicate) in [("tag-first", TAG_FIRST), ("row-first", ROW_FIRST)] {
+            let rows = tag_page(conn, predicate, fold, None);
+            let page1 = timed(|| tag_page(conn, predicate, fold, None).len());
+            let count = timed(|| tag_count(conn, predicate, fold));
+            let mut deep = String::new();
+            if pages >= 2 {
+                let seed_sql = format!(
+                    "SELECT items.id, items.updated_at FROM items WHERE items.kind IN \
+                     ('gallery','post') AND ({predicate}){ORDER} LIMIT ? OFFSET ?"
+                );
+                let mut stmt = conn.prepare_cached(&seed_sql).expect("seed prepares");
+                let seed = stmt
+                    .query_map(
+                        rusqlite::params![fold, fold, PAGE, (pages - 2) * PAGE],
+                        |r| {
+                            Ok(db::PageCursor {
+                                updated_at: r.get(1)?,
+                                id: r.get(0)?,
+                            })
+                        },
+                    )
+                    .expect("seed runs")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("seed rows")
+                    .last()
+                    .cloned()
+                    .expect("a page before the last one");
+                drop(stmt);
+                let n = tag_page(conn, predicate, fold, Some(&seed));
+                let t = timed(|| tag_page(conn, predicate, fold, Some(&seed)).len());
+                deep = format!(
+                    "page {pages} by cursor {} rows, {} ms p50 / {} ms p95",
+                    n.len(),
+                    t.0,
+                    t.1
+                );
+            }
+            println!(
+                "  {label:<10} page 1: {} rows, {} ms p50 / {} ms p95; count alone {} ms / {} ms{}",
+                rows.len(),
+                page1.0,
+                page1.1,
+                count.0,
+                count.1,
+                if deep.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {deep}")
+                }
+            );
+        }
+        let (d50, d95, postings) = decision_cost(conn, fold);
+        println!(
+            "  the shape decision itself (count this token's postings): {} ms p50 / {} ms p95, {} postings",
+            d50, d95, postings
+        );
+    }
+    drop_alias_tags(conn)?;
+    println!("\nalias tags dropped; schema back to what the app creates");
+    Ok(())
 }
 
 /// Times one closure `REPS` times and returns (p50, p95) in milliseconds. The

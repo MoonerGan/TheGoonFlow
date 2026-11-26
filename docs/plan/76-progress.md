@@ -414,6 +414,11 @@ literal tags (`an_equals_sign_makes_a_predicate_and_a_dash_does_not`).
   respectively, because a `LIMIT 300` page can stop early on the `updated_at` order
   and a total cannot. S3's job is not to make `COUNT(*)` fast but to stop running
   it on every keystroke.
+  *(Corrected in the 2026-11-26 paging-and-index entry, which measures both halves
+  per query shape: "stops early" is true of the predicate that can walk
+  `items_updated_idx` and false of a dense tag match, where the page (197 ms) is the
+  expensive half, not the count. The bullet's conclusion survives; its reason does
+  not.)*
 
 **What the probe caught that the fixture was lying about.** Three residues
 collided: the gif rule (`n % 40`) landed inside the video rule (`n % 20`), so every
@@ -850,3 +855,58 @@ dense-tag-sort number rather than on a title-scan guess, and this card cannot be
 Done against the §6 budget as written — the board should either restate the budget as
 "narrow predicates under 50 ms, dense tags measured and paginated" or buy the index
 that removes the sort.
+
+## 2026-11-26 — S3/S4 follow-up: what a page costs, measured four ways
+
+**Why.** The review accepted the cursor and asked for the 196 ms dense-tag page to be
+explained before the UI built on top of it. Three hypotheses were on the table — buy an
+index on the grid’s sort key, switch the cursor to a row-value comparison, stop paying the
+count per keystroke — and one sentence in the S3 entry needed correcting. All four are now
+answered with numbers in `tools/filter-scale-20261126h.log` (100k items, 21 reps,
+p50/p95, plaintext SQLite, so a floor), and TESTING item 45 carries the tables.
+
+**What landed.**
+
+* `db::page_items` and `search_items(…, with_count)`: the page and the total are one call
+  or two, chosen by the caller. The count is a second statement over the whole result, and
+  measured against the page it is the expensive half for every fact query (page 3 ms /
+  count 151 ms for `size>100mb type:image`), so it is what a keystroke skips.
+  `SearchPage.total` became `Option<i64>` — uncounted crosses as `null`, never as `0`,
+  pinned on the wire as well as in the library.
+* Two checks that can fail, as the review asked: the row-value cursor dropping a row of a
+  same-second batch, and the stamp-width assumption (`the_stamp_is_one_width_…` shows both
+  the agreement on one-width data and the disagreement on mixed widths). DEVELOPMENT gains
+  invariant 31 for the second, plus the row-value warning beside the cursor bullet.
+* Four probe sections, printing plan and row count beside every timing: `index options`,
+  `both halves DESC`, `tag predicate shape`, and a cardinality ladder for the crossover
+  (synthetic alias tags, created and dropped inside the section).
+
+**The outcomes.** The composite index: not bought — it fixes the plan it can reach (3 ms →
+2 ms, `OR` cursor → two seeks) and leaves `big_breasts` at 196 ms. The row-value cursor:
+seeks, and is wrong for a mixed-direction order; the correct version wins nothing
+(89/94 ms against the shipping cursor’s 90/91 ms); and the probe cannot even see the
+tie — its 100k fixture stamps every row with a different second, so all three page reads
+report "matches" there, which is why the fixture test rather than the probe is the pin.
+64 092-row id list; the row-first probe over the same indexes pages those rows in 1 ms,
+and tag-first is 100-140 ms better at the other end of the range (0 ms vs ~100 ms at 157
+matches), which makes the choice a per-token one — plan open decision 13, with the
+crossover measured at about a fifth of the library and the deciding query at 0-1 ms.
+
+**Correction to the record.** The S3 entry’s claim that a `LIMIT 300` page "can stop early
+on the `updated_at` order and costs 1-10 ms" is true only of predicates that walk
+`items_updated_idx`. A dense tag match cannot stop early at all: SQLite collects and sorts
+every matching id in a temporary B-tree before the limit, which is why its page (196 ms) is
+the expensive half rather than its count (86 ms). The S3 bullet now carries the correction
+inline, and `db::search_items` says the same thing where a caller would read it.
+
+**UI consequence to carry into S5 and S6.** Keyset paging means there is no page number to
+jump to: the honest controls are *load more* (cursor of the last visible row) and *back to
+start*. A "page 4" button would have to re-scan to know where page 4 starts, which is the
+cost this stage just measured. The games view and #73 inherit that shape rather than
+reinventing offsets.
+
+**Gates.** `cargo test --workspace` = **235 passed, 0 failed, 8 ignored** (goon-core **124**
+was 123, desktop **105** + 8 ignored was 104, vault 4, locator 2) in
+`tools/cargo-test-s5-count.log`; `cargo clippy --workspace --all-targets` 0 findings
+(`tools/cargo-clippy-s5-count.log`); `rustfmt --check` clean on the two Rust files touched,
+with the four hand-formatted siblings restored.

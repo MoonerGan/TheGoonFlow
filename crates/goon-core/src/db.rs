@@ -838,11 +838,17 @@ fn planned_params(plan: &Plan, tail: &[i64]) -> Vec<Value> {
 pub struct SearchPage {
     pub items: Vec<ItemSummary>,
     /// Everything the predicate matches, not what fits on this page: 300 rows out
-    /// of 64 000 matches has to say 64 000 (rulings C, and the old grid capped
-    /// both numbers at `limit` without ever saying so).
-    pub total: i64,
+    /// of 64 000 matches has to say 64 000 (rulings C, and the old grid capped both
+    /// numbers at `limit` without ever saying so). `None` means the caller asked for
+    /// the page without the count ([`search_items`]’s `with_count`) — the shape a
+    /// keystroke can afford. Measured at 100k items, the count alone is 46-151 ms: next
+    /// to a fact-driven page of the same query (3 ms for `size>100mb type:image`) it is
+    /// most of what a keystroke would pay, and next to a dense tag page (196 ms for
+    /// `big_breasts`) it is the half worth skipping. A caller holding `None` must not
+    /// render a total, not even a zero: unknown has to stay unknown (invariant 27).
+    pub total: Option<i64>,
     /// The plan read a fact column this vault may never have measured
-    /// ([`Plan::needs_facts`]). `total == 0` **and** `needs_facts` is not an answer
+    /// ([`Plan::needs_facts`]). A zero total **and** `needs_facts` is not an answer
     /// — stage S5 renders "not measured yet · measure my files" for it instead of
     /// a count that reads like one (invariant 27).
     pub needs_facts: bool,
@@ -882,8 +888,11 @@ pub const GRID_ORDER: &str = " ORDER BY updated_at DESC, items.id";
 /// The cursor half, as its own fragment, because it has to read exactly like
 /// [`GRID_ORDER`]: `<` on the stamp (sorted DESC) and `>` on the id inside the tie
 /// (sorted ASC). No other paging shape may use a different pair, and no row is ever
-/// skipped by arithmetic.
-const AFTER_CURSOR: &str = " AND (items.updated_at < ? OR (items.updated_at = ? AND items.id > ?))";
+/// skipped by arithmetic. Public for the same reason [`PAGE_COLUMNS`] is: the probe
+/// measures candidate page shapes against this one, and a candidate that invented its
+/// own cursor predicate would be timing something production never runs.
+pub const AFTER_CURSOR: &str =
+    " AND (items.updated_at < ? OR (items.updated_at = ? AND items.id > ?))";
 
 /// The row shape of one grid page, as its own fragment. Public for the same reason
 /// [`planned_where`] is: `filter_scale_probe` times the `OFFSET` page this stage
@@ -929,12 +938,15 @@ pub fn page_statement(
 ///
 /// The count is a separate statement on purpose, and it counts the **whole**
 /// result, cursor or no cursor — "N matches · M total" is about the predicate, not
-/// about the page. `filter_scale_probe` (TESTING item 41) measured the count at
-/// 88 ms for a dense tag and up to 174 ms for a fact range at 100k items, while a
-/// 300-row page can stop early on the `updated_at` order and costs 1-10 ms for
-/// those same fact queries: the total, not the grid, is what a keystroke must not
-/// pay. Callers that do not want the number use [`count_matches`] or
-/// [`search_item_ids`] directly.
+/// about the page. It is also not free, and neither is the page. At 100k items
+/// `filter_scale_probe` (TESTING item 45) counts a dense tag in 86 ms and a fact
+/// range in 151 ms; the 300-row page is only cheap when the predicate can walk
+/// `items_updated_idx` and stop early (3 ms for `size>100mb type:image`), and it is
+/// not cheap at all when a tag matches a large share of the library, because SQLite
+/// gathers and sorts every matching id in a temporary B-tree before it applies `LIMIT`
+/// (`USE TEMP B-TREE FOR ORDER BY`: 196 ms for `big_breasts` at 64 092 matches). Which
+/// half is expensive depends on the query, so the caller decides: a keystroke belongs
+/// on [`page_items`], and the total belongs on the committed query.
 ///
 /// `ORDER BY updated_at DESC, items.id`: the id tie-break is not decoration. An
 /// importer stamps a dozen items with the same second, and with no tie-break the
@@ -947,23 +959,38 @@ pub fn search_items(
     plan: &Plan,
     limit: i64,
     after: Option<&PageCursor>,
+    with_count: bool,
 ) -> rusqlite::Result<SearchPage> {
-    let (sql, params) = page_statement(scope, plan, after, limit);
-    let mut items = Vec::new();
-    {
-        // Scoped: the statement borrows the connection, and the count below needs
-        // the connection back.
-        let mut stmt = conn.prepare_cached(&sql)?;
-        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), map_item_summary)?;
-        for row in rows {
-            items.push(row?);
-        }
-    }
     Ok(SearchPage {
-        items,
-        total: count_matches(conn, scope, plan)?,
+        items: page_items(conn, scope, plan, limit, after)?,
+        total: with_count
+            .then(|| count_matches(conn, scope, plan))
+            .transpose()?,
         needs_facts: plan.needs_facts(),
     })
+}
+
+/// One page of the grid, **without** the paired total.
+///
+/// The same statement, order and cursor rules as [`search_items`]; this is the half
+/// a keystroke can afford while the total waits for the query the user commits to.
+/// Two functions rather than one flag because the cost is not in the shape of the
+/// call, it is in the second statement, which walks the whole result.
+pub fn page_items(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+    limit: i64,
+    after: Option<&PageCursor>,
+) -> rusqlite::Result<Vec<ItemSummary>> {
+    let (sql, params) = page_statement(scope, plan, after, limit);
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), map_item_summary)?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(items)
 }
 
 /// How many items the predicate matches across the whole library. With an empty
@@ -3679,13 +3706,17 @@ mod tests {
     fn the_page_and_the_paired_total_come_from_one_predicate() {
         let conn = query_fixture();
         let plan = query::parse("big_breasts", Scope::Media).unwrap().plan();
-        let page = search_items(&conn, Scope::Media, &plan, 300, None).unwrap();
+        let page = search_items(&conn, Scope::Media, &plan, 300, None, true).unwrap();
         assert_eq!(page.items.len(), 2);
         // The fold match reaches both spellings: `big_breasts` and
         // `female:big_breasts` are one tag family for a bare word.
         let ids: Vec<&str> = page.items.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["q_big", "q_small"]);
-        assert_eq!(page.total, 2, "the count is the result, not the page");
+        assert_eq!(
+            page.total.unwrap(),
+            2,
+            "the count is the result, not the page"
+        );
         assert!(!page.items.iter().any(|i| i.kind == "game"), "D14");
     }
 
@@ -3718,9 +3749,13 @@ mod tests {
     #[test]
     fn the_total_counts_the_result_and_the_page_limits_the_rows() {
         let conn = query_fixture();
-        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None, true).unwrap();
         assert_eq!(page.items.len(), 2, "the page is a page");
-        assert_eq!(page.total, 5, "the total is the whole media library");
+        assert_eq!(
+            page.total.unwrap(),
+            5,
+            "the total is the whole media library"
+        );
         assert_eq!(
             count_matches(&conn, Scope::Games, &Plan::default()).unwrap(),
             1,
@@ -3739,7 +3774,7 @@ mod tests {
             matched(&conn, "", Scope::Media),
             ["q_big", "q_small", "q_unprobed", "q_video", "q_disk"]
         );
-        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None, true).unwrap();
         assert_eq!(
             page.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
             ["q_big", "q_small"],
@@ -3752,8 +3787,15 @@ mod tests {
         let mut paged: Vec<String> = Vec::new();
         let mut cursor: Option<PageCursor> = None;
         for _ in 0..5 {
-            let page =
-                search_items(&conn, Scope::Media, &Plan::default(), 1, cursor.as_ref()).unwrap();
+            let page = search_items(
+                &conn,
+                Scope::Media,
+                &Plan::default(),
+                1,
+                cursor.as_ref(),
+                true,
+            )
+            .unwrap();
             let last = page.items.last().expect("a page of the fixture has a row");
             cursor = Some(PageCursor {
                 updated_at: last.updated_at.clone(),
@@ -3766,13 +3808,22 @@ mod tests {
             matched(&conn, "", Scope::Media),
             "paging is lossless: every id exactly once, in grid order"
         );
-        let past = search_items(&conn, Scope::Media, &Plan::default(), 5, cursor.as_ref()).unwrap();
+        let past = search_items(
+            &conn,
+            Scope::Media,
+            &Plan::default(),
+            5,
+            cursor.as_ref(),
+            true,
+        )
+        .unwrap();
         assert!(
             past.items.is_empty(),
             "and the walk ends: the cursor past the last row matches nothing"
         );
         assert_eq!(
-            past.total, 5,
+            past.total.unwrap(),
+            5,
             "while the total still reports the whole result"
         );
     }
@@ -3784,7 +3835,7 @@ mod tests {
     #[test]
     fn a_bulk_delete_cannot_make_a_paged_grid_skip_rows() {
         let conn = query_fixture();
-        let first = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
+        let first = search_items(&conn, Scope::Media, &Plan::default(), 2, None, true).unwrap();
         let shown: Vec<String> = first.items.iter().map(|i| i.id.clone()).collect();
         assert_eq!(shown, ["q_big", "q_small"]);
         let cursor = PageCursor {
@@ -3795,13 +3846,25 @@ mod tests {
             .unwrap();
 
         // What production does: continue from the last row that was on screen.
-        let next = search_items(&conn, Scope::Media, &Plan::default(), 2, Some(&cursor)).unwrap();
+        let next = search_items(
+            &conn,
+            Scope::Media,
+            &Plan::default(),
+            2,
+            Some(&cursor),
+            true,
+        )
+        .unwrap();
         assert_eq!(
             next.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
             ["q_unprobed", "q_video"],
             "the next two survivors, in order, with nothing passed over"
         );
-        assert_eq!(next.total, 3, "and the total is still the whole result");
+        assert_eq!(
+            next.total.unwrap(),
+            3,
+            "and the total is still the whole result"
+        );
 
         // What an offset would have done, kept here as the counter-example so the
         // hazard stays measurable. The same predicate, the same page size, the same
@@ -3822,6 +3885,188 @@ mod tests {
             "the offset read lands past q_unprobed and q_video: two survivors the \
              user would never have reached, which is exactly what deleting 20 000 rows \
              does at 100k (filter_scale_probe prints the same effect at scale)"
+        );
+    }
+
+    /// The cursor form that does **not** work, kept as a counter-example beside the
+    /// one that ships, because "row-value comparison, isn't that neater" is exactly
+    /// the tempting change that breaks a paged grid. SQLite compares a row value
+    /// componentwise with **one** operator for every component, so
+    /// `(updated_at, id) < (?, ?)` means "an earlier stamp, or the same stamp and a
+    /// *smaller* id". The grid sorts the stamp DESC and the id ASC, so that second
+    /// half runs the tie-break backwards and drops a row of the same batch. (It is
+    /// also the case where an index cannot help: an index scan can only range-seek on
+    /// a comparison whose components all sort the way the index does.)
+    #[test]
+    fn a_row_value_cursor_is_the_wrong_comparison_for_a_mixed_direction_order() {
+        let conn = query_fixture();
+        let cursor = PageCursor {
+            updated_at: "1760000500".into(),
+            id: "q_big".into(),
+        };
+        // What ships: `AFTER_CURSOR`, `<` on the stamp and `>` on the id inside the tie.
+        let page = search_items(
+            &conn,
+            Scope::Media,
+            &Plan::default(),
+            2,
+            Some(&cursor),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            page.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["q_small", "q_unprobed"],
+            "q_small shares q_big's stamp and sorts after it on the id arm"
+        );
+
+        // The same question in row-value form: same predicate, same order, same limit.
+        let sql = format!(
+            "SELECT items.id FROM items{} AND (items.updated_at, items.id) < (?,?){GRID_ORDER} LIMIT ?",
+            planned_where(Scope::Media, &Plan::default())
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let row_value: Vec<String> = stmt
+            .query_map(params!["1760000500", "q_big", 2_i64], |r| {
+                r.get::<_, String>(0)
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(stmt);
+        assert_eq!(
+            row_value,
+            ["q_unprobed", "q_video"],
+            "the shared-stamp row is gone: `(a, b) < (x, y)` compares b in the same \
+             direction as a, which is the opposite of `updated_at DESC, items.id`"
+        );
+    }
+
+    /// The assumption the paging and the date filters both lean on, written down as a
+    /// check instead of as a comment. `GRID_ORDER` sorts `updated_at` **as stored**
+    /// (TEXT), `added:`/`updated:` compare `CAST(updated_at AS INTEGER)`, and the
+    /// cursor compares the same TEXT the order sorts. Those are one order only while
+    /// every stamp has one width. The width is what epoch seconds give from
+    /// 2001-09-09 to 2286-11-20; a stamp-format change would break the `ORDER BY`,
+    /// the cursor and the date predicates together, and this is the test that notices.
+    #[test]
+    fn the_stamp_is_one_width_so_the_text_order_and_the_numeric_order_agree() {
+        let stamp = now_epoch_text();
+        assert_eq!(
+            stamp.len(),
+            10,
+            "the app writes epoch seconds as TEXT: {stamp}"
+        );
+        assert!(
+            stamp.chars().all(|c| c.is_ascii_digit()),
+            "and nothing else: {stamp}"
+        );
+
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // The two ends of the range epoch seconds stay ten digits wide, and the
+        // counter-example: a nine-digit stamp (anything before 2001-09-09).
+        for (id, at) in [
+            ("w_early", "1000000000"),
+            ("w_late", "9999999999"),
+            ("w_legacy_nine", "999999999"),
+        ] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, status, created_at, updated_at)
+                 VALUES (?1, 'gallery', ?2, 'seen', ?3, ?3)",
+                rusqlite::params![id, format!("Fixture stamp {id}"), at],
+            )
+            .unwrap();
+        }
+        let grid = |sql_tail: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(sql_tail).unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let as_text = grid(&format!("SELECT items.id FROM items{GRID_ORDER}"));
+        let as_number = grid(
+            "SELECT items.id FROM items \
+             ORDER BY CAST(items.updated_at AS INTEGER) DESC, items.id",
+        );
+        assert_eq!(
+            as_text,
+            ["w_late", "w_legacy_nine", "w_early"],
+            "TEXT compares digit by digit: length only breaks a tie between a prefix and \
+             its extension, so the nine-digit stamp outranks the 2001-era ten-digit stamp \
+             whose first digit is 1"
+        );
+        assert_eq!(
+            as_number,
+            ["w_late", "w_early", "w_legacy_nine"],
+            "as numbers they rank by time, and the nine-digit stamp is the oldest row \
+             here - that flip is what a mixed-width vault would put on screen in the \
+             wrong place, in the grid order and by the `added:` predicate at once"
+        );
+
+        // Same data minus the mixed-width row: the two orders are one order, which is
+        // the whole reason the page may walk an index on the TEXT stamp.
+        conn.execute("DELETE FROM items WHERE id = 'w_legacy_nine'", [])
+            .unwrap();
+        assert_eq!(
+            grid(&format!("SELECT items.id FROM items{GRID_ORDER}")),
+            grid(
+                "SELECT items.id FROM items \
+                 ORDER BY CAST(items.updated_at AS INTEGER) DESC, items.id"
+            ),
+            "one width, one order: TEXT and numeric agree, so cursor and predicate agree"
+        );
+    }
+
+    /// The count is a second statement over the whole result, and at 100k items it is
+    /// the expensive half: 90-171 ms of count against 2-4 ms of page for the same
+    /// query (`filter_scale_probe`). So it is optional — and the page has to say out
+    /// loud that it has no number, or a view that skipped the count would render a total
+    /// it never asked for. `None`, not `Some(0)`: unknown stays unknown (invariant 27).
+    #[test]
+    fn a_page_without_the_count_says_it_has_no_number() {
+        let conn = query_fixture();
+        let plan = query::parse("big_breasts", Scope::Media).unwrap().plan();
+        let counted = search_items(&conn, Scope::Media, &plan, 300, None, true).unwrap();
+        let uncounted = search_items(&conn, Scope::Media, &plan, 300, None, false).unwrap();
+        assert_eq!(counted.total, Some(2), "the counted shape still counts");
+        assert_eq!(
+            uncounted.total, None,
+            "the page-only shape carries no number at all, and no zero pretending to be one"
+        );
+        assert_eq!(
+            counted
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            uncounted
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            "the page is the same page either way: only the number is optional"
+        );
+
+        // The facts hint has to ride along even on a page with no count, because the
+        // pair "nothing matched" and "nothing has been measured" is what S5 renders as
+        // one sentence instead of the other (invariant 27).
+        let facts = query::parse("size>1gb", Scope::Media).unwrap().plan();
+        let page = search_items(&conn, Scope::Media, &facts, 300, None, false).unwrap();
+        assert!(
+            page.needs_facts,
+            "a fact query says the vault may not have measured"
+        );
+        assert_eq!(page.total, None);
+        assert_eq!(
+            page_items(&conn, Scope::Media, &facts, 300, None)
+                .unwrap()
+                .len(),
+            page.items.len(),
+            "`page_items` is that same read with the count never built at all"
         );
     }
 
@@ -3898,14 +4143,14 @@ mod tests {
         let conn = query_fixture();
         let facts = query::parse("size>1gb", Scope::Media).unwrap().plan();
         assert!(
-            search_items(&conn, Scope::Media, &facts, 300, None)
+            search_items(&conn, Scope::Media, &facts, 300, None, true)
                 .unwrap()
                 .needs_facts,
             "a zero from this predicate is not yet an answer"
         );
         let plain = query::parse("big_breasts", Scope::Media).unwrap().plan();
         assert!(
-            !search_items(&conn, Scope::Media, &plain, 300, None)
+            !search_items(&conn, Scope::Media, &plain, 300, None, true)
                 .unwrap()
                 .needs_facts,
             "and a tag query does not get to claim the vault is unmeasured"

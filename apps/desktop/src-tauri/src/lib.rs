@@ -917,6 +917,14 @@ fn planned_query(
 /// user was, so those rows are never shown (`filter_scale_probe`, TESTING item 44).
 /// The cursor compares on the grid's own sort key, so the next page is the next page
 /// no matter what was deleted behind it.
+///
+/// `with_count` is the cost switch the measurements forced on this wire. The count is
+/// a second statement over the **whole** result: measured at 100k items it costs
+/// 46-151 ms, while the page beside it is 3 ms for a fact query and 196 ms for a
+/// dense tag. A box that re-runs on every keystroke therefore spends most of its
+/// time on the number the user has not asked for yet. `false` answers with
+/// `total: null`, and a view must render that as no total at all, never as zero.
+/// The default is `true`, so the committed query keeps the count.
 #[tauri::command]
 fn search_items(
     state: tauri::State<'_, AppState>,
@@ -924,6 +932,7 @@ fn search_items(
     query: Option<String>,
     limit: Option<i64>,
     after: Option<goon_core::db::PageCursor>,
+    with_count: Option<bool>,
 ) -> Result<goon_core::db::SearchPage, String> {
     let (scope, plan) = planned_query(&view, query)?;
     let inner = state.inner.lock().unwrap();
@@ -934,6 +943,7 @@ fn search_items(
         &plan,
         limit.unwrap_or(300),
         after.as_ref(),
+        with_count.unwrap_or(true),
     )
     .map_err(err)
 }
@@ -2715,6 +2725,33 @@ mod integration_tests {
         assert!(e.contains("status"), "{e}");
     }
 
+    /// #76: the count is optional on the wire, so "no count" has to cross as `null`.
+    /// If it crossed as `0` instead, an uncounted keystroke would paint "0 matches" in a
+    /// library that has thousands —Ethe same lie as a capped count, and the grid would
+    /// look empty for one frame every time the user typed (invariant 27).
+    #[test]
+    fn a_page_without_a_count_crosses_as_null_and_never_as_zero() {
+        let uncounted = goon_core::db::SearchPage {
+            items: vec![],
+            total: None,
+            needs_facts: false,
+        };
+        let json = serde_json::to_string(&uncounted).unwrap();
+        assert!(json.contains("\"total\":null"), "{json}");
+        assert!(!json.contains("\"total\":0"), "{json}");
+        let counted = goon_core::db::SearchPage {
+            items: vec![],
+            total: Some(0),
+            needs_facts: false,
+        };
+        assert!(
+            serde_json::to_string(&counted)
+                .unwrap()
+                .contains("\"total\":0"),
+            "a real zero still crosses as a number, because that is an answer"
+        );
+    }
+
     /// #76 decision 10: the page cursor on the wire. Tauri builds [`goon_core::db::PageCursor`]
     /// from the JS object by serde, so the field spelling is protocol: `updatedAt`
     /// has to be the JSON name the grid read the stamp out of, and a cursor whose
@@ -2751,9 +2788,21 @@ mod integration_tests {
         let mut walked: Vec<String> = Vec::new();
         let mut cursor: Option<goon_core::db::PageCursor> = None;
         for page in 0..4 {
-            let got = goon_core::db::search_items(&conn, goon_core::query::Scope::Media, &plan, 2, cursor.as_ref())
-                .unwrap();
-            assert_eq!(got.total, 5, "page {} still reports the whole result", page + 1);
+            let got = goon_core::db::search_items(
+                &conn,
+                goon_core::query::Scope::Media,
+                &plan,
+                2,
+                cursor.as_ref(),
+                true,
+            )
+            .unwrap();
+            assert_eq!(
+                got.total.unwrap(),
+                5,
+                "page {} still reports the whole result",
+                page + 1
+            );
             let last = match got.items.last() {
                 Some(row) => row,
                 None => break,

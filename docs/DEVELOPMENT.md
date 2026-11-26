@@ -409,11 +409,23 @@ tools/
   `filter_scale_probe`, so the three cannot drift into three different orders, and
   `db::AFTER_CURSOR` is its cursor form: `<` on the stamp (DESC), `>` on the id inside
   the tie (ASC). Compare in any other way and paging skips or repeats rows at exactly
-  the ties the tie-break exists for. `updated_at` itself is compared as TEXT, which is right only
-  because every stamp the writers make (`now_epoch_text()`) has one width — and
-  `items_updated_idx` is the index the page walks. Putting a `CAST` there, as the
-  *predicate* side needs for `added:`, would trade that index for a sort of the
-  whole table; `filter_scale_probe` prints what that trade costs.
+  the ties the tie-break exists for. SQLite's row-value form — `(updated_at, id) <
+  (?, ?)` — is the tempting shorthand and it is **wrong** for this order, because a
+  row value compares every component in the same direction while the grid runs its two
+  halves opposite ways; `a_row_value_cursor_is_the_wrong_comparison_for_a_mixed_direction_order`
+  shows it dropping a row out of a batch stamped in one second.
+
+  The grid orders the stamp **as stored** (TEXT), the `added:` / `updated:` predicates
+  compare `CAST(updated_at AS INTEGER)`, and the cursor compares the same TEXT the
+  `ORDER BY` sorts. Those are one and the same order only while every stamp has one
+  width, which is what `now_epoch_text()` writes: epoch seconds, ten digits from 2001
+  to 2286. If a stamp format ever changes, the `ORDER BY`, the cursor and the date
+  predicates change **together**, or paging sorts rows into an order the next page
+  cannot resume from; `the_stamp_is_one_width_so_the_text_order_and_the_numeric_order_agree`
+  is the check that notices, and it demonstrates the disagreement on a mixed-width
+  fixture. That is also why the page may not `CAST` inside the `ORDER BY` the way the
+  predicate does: it would trade `items_updated_idx`, the index the page walks, for a
+  sort of the whole table.
 
   Not replaced yet: `list_items` and `source_stats` still exist, because the rails
   that call them come out in stage S5/S6. S3 only adds the new entry points and
@@ -421,8 +433,8 @@ tools/
   `-stored:disk` and `-has:tags` are the same predicates those badges compute, so
   nothing drifts while both halves are alive.
 
-- **The query box on the wire** (stage S4) is three commands and one new argument:
-  `search_items(view, query, limit, after)` → `SearchPage`,
+- **The query box on the wire** (stage S4) is three commands and two new arguments:
+  `search_items(view, query, limit, after, with_count)` → `SearchPage`,
   `search_item_ids(view, query)` → `Vec<String>`, and
   `filter_suggest(view, text, limit)` → `Vec<Suggestion>`, all in `lib.rs` behind
   `planned_query(view, text)`, which is deliberately the **only** place a command
@@ -430,6 +442,16 @@ tools/
   `tag`/`site`/`source` arguments still exist for the rails, and S5 deletes the
   callers and the command in the same commit (plan §5: one wire shape, no legacy
   branch).
+
+  `with_count` defaults to `true`, and `false` answers with `total: null` instead of a
+  number. That is a measured split, not a taste: the count is a second statement over
+  the **whole** result, so at 100k items it costs 46-151 ms, against a page that is
+  3 ms for a fact query and 196 ms for a dense tag (`filter_scale_probe`, TESTING item
+  45).
+  A box that re-runs per keystroke spends most of its time on the number the user has
+  not asked for yet. `null` is the only honest spelling of "not counted" — as `0` it
+  would read as an empty library, which is the same lie as a capped count (invariant
+  27, pinned by `a_page_without_a_count_crosses_as_null_and_never_as_zero`).
 
   `after` is a `PageCursor { updatedAt, id }` — the sort key of the last row the grid
   actually showed — and there is **no offset anywhere in the codebase**. An offset is
@@ -816,6 +838,24 @@ tools/
     while it compares on exactly the key the `ORDER BY` sorts by, so the order lives
     in one string (`db::GRID_ORDER`), its cursor form in the const beside it
     (`db::AFTER_CURSOR`), and the two are never written out separately again.
+
+31. **Three readers treat the stamp as one order, and only its width keeps them in
+    step** (#76 review). `items.updated_at` is TEXT. `db::GRID_ORDER` sorts that TEXT,
+    `db::AFTER_CURSOR` compares that TEXT, and the `added:` / `updated:` predicates
+    compare `CAST(updated_at AS INTEGER)`. Those are one order only while every stamp
+    has the same digit count — epoch seconds, ten digits, 2001-09-09 to 2286-11-20.
+    On a mixed-width vault the two orders disagree (`'999999999'` ranks **above**
+    `'1000000000'` as text and below it as a number), and that is not a cosmetic
+    problem: a grid that sorts one way while its predicate and its cursor read the
+    other can resume page 2 from a row its own order never placed there.
+    `the_stamp_is_one_width_so_the_text_order_and_the_numeric_order_agree` pins both
+    halves — the width of what `now_epoch_text()` writes, and the disagreement on a
+    mixed fixture, so the test can actually fail. Do not repair a mixed vault by
+    putting a `CAST` in the `ORDER BY`: that moves the whole table into a temporary
+    B-tree and throws away `items_updated_idx`, the index the page walks (the same
+    probe measures the sort's cost: 196 ms on a 64 092-row result). If the stamp
+    format ever changes — ISO dates, milliseconds, anything — the order, the cursor
+    and the date predicates change in the **same** commit, together with that test.
 
 ## 5. Testing
 
