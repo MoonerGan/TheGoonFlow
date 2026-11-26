@@ -210,6 +210,8 @@ pub enum Node {
         cmp: Cmp,
         ratio: f64,
     },
+    /// `id:…` — one item, matched exactly. The app mints ids as
+    /// `new_id(prefix)`: `c-`/`g-`/`i-`/`v-`/`b-` then 20 lowercase hex digits.
     Id {
         id: String,
     },
@@ -513,7 +515,7 @@ fn value_hint(key: &str) -> String {
         "source" => "source:ehentai | -source:local".to_string(),
         "ext" => "ext:gif | ext:mp4".to_string(),
         "tag" => "tag:\"female:big_breasts\"".to_string(),
-        "id" => "id:01J…".to_string(),
+        "id" => "id:c-1f9a2b7c11d4e5a6b7c8".to_string(),
         "added" | "updated" => format!("{key}:>=2026-11-01"),
         _ => format!("{key}:…"),
     }
@@ -648,7 +650,7 @@ fn build(key: &str, cmp: Cmp, value: &str, token: &str) -> Result<Node, ParseErr
             ratio: decimal(value, token, "a width/height ratio, e.g. ratio:>2")?,
         },
         "id" => Node::Id {
-            id: word(value, 64, token, "an item id")?,
+            id: id_token(value, token)?,
         },
         "added" => Node::Added {
             cmp,
@@ -697,6 +699,28 @@ fn slug(value: &str, token: &str, expects: &str) -> Result<String, ParseError> {
         Ok(lowered)
     } else {
         Err(bad(token, format!("expects {expects}")))
+    }
+}
+
+/// The ids this app mints are `new_id(prefix)`: a letter, a hyphen, 20 lowercase
+/// hex digits (`c-` clip, `g-` game, `i-` images, `v-` video, `b-` bookmark).
+/// The plan's sketch wrote `id:<ulid>`; against the code the shape is a hyphen,
+/// so the hyphen is legal here and an unknown id is simply a query that matches
+/// nothing.
+fn id_token(value: &str, token: &str) -> Result<String, ParseError> {
+    let lowered = value.to_ascii_lowercase();
+    let ok = !lowered.is_empty()
+        && lowered.len() <= 64
+        && lowered
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-');
+    if ok {
+        Ok(lowered)
+    } else {
+        Err(bad(
+            token,
+            "id: expects an item id as the app minted it, e.g. id:c-1f9a2b7c11d4e5a6b7c8",
+        ))
     }
 }
 
@@ -1439,7 +1463,7 @@ mod tests {
         "ext:gif ext:mp4",
         "ratio:>2 height>800",
         "circle:\"Red Sun\" rating:>3",
-        "id:01JG9XYQ2M8R4K5N6P7Q8S9T0V",
+        "id:c-1f9a2b7c11d4e5a6b7c8",
         "added:2026-11-01 updated:>=2026-11-01T14:30",
         "-size>1gb type:gif",
         "stored:link -source:local type:video length:>90s",
@@ -1632,7 +1656,7 @@ mod tests {
                 "width" => "100",
                 "height" => "100",
                 "ratio" => "2",
-                "id" => "abc123",
+                "id" => "c-1f9a2b7c11d4e5a6b7c8",
                 "added" | "updated" => "2026-11-01",
                 other => other,
             };
@@ -2044,10 +2068,29 @@ mod tests {
     }
 
     #[test]
-    fn an_id_predicate_is_exact() {
-        let plan = media("id:01jg9xyq2m8r").plan();
+    fn an_id_predicate_is_exact_and_knows_the_real_id_shape() {
+        // The plan sketched `id:<ulid>`; the code mints `new_id(prefix)` =
+        // `c-`/`g-`/`i-`/`v-`/`b-` plus 20 hex digits, so the hyphen is part of
+        // every id in a real vault and a validator that forbade it would make
+        // `id:` useless.
+        let plan = media("id:c-1f9a2b7c11d4e5a6b7c8").plan();
         assert_eq!(plan.sql, "items.id = ?");
-        assert_eq!(plan.params, vec![Value::Text("01jg9xyq2m8r".into())]);
+        assert_eq!(
+            plan.params,
+            vec![Value::Text("c-1f9a2b7c11d4e5a6b7c8".into())]
+        );
+        // An id that does not exist is a query that matches nothing, not an
+        // error; one that cannot be an id at all says so.
+        assert!(
+            matches!(nodes("id:zz-00")[0], Node::Id { .. }),
+            "an unknown id still parses"
+        );
+        let e = error("id:cl/ip", Scope::Media);
+        assert!(
+            e.message.contains("c-1f9a2b7c11d4e5a6b7c8"),
+            "{}",
+            e.message
+        );
     }
 
     // ---- the vocabulary differs by view (plan §4: D14 in the grammar) -------

@@ -496,6 +496,11 @@ the board's *In review* column is the current list.
         `goon_core::query::VIDEO_EXTS`
         (`the_video_extension_list_is_the_one_the_grammar_reads`), so `type:video`
         cannot miss a file the importer called a video.
+      - `an_id_predicate_is_exact_and_knows_the_real_id_shape` pins the id shape
+        against the code rather than the plan: ids are `new_id(prefix)` —
+        `c-1f9a2b7c11d4e5a6b7c8`, hyphen included — not the ULID plan §4 sketched,
+        and an id that simply does not exist is a query matching nothing, not an
+        error (only `id:cl/ip`, which cannot be an id, is refused).
 
       What it costs, measured 2026-11-26 with a throwaway harness over 20 000
       rounds (the per-keystroke path stage S5 will use): parse+plan is **0.0032 ms**

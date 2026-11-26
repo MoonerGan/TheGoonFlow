@@ -321,7 +321,10 @@ tools/
   starts with a keyword is reached with `tag:"ext:something"`. Closed value sets
   are `type:` (video/image/gif), `has:` (thumb/tags), `stored:` (vault/disk/link)
   and `status:` (the five `model::Status` stages); `source:` and `ext:` take any
-  slug, since their vocabulary is the vault's (invariant 10). A quoted token on
+  slug, since their vocabulary is the vault's (invariant 10), and `id:` takes an
+  id in the shape the app mints (`new_id`: `c-`/`g-`/`i-`/`v-`/`b-` plus 20 hex
+  digits — the plan's `id:<ulid>` sketch was corrected against the code, since
+  every real id contains a hyphen). A quoted token on
   its own is the free-text search over `title` or `circle` — the same pair the old
   search box read, so replacing that box costs no capability. Three things the
   SQL has to get right: timestamps are TEXT epoch seconds so date predicates

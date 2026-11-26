@@ -261,11 +261,16 @@ exist — that is the point at which #77 moves.
 * The **22**-query example set prepares, binds and steps against the real v10
   schema in memory (`every_example_is_sql_the_schema_can_run`).
 
-**One bug this stage caught before a DB ever ran.** `type:video`'s extension arm
+**Two things this stage caught before a DB ever ran.** `type:video`'s extension arm
 was one parenthesis short — an AST test would have passed it and SQLite would
 have refused to prepare it. The paren-depth half of
-`every_placeholder_has_exactly_one_parameter` is what found it, and it stays as
-an invariant for every fragment S3 adds.
+`every_placeholder_has_exactly_one_parameter` is what found it, and it stays as an
+invariant for every fragment S3 adds. And `id:` was first validated as a bare
+alphanumeric word, which would have made the predicate useless in the field: the
+plan's sketch says `id:<ulid>`, but `new_id(prefix)` writes
+`c-1f9a2b7c11d4e5a6b7c8`, so every id in a real vault carries a hyphen. Checked
+against the code rather than the sketch, and pinned by
+`an_id_predicate_is_exact_and_knows_the_real_id_shape`.
 
 **Not in this stage.** Nothing runs yet: `plan()` has no production caller until
 S3's `db::search_items`, and there is no command, wire type or UI — the stage
