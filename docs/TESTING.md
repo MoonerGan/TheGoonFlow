@@ -747,6 +747,59 @@ the board's *In review* column is the current list.
         site is recorded (invariant 21); insert the ledger row the clip actually wrote
         and the same query finds the item.
 
+    44. **Paging a result that changes under the grid: cursor, not row count** (#76
+       plan open decision 10, now closed). The grid used to be able to ask for "page 5"
+       by counting rows; it can now ask only for "the next 300 rows after this one",
+       where *this one* is the sort key of the last row on screen. Two things had to be
+       measured before that was a decision rather than a taste: what an offset costs at
+       depth, and whether it is even correct while a bulk action is shortening the
+       result. Measured 2026-11-26 with `cargo test --workspace` = **231 passed,
+       0 failed, 8 ignored** (goon-core **121** (was 120), desktop **104** + 8 ignored
+       (was 103), vault 4, locator 2) in `tools/cargo-test-s5-paging.log`, and at 100k
+       items in `tools/filter-scale-20261126d.log` (plaintext SQLite, so a floor, not
+       the number a locked vault shows — the same caveat item 41 carries).
+       - `a_bulk_delete_cannot_make_a_paged_grid_skip_rows` is the correctness pin, on
+         the five-row `query_fixture()`: read a page of two (`q_big`, `q_small`), delete
+         exactly those two the way *Delete selected* does, and the cursor read returns
+         `q_unprobed`, `q_video` — the next two survivors, nothing passed over, `total`
+         still 3. The same test then runs the offset shape as its own counter-example,
+         because a hazard that is only described stays unfixed: `LIMIT 2 OFFSET 2` after
+         the delete returns `q_disk` alone, so `q_unprobed` and `q_video` are **never
+         shown**. `filter_scale_probe` prints the same event at scale —
+         `delete shift "big_breasts": 64092 matches, 20000 deleted in grid order (1200
+         of the 1200 rows on screen were among them)`, offset continuation at
+         **survivor #1200**, cursor continuation at **survivor #0**.
+       - The cost half, `paging` in the probe, 21 reps, p50/p95, both shapes returning
+         the same seven columns and the same page (the probe asserts the page sizes
+         agree, or the timings would be comparing different work):
+
+         | query | matches | page 1 | page 4 | last page |
+         | --- | --- | --- | --- | --- |
+         | `big_breasts` | 64 092 / 214 pages | 198/198 → 198/201 | 202/203 → 198/200 | 200/201 → **91/91** (page 214) |
+         | `big_breasts -anal` | 29 654 / 99 pages | 189/190 → 188/190 | 191/192 → 188/189 | 188/190 → **136/137** (page 99) |
+         | `-size>1gb type:gif` | 5 000 / 17 pages | 11/11 → 11/11 | 45/45 → 18/19 | 187/193 → **7/7** (page 17) |
+
+         (offset → cursor, ms). The plans printed above each table say why: the tag
+         queries end in `USE TEMP B-TREE FOR ORDER BY`, so they pay for sorting the
+         whole match set whoever pages them, and the cursor only saves the walk; the
+         fact query walks `items_updated_idx` and says `USE TEMP B-TREE FOR LAST TERM OF
+         ORDER BY`, so an offset is pure throwaway work — 180 ms of it to reach page 17.
+       - `select_all_ids_are_the_whole_result_in_grid_order` now walks the fixture five
+         times by cursor instead of five times by offset, and adds the end of the walk:
+         the page after the last row is empty **while `total` still says 5**, which is
+         the pair the header renders ("5 matches · 5 total", nothing left to load).
+       - `the_page_cursor_travels_the_wire_on_the_grid_sort_key` (desktop) pins the
+         serde spelling: `{"updatedAt":…,"id":…}` is protocol, and a cursor whose field
+         name drifted would deserialize as "no cursor", i.e. page one forever, which
+         reads like a 300-item library rather than like a bug. Its five rows all share
+         one `updated_at` — an importer's batch — so only the id arm of the cursor can
+         make progress, and pages of two visit every row exactly once.
+       - `db::GRID_ORDER` is why these can stay true: the page, `search_item_ids` and
+         the probe's counter-example all sort by that one string, and `db::AFTER_CURSOR`
+         is its cursor form (`<` on the stamp, `>` on the id inside the tie). Grep for
+         `OFFSET` in `crates/goon-core/src/db.rs`: the only hits are `list_items`, which
+         stage S5 deletes, and this counter-example.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

@@ -697,7 +697,9 @@ suggested until the prefix narrows. The fix would be a prefix-filtered read thro
   (`cookies.rs`, `http.rs`, `ingest.rs`, `video.rs`), which are left exactly as
   committed; `npm run build` clean (**135** modules); `svelte-check` **0 errors,
   0 warnings**.
-* `node tools/char-audit.js` over all **eight** touched files: one hit,
+* `node tools/char-audit.js` over all **seven** touched files (the eighth dropped out
+  when the branch was rebased onto main, whose own `char-audit.js` rewrite took the
+  allow-list change): one hit,
   `query.rs:456` **U+FF1A** — and that hit is on purpose: the line is the doc comment
   naming the fullwidth colon the grammar refuses, so it is an example of the bug, not
   the bug. Two fixes to the audit itself, because the S3 entry's "**CLEAN**" was
@@ -724,11 +726,127 @@ item 41 picked up in S3, and §1 gains the rustfmt warning plus the note that
 allow-listed codepoints (`± ’ ≡`), documented by the comment next to them.
 
 **For S5 (the media view).** Everything the UI needs is callable: one `searchItems`
-per debounce tick (the page always affordable, the total only on the tick), the
-suggestion rows with their counts, `searchItemIds` for select-all, and `needs_facts`
-beside `total` for the "not measured yet" row. S5 also carries the deletions that make
+per debounce tick — page **and** paired total in one call, 16-341 ms at 100k items, so
+the tick is what protects typing and the debounce is not optional (the follow-up entry
+has the split) — the suggestion rows with their counts, `searchItemIds` for select-all,
+and `needs_facts` beside `total` for the "not measured yet" row. "Load more" is
+`after`: the cursor `{ updatedAt, id }` of the last row on screen, taken from
+`ItemSummary` fields the grid already renders — there is no page number and no offset
+to keep in state (invariant 30). S5 also carries the deletions that make
 this one wire shape instead of two: `list_items`, `source_stats`, the four facet rails,
 and `listItems`' `tag`/`site`/`source` arguments, plus `tools/filter-ui-probe.js`.
 Two facts the UI has to say out loud, both already true in the data: tags are binary
 and case-sensitive while the title `LIKE` is not, and `ext:gif ext:mp4` is
 unsatisfiable by construction (one `extension` tag per item).
+
+---
+
+## S4 follow-up — the audit's last two glyphs, and open decision 10 closed by measurement (2026-11-26)
+
+Two pieces of work sit between S4 and S5. One closes a gate main handed this branch;
+the other answers the one demand on #76 that had an argument instead of a number
+attached: *is the grid paginated by row count or by a cursor?*
+
+**The audit's last two glyphs** (commit `9753579`). Main's repo-wide
+`char-audit.js` (77ba492) reported five lines in two files from this branch: `❌` ×3
+and `∈` ×1 in this map's own feasibility legend — `✅` and `⚠` were already
+allow-listed, so `❌` joins them with the reason stated and `∈` is element-of notation
+in one state-vocabulary line — and one fullwidth colon at `query.rs:456`. That last
+one is not a glyph problem: it sat inside the doc comment that *explains* the
+grammar's refusal of fullwidth lookalikes, so an auditor reading the finding cannot
+tell it from a PowerShell round-trip, and a gate that exits non-zero on it can never
+go green. The comment names the codepoint now (`U+FF1A`) and the refusal it documents
+is untouched — **still not allow-listed**, because a fullwidth colon in real text is
+exactly what the tool exists to find. Bare `node tools\char-audit.js`: **115 file(s)
+audited / CLEAN**, exit 0.
+
+**The measurement.** `filter_scale_probe` grew two sections, and both are shaped to
+measure the SQL production runs rather than a paraphrase of it:
+
+* `paging` times `db::page_statement` itself (the shipping statement, cursor variant),
+  against `offset_page`, the shape this stage replaced, built from the same
+  `db::PAGE_COLUMNS` and `db::GRID_ORDER`. That mattered: the first version compared a
+  two-column offset page against a seven-column cursor page and made the cursor look
+  **60 ms slower at page 1**, which was the thumbnail `EXISTS`, not the paging. Both
+  shapes now return the same seven columns, the probe asserts they return the same page
+  size at every depth, and `EXPLAIN QUERY PLAN` is printed for each so the diagnosis
+  sits in the log rather than being inferred from a number. Fixture: 100 000 items,
+  ~1 000 000 `item_tags` rows, 20 000 tags, db 104 MiB, plaintext SQLite (a floor, not
+  a locked vault's number), 21 reps, p50/p95 in ms, offset → cursor:
+
+  | query | matches | page 1 | page 4 | last page |
+  | --- | --- | --- | --- | --- |
+  | `big_breasts` | 64 092 / 214 pages | 198/198 → 198/201 | 202/203 → 198/200 | 200/201 → **91/91** (page 214, 192 rows) |
+  | `big_breasts -anal` | 29 654 / 99 pages | 189/190 → 188/190 | 191/192 → 188/189 | 188/190 → **136/137** (page 99, 254 rows) |
+  | `-size>1gb type:gif` | 5 000 / 17 pages | 11/11 → 11/11 | 45/45 → **18/19** | 187/193 → **7/7** (page 17, 200 rows) |
+
+  The plans explain the two shapes of the result. The tag queries end in
+  `USE TEMP B-TREE FOR ORDER BY`: SQLite materialises all 64 092 matching ids and sorts
+  them before `LIMIT`, so the sort dominates and the cursor only saves the walk over
+  the skipped rows (0 ms at page 1, 109 ms at page 214). The fact query walks
+  `items_updated_idx` and prints `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`, which is
+  where an offset is pure throwaway work: **180 ms to reach page 17 of a 5 000-row
+  result**, 7 ms for the cursor.
+* `delete shift` is the correctness half, and it is the half that decides. Four pages
+  read the way the grid read them, then 20 000 of the matched rows deleted in grid
+  order through the same predicate — the size and shape of #73's *Delete selected* —
+  then the continuation read both ways:
+
+  ```
+  delete shift "big_breasts": 64092 matches, 20000 deleted in grid order
+    (1200 of the 1200 rows on screen were among them)
+      offset continuation starts at survivor #1200, so 1200 surviving rows were passed over
+      cursor continuation starts at survivor #0, so 0 surviving rows were passed over
+  ```
+
+**The decision (plan §9 decision 10, closed).** The grid pages by cursor:
+`search_items(view, query, limit, after)`, `after = { updatedAt, id }` — the sort key
+of the last row actually on screen — and there is no `OFFSET` anywhere in the query
+path. The cursor is never the slower shape at the top (198/198 against 198/201 at page
+1, i.e. within noise), it is up to 180 ms cheaper at depth, and the offset shape is
+simply wrong for a library where bulk actions run while a page is open: 1 200 rows
+that were never shown leave the walk. "Load more" means "the next 300 after this row".
+Two details that make the cursor safe rather than clever: the order is one string,
+`db::GRID_ORDER`, used by the page, by `search_item_ids` and by the probe, and
+`db::AFTER_CURSOR` is its cursor form (`<` on the stamp, `>` on the id inside the tie)
+— a cursor that compared the pair differently would skip or repeat rows at exactly the
+stamps an importer writes in one second. `updatedAt` crosses as the stored TEXT stamp,
+because that is what the grid orders by; casting it would compare in one order and
+sort in another.
+
+**What changed.** `db.rs`: `PageCursor`, `GRID_ORDER`, `PAGE_COLUMNS`, `AFTER_CURSOR`,
+`page_statement`, and `search_items(…, after)` in place of `search_items(…, offset)`.
+`list_items` keeps its offset and its **tie-break-less** `ORDER BY` — the same defect
+in a worse form — and stage S5 deletes it. `lib.rs`/`api.ts`: the command argument and
+the `PageCursor` type. Two new pins: `a_bulk_delete_cannot_make_a_paged_grid_skip_rows`
+(goon-core, 5 rows, both shapes, the offset one kept as the counter-example) and
+`the_page_cursor_travels_the_wire_on_the_grid_sort_key` (desktop, serde spelling plus
+five rows sharing one stamp). `select_all_ids_are_the_whole_result_in_grid_order` walks
+by cursor now and asserts the page past the end is empty while `total` still says 5.
+
+**Gates.** `cargo test --workspace` = **231 passed, 0 failed, 8 ignored** (goon-core
+**121**, desktop **104** + 8 ignored, vault 4, locator 2), `tools/cargo-test-s5-paging.log`;
+release probe `tools/filter-scale-20261126d.log`; `cargo build -p goon-core --examples`
+with no compiler warnings beyond the vendored-openssl PDB line; `rustfmt --check` 0 for
+`db.rs` and the probe; `npm run build` and `svelte-check` **0/0** (`api.ts` is in this
+contract); `node tools\char-audit.js` = **115 file(s) audited / CLEAN**.
+
+**The honest budget outcome, which goes on #76 rather than staying in a log.** Plan §6
+asked for the §4 worked set "under ~50 ms end-to-end" at 100k items. **The budget is
+missed, and the miss is not the paging.** Same fixture, page+total p50/p95: 16/16
+(`added:>=2024-06-01 updated:>2023-01-15`), 24/24 (`ext:gif ext:mp4`), 34/34
+(`circle:"Red Sun" rating:>3`), 38/38 (`ext:gif`) — and 285/289 (`big_breasts`),
+339/341 (`big_breasts -anal`), 227/228 (`width<400 type:image -has:thumb`), 180/181
+(`ratio:>2 height>800`). Of 18 worked rows, **4 are under 50 ms**; the slowest grid
+call is 341 ms. Splitting the cost: the paired count alone runs 12-171 ms, and the
+`big_breasts` page by itself is 198 ms, because the plan sorts all 64 092 matching ids
+in a temp B-tree before `LIMIT 300`. What follows for S5, and is now evidence rather
+than a guess: the total must not be paid per keystroke — and as written `search_items`
+**always** pays it, since the page and the count are one call — so the debounce tick is
+what protects typing today, and a page-only read (the same `page_statement` without the
+`count_matches` beside it) is one function away if S5's own measurement says it is
+needed. Decision 9 (FTS5 vs `LIKE`) should be reopened on the
+dense-tag-sort number rather than on a title-scan guess, and this card cannot be called
+Done against the §6 budget as written — the board should either restate the budget as
+"narrow predicates under 50 ms, dense tags measured and paginated" or buy the index
+that removes the sort.

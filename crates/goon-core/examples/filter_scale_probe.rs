@@ -106,7 +106,8 @@ fn main() -> Result<(), String> {
             .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
             .plan();
         let matches = db::count_matches(&conn, Scope::Media, &plan).expect("counts");
-        let page = timed(|| db::search_items(&conn, Scope::Media, &plan, PAGE, 0).expect("page"));
+        let page =
+            timed(|| db::search_items(&conn, Scope::Media, &plan, PAGE, None).expect("page"));
         let total = timed(|| db::count_matches(&conn, Scope::Media, &plan).expect("counts"));
         println!(
             "{:<44} {:>8} ms {:>8} ms {:>8} ms {:>8} ms {:>9}",
@@ -131,9 +132,259 @@ fn main() -> Result<(), String> {
     explain(&conn, "size>100mb");
     explain(&conn, "type:video");
 
+    // Last, because this section ends by deleting rows: decision 10 (plan §9),
+    // measured instead of argued.
+    paging(&conn).map_err(|e| format!("paging: {e}"))?;
+
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
+}
+
+/// The grid order, read from `db::GRID_ORDER` rather than written out again here:
+/// the page, the select-all list and this probe's counter-example have to sort the
+/// same way, and a probe that invented its own order would be measuring a query
+/// production never runs. TEXT on both sides, which is stage S3's order.
+const ORDER: &str = db::GRID_ORDER;
+
+/// Where `updated_at` sits in `db::PAGE_COLUMNS`. Both page readers take it from
+/// that column, so the cursor the probe measures is built from the same value the
+/// `ORDER BY` compares — and both shapes return the same seven columns, which is
+/// what makes their timings comparable.
+const UPDATED_AT_COLUMN: usize = 6;
+
+/// The page shape this stage **replaced**, kept here as the counter-example: the
+/// page statement production runs contains no offset anywhere in it.
+fn offset_page(
+    conn: &Connection,
+    where_sql: &str,
+    plan: &query::Plan,
+    offset: i64,
+) -> Vec<(String, String)> {
+    let sql = format!("{}{where_sql}{ORDER} LIMIT ? OFFSET ?", db::PAGE_COLUMNS);
+    let mut params = plan.params.clone();
+    params.push(query::Value::Int(PAGE));
+    params.push(query::Value::Int(offset));
+    let mut stmt = conn.prepare_cached(&sql).expect("offset page prepares");
+    stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        Ok((r.get(0)?, r.get(UPDATED_AT_COLUMN)?))
+    })
+    .expect("offset page runs")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("offset page rows")
+}
+
+/// The page shape production runs, taken from `db::page_statement` itself: the
+/// timings and the `EXPLAIN` below are of the shipping SQL, not a paraphrase of it.
+fn cursor_page(
+    conn: &Connection,
+    plan: &query::Plan,
+    cursor: Option<&db::PageCursor>,
+) -> Vec<(String, String)> {
+    let (sql, params) = db::page_statement(Scope::Media, plan, cursor, PAGE);
+    let mut stmt = conn.prepare_cached(&sql).expect("cursor page prepares");
+    stmt.query_map(rusqlite::params_from_iter(params.iter()), |r| {
+        Ok((r.get(0)?, r.get(UPDATED_AT_COLUMN)?))
+    })
+    .expect("cursor page runs")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("cursor page rows")
+}
+
+/// Decision 10 (plan §9): does the grid page by `OFFSET`, or by a cursor over its
+/// own sort key? Two things decide it, and both are measured here rather than
+/// argued: the **cost** at depth (an offset has to produce the rows before the page
+/// and throw them away), and the **correctness** of continuing a page walk across a
+/// bulk delete, which is what #73's *Delete selected* does to a grid the user is
+/// looking at.
+fn paging(conn: &Connection) -> rusqlite::Result<()> {
+    for text in ["big_breasts", "big_breasts -anal", "-size>1gb type:gif"] {
+        page_costs(conn, text)?;
+    }
+    // Last, and only once, because it deletes rows: every number above is measured
+    // on the fixture exactly as the table above printed it.
+    delete_shift(conn, "big_breasts")
+}
+
+/// The cost half: the plan SQLite picks for both shapes, and the page time at
+/// several depths. `EXPLAIN` is printed rather than summarised because it is the
+/// diagnosis - whether a deep page pays for a sort of the whole match set or an
+/// index walk that stops early is visible in the text.
+fn page_costs(conn: &Connection, text: &str) -> rusqlite::Result<()> {
+    let plan = query::parse(text, Scope::Media)
+        .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
+        .plan();
+    let where_sql = db::planned_where(Scope::Media, &plan);
+    let total = db::count_matches(conn, Scope::Media, &plan)?;
+    let pages = (total + PAGE - 1) / PAGE;
+    println!("\npaging {text:?}: {total} matches in {pages} pages of {PAGE}");
+
+    // A real cursor to explain against: the last row of page 1, read with the
+    // statement production runs.
+    let first = cursor_page(conn, &plan, None);
+    let last = first.last().expect("page 1 has rows");
+    let seed = db::PageCursor {
+        updated_at: last.1.clone(),
+        id: last.0.clone(),
+    };
+    let mut off_params = plan.params.clone();
+    off_params.push(query::Value::Int(PAGE));
+    off_params.push(query::Value::Int((pages.max(1) - 1) * PAGE));
+    explain_shape(
+        conn,
+        "offset page",
+        &format!("{}{where_sql}{ORDER} LIMIT ? OFFSET ?", db::PAGE_COLUMNS,),
+        &off_params,
+    );
+    let (cur_sql, cur_params) = db::page_statement(Scope::Media, &plan, Some(&seed), PAGE);
+    explain_shape(conn, "cursor page", &cur_sql, &cur_params);
+
+    println!(
+        "  {:>6} {:>9} {:>14} {:>14} {:>9} {:>6}",
+        "page", "offset", "offset p50/p95", "cursor p50/p95", "delta", "rows"
+    );
+    // Depth is the whole point: page 1 is where both shapes cost the same, and the
+    // last page is where an offset has walked every row before it. Never past the
+    // end: a page that does not exist measures an empty result, not a deep one.
+    let mut depths: Vec<i64> = vec![1, 4, pages.min(40), pages];
+    depths.retain(|&p| p >= 1);
+    depths.sort_unstable();
+    depths.dedup();
+    let mut cursor: Option<db::PageCursor> = None;
+    let mut walked = 0_i64;
+    for &page in &depths {
+        while walked < page - 1 {
+            match cursor_page(conn, &plan, cursor.as_ref()).last() {
+                Some((id, at)) => {
+                    cursor = Some(db::PageCursor {
+                        updated_at: at.clone(),
+                        id: id.clone(),
+                    })
+                }
+                None => break,
+            }
+            walked += 1;
+        }
+        let offset = (page - 1) * PAGE;
+        let offs = timed(|| offset_page(conn, &where_sql, &plan, offset));
+        let cur = cursor.clone();
+        let key = timed(|| cursor_page(conn, &plan, cur.as_ref()));
+        // Both shapes must land on the same page. If they ever stop agreeing, the
+        // timings are comparing different work, so the probe says so instead of
+        // printing a pretty difference.
+        let off_rows = offset_page(conn, &where_sql, &plan, offset).len();
+        let cur_rows = cursor_page(conn, &plan, cur.as_ref()).len();
+        assert_eq!(
+            off_rows, cur_rows,
+            "{text:?} page {page}: offset and cursor returned different page sizes"
+        );
+        println!(
+            "  {:>6} {:>9} {:>7}/{:<6} {:>7}/{:<6} {:>8} ms {:>6}",
+            page,
+            offset,
+            offs.0,
+            offs.1,
+            key.0,
+            key.1,
+            offs.0 as i64 - key.0 as i64,
+            off_rows,
+        );
+    }
+    Ok(())
+}
+
+/// The correctness half. Read four pages the way the grid used to read them, delete
+/// 20 000 of the matched rows in grid order through the same predicate - the size of
+/// #73's *Delete selected* - and then continue the walk both ways. Ranks are
+/// positions in `search_item_ids`, stage S4's own endpoint, which is the id list the
+/// UI would be holding while the user pages.
+fn delete_shift(conn: &Connection, text: &str) -> rusqlite::Result<()> {
+    let plan = query::parse(text, Scope::Media)
+        .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
+        .plan();
+    let where_sql = db::planned_where(Scope::Media, &plan);
+    let total = db::count_matches(conn, Scope::Media, &plan)?;
+    let seen: Vec<String> = (0..4)
+        .flat_map(|p| {
+            offset_page(conn, &where_sql, &plan, p * PAGE)
+                .into_iter()
+                .map(|(id, _)| id)
+        })
+        .collect();
+    // The cursor of the last row on screen, taken by the shipping shape.
+    let mut cursor: Option<db::PageCursor> = None;
+    for _ in 0..4 {
+        match cursor_page(conn, &plan, cursor.as_ref()).last() {
+            Some((id, at)) => {
+                cursor = Some(db::PageCursor {
+                    updated_at: at.clone(),
+                    id: id.clone(),
+                })
+            }
+            None => break,
+        }
+    }
+    let page4 = cursor.expect("four pages of a dense query exist");
+
+    let doomed = std::cmp::min(20_000_i64, total);
+    let mut doomed_params = plan.params.clone();
+    doomed_params.push(query::Value::Int(doomed));
+    conn.execute(
+        &format!(
+            "DELETE FROM items WHERE id IN (SELECT items.id FROM items{where_sql}{ORDER} LIMIT ?)"
+        ),
+        rusqlite::params_from_iter(doomed_params.iter()),
+    )?;
+    let survivors = db::search_item_ids(conn, Scope::Media, &plan)?;
+    let rank: std::collections::HashMap<String, usize> = survivors
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.clone(), i))
+        .collect();
+    let cont_off = offset_page(conn, &where_sql, &plan, 4 * PAGE);
+    let cont_key = cursor_page(conn, &plan, Some(&page4));
+    let describe = |row: Option<&(String, String)>| -> String {
+        match row {
+            None => "nothing left".to_string(),
+            Some((id, _)) => match rank.get(id) {
+                Some(r) => format!("survivor #{r}, so {r} surviving rows were passed over"),
+                None => "a row the survivor list does not contain".to_string(),
+            },
+        }
+    };
+    println!(
+        "\ndelete shift {text:?}: {total} matches, {doomed} deleted in grid order \
+         ({} of the {} rows on screen were among them)",
+        seen.iter()
+            .filter(|id| !rank.contains_key(id.as_str()))
+            .count(),
+        seen.len()
+    );
+    println!(
+        "    offset continuation starts at {}",
+        describe(cont_off.first())
+    );
+    println!(
+        "    cursor continuation starts at {}",
+        describe(cont_key.first())
+    );
+    Ok(())
+}
+
+/// Prints the plan SQLite chooses for one page shape, values and all, so a sort of
+/// the whole match set is visible in the log instead of inferred from a number.
+fn explain_shape(conn: &Connection, label: &str, sql: &str, params: &[query::Value]) {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain prepares");
+    for row in stmt
+        .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+            r.get::<_, String>(3)
+        })
+        .expect("explain runs")
+    {
+        println!("  {:<12} {}", label, row.expect("explain row"));
+    }
 }
 
 /// Times one closure `REPS` times and returns (p50, p95) in milliseconds. The

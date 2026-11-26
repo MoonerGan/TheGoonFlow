@@ -909,13 +909,21 @@ fn planned_query(
 /// views are two vocabularies and two kind sets, and the scope is AND-ed into
 /// the SQL — a query can never open the other view (D14, and `planned_where` in
 /// `db.rs` enforces it).
+///
+/// `after` is the cursor of the last row the grid showed; `None` is page one. There
+/// is no page number and no offset, because an offset is a position in a list that
+/// *Delete selected* may have just shortened: at 100k items, deleting 20 000 matched
+/// rows and then continuing by offset starts **1 200 surviving rows past** where the
+/// user was, so those rows are never shown (`filter_scale_probe`, TESTING item 44).
+/// The cursor compares on the grid's own sort key, so the next page is the next page
+/// no matter what was deleted behind it.
 #[tauri::command]
 fn search_items(
     state: tauri::State<'_, AppState>,
     view: String,
     query: Option<String>,
     limit: Option<i64>,
-    offset: Option<i64>,
+    after: Option<goon_core::db::PageCursor>,
 ) -> Result<goon_core::db::SearchPage, String> {
     let (scope, plan) = planned_query(&view, query)?;
     let inner = state.inner.lock().unwrap();
@@ -925,7 +933,7 @@ fn search_items(
         scope,
         &plan,
         limit.unwrap_or(300),
-        offset.unwrap_or(0),
+        after.as_ref(),
     )
     .map_err(err)
 }
@@ -2705,6 +2713,62 @@ mod integration_tests {
         // as a toast (invariant 24).
         let e = planned_query("media", Some("status:wishlist".into())).unwrap_err();
         assert!(e.contains("status"), "{e}");
+    }
+
+    /// #76 decision 10: the page cursor on the wire. Tauri builds [`goon_core::db::PageCursor`]
+    /// from the JS object by serde, so the field spelling is protocol: `updatedAt`
+    /// has to be the JSON name the grid read the stamp out of, and a cursor whose
+    /// spelling drifted deserialises as if the caller sent nothing at all - page one
+    /// forever, which looks like a 300-item library rather than like a bug.
+    #[test]
+    fn the_page_cursor_travels_the_wire_on_the_grid_sort_key() {
+        let cursor: goon_core::db::PageCursor =
+            serde_json::from_str(r#"{"updatedAt":"1760000000","id":"w1"}"#).unwrap();
+        assert_eq!(
+            (cursor.updated_at.as_str(), cursor.id.as_str()),
+            ("1760000000", "w1"),
+            "the two halves of the grid's own ORDER BY, under the names the grid sends"
+        );
+
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        goon_core::db::init_schema(&conn).unwrap();
+        // One stamp for every row: an importer writes a batch in the same second, and
+        // with nothing but the stamp to compare, a paged walk needs the id arm of the
+        // cursor to make progress at all.
+        for n in 0..5 {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, status, created_at, updated_at)
+                 VALUES (?1, 'gallery', ?2, 'seen', '1760000000', '1760000000')",
+                rusqlite::params![format!("w{n}"), format!("Fixture wire {n}")],
+            )
+            .unwrap();
+        }
+        // Quoted, deliberately: a bare word is a **tag** term in this grammar and
+        // would match nothing here, while a quoted phrase is the title LIKE. Getting
+        // that backwards is the usual way this test would fail for the wrong reason.
+        let (_, plan) = planned_query("media", Some("\"fixture wire\"".into())).unwrap();
+
+        let mut walked: Vec<String> = Vec::new();
+        let mut cursor: Option<goon_core::db::PageCursor> = None;
+        for page in 0..4 {
+            let got = goon_core::db::search_items(&conn, goon_core::query::Scope::Media, &plan, 2, cursor.as_ref())
+                .unwrap();
+            assert_eq!(got.total, 5, "page {} still reports the whole result", page + 1);
+            let last = match got.items.last() {
+                Some(row) => row,
+                None => break,
+            };
+            cursor = Some(goon_core::db::PageCursor {
+                updated_at: last.updated_at.clone(),
+                id: last.id.clone(),
+            });
+            walked.extend(got.items.into_iter().map(|row| row.id));
+        }
+        assert_eq!(
+            walked,
+            ["w0", "w1", "w2", "w3", "w4"],
+            "pages of two, taken by cursor, visit every row exactly once on a shared stamp"
+        );
     }
 
     /// #76 S4: `add_item_tag`'s new `site:` argument. `tag_site_slug` is the

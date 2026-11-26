@@ -349,9 +349,12 @@ CREATE INDEX media_item_kind_idx  ON media(item_id, kind);        -- has:/stored
   no BLOB touched: the grid query must never include `data` (frames already
   avoid it, media.rs:436).
 - The 300-row unpaginated ceiling (db.rs `ListQuery.limit`, views'
-  `listItems(300…)`) is now visible: add a "load more" offset like the current
-  one, plus the total from the paired COUNT. Keyset pagination is *not* required
-  yet (open decision 10).
+  `listItems(300…)`) is now visible: the grid pages, and the paired COUNT says how
+  big the result really is. **Open decision 10 is closed: the page resumes on a
+  cursor over its own sort key (`PageCursor { updatedAt, id }`), not on an
+  `OFFSET`** — at 100k items an offset skips 1 200 surviving rows when a bulk delete
+  shortens the result mid-walk, and costs 187 ms where the cursor costs 7 ms to reach
+  the same page (`filter_scale_probe`; DEVELOPMENT invariant 30, TESTING item 44).
 - Measurement, not assumption: a generated 100k-item fixture vault and a timing
   probe (§8) must show the worked-example set under ~50 ms end-to-end before the
   card is Done.
@@ -441,8 +444,20 @@ New checks this card needs:
    vanishing. Recommendation: keep them as presets.
 9. **FTS5 or LIKE.** LIKE un-indexed at ≤100k (recommended; measure at S3/S7
    before buying an index), FTS5 only if the scale probe misses the budget.
-10. **Pagination**: keep "first 300 + load more" with the visible total
-    (recommended, minimal), or keyset pagination now.
+10. **Pagination** — **closed 2026-11-26 by measurement, not by preference.** The
+    grid pages by cursor (`after = { updatedAt, id }`, the sort key of the last row on
+    screen); there is no `OFFSET` anywhere in the query path. Cost, at 100k items,
+    21 reps, p50/p95: reaching the last page of `-size>1gb type:gif` (5 000 matches,
+    17 pages) costs **187/193 ms by offset and 7/7 ms by cursor**; of `big_breasts`
+    (64 092 matches, 214 pages) **200/201 against 91/91**; at page 1 the two are the
+    same shape (198/198 against 198/201), so the cursor is never the slower one.
+    Correctness decided it: read four pages, delete 20 000 of the matched rows in grid
+    order (what #73's
+    *Delete selected* does to a grid the user is looking at), and the offset
+    continuation starts at **survivor #1200** — 1 200 rows the user was never shown
+    leave the walk — while the cursor continuation starts at survivor #0.
+    `filter_scale_probe`'s `paging` and `delete shift` sections print both halves, and
+    TESTING item 44 pins them.
 11. **`f95-completed` moves to `site_flag`** during backfill (one-row type fix
     consistent with D9). Recommendation: yes, in v10.
 12. **Games grammar**: `status:` in the same query box replaces the pipeline

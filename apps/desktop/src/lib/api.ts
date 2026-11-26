@@ -284,17 +284,24 @@ export type Suggestion = {
   count: number | null;
 };
 
+/** Where the grid stopped: the sort key of the last row actually on screen. The
+ *  next page means "the rows after this one", never "skip N rows" — a bulk delete
+ *  during a paged walk shifts an offset, and at 100k items one delete hid 1 200
+ *  surviving rows from a reader that used one (TESTING item 44). `updatedAt` is the
+ *  stamp **as stored**, compared as text, because that is how the grid orders. */
+export type PageCursor = { updatedAt: string; id: string };
+
 export const searchItems = (
   view: QueryView,
   query?: string,
   limit = 300,
-  offset = 0,
+  after?: PageCursor,
 ) =>
   invoke<SearchPage>("search_items", {
     view,
     query: query ?? null,
     limit,
-    offset,
+    after: after ?? null,
   });
 
 /** Every id the query matches, in grid order, no page limit: what "select all"

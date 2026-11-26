@@ -4,7 +4,7 @@
 use crate::model::{Item, ItemKind, Status};
 use crate::query::{closed_values, keywords, Plan, Scope, SuggestCtx, Value};
 use rusqlite::{params, Connection, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -848,42 +848,113 @@ pub struct SearchPage {
     pub needs_facts: bool,
 }
 
+/// Where the grid stopped: the sort key of the last row the user was actually
+/// shown. The grid asks for "the next `limit` rows after this one", not "skip N
+/// rows", because an offset is a position in a list that a bulk action keeps
+/// changing. `filter_scale_probe` deletes 20 000 matched rows out of a 64 092-row
+/// result and reads the next page both ways (TESTING item 44): the `OFFSET` read
+/// starts **1 200 surviving rows past** where the user was, so those rows are never
+/// shown, while the cursor read starts at the first survivor after the cursor and
+/// passes nothing over. #73's *Delete selected* is that delete.
+///
+/// Both fields are one struct rather than two optional arguments because half a
+/// cursor is not a question: a cursor with the stamp but not the id would drop the
+/// id tie-break, and page 1 and page 2 would stop being disjoint — the same defect
+/// the `ORDER BY` already carries a tie-break to prevent.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageCursor {
+    /// `items.updated_at` **as stored** — TEXT, ten digits — because the grid's
+    /// order compares that TEXT, so the cursor has to compare in the same order
+    /// (see the order note on [`search_items`]).
+    pub updated_at: String,
+    pub id: String,
+}
+
+/// The grid's order, as one string, because three readers have to agree on it: the
+/// page, the select-all id list, and `filter_scale_probe`'s counter-example. The id
+/// tie-break is not decoration — an importer stamps a batch in the same second, and
+/// without it the page-1 and page-2 sorts are independent, which repeats some rows
+/// and silently drops others. It is also what makes a cursor possible at all: a row
+/// whose place in the order is not unique cannot name a position to resume after.
+pub const GRID_ORDER: &str = " ORDER BY updated_at DESC, items.id";
+
+/// The cursor half, as its own fragment, because it has to read exactly like
+/// [`GRID_ORDER`]: `<` on the stamp (sorted DESC) and `>` on the id inside the tie
+/// (sorted ASC). No other paging shape may use a different pair, and no row is ever
+/// skipped by arithmetic.
+const AFTER_CURSOR: &str = " AND (items.updated_at < ? OR (items.updated_at = ? AND items.id > ?))";
+
+/// The row shape of one grid page, as its own fragment. Public for the same reason
+/// [`planned_where`] is: `filter_scale_probe` times the `OFFSET` page this stage
+/// replaced against the shipping statement, and a counter-example that selected a
+/// different column list would be comparing different work — the thumbnail `EXISTS`
+/// alone is a correlated subquery per row.
+pub const PAGE_COLUMNS: &str = "SELECT id, kind, title, status, version,
+                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
+                updated_at
+         FROM items";
+
+/// The page statement: the one predicate, then the cursor, then the limit. Public
+/// so `filter_scale_probe` times and explains the string production runs instead of
+/// a paraphrase of it — the `OFFSET` variant the probe compares that against is the
+/// shape this replaced, and it exists nowhere else in the codebase.
+pub fn page_statement(
+    scope: Scope,
+    plan: &Plan,
+    after: Option<&PageCursor>,
+    limit: i64,
+) -> (String, Vec<Value>) {
+    let mut sql = format!("{PAGE_COLUMNS}{}", planned_where(scope, plan));
+    let mut params = plan.params.clone();
+    if let Some(cursor) = after {
+        sql.push_str(AFTER_CURSOR);
+        params.push(Value::Text(cursor.updated_at.clone()));
+        params.push(Value::Text(cursor.updated_at.clone()));
+        params.push(Value::Text(cursor.id.clone()));
+    }
+    sql.push_str(GRID_ORDER);
+    sql.push_str(" LIMIT ?");
+    params.push(Value::Int(limit));
+    (sql, params)
+}
+
 /// The grid, filtered by a parsed query: one page and the paired total.
 ///
-/// The count is a separate statement on purpose. `filter_scale_probe`
-/// (TESTING item 41) measured it at 88 ms for a dense tag and up to 174 ms for a
-/// fact range at 100k items, while a `LIMIT 300` page can stop early on the
-/// `updated_at` order and costs 1-10 ms for those same fact queries: the total, not
-/// the grid, is what a keystroke must not pay. Callers that do not want the number
-/// use [`count_matches`] or [`search_item_ids`] directly.
+/// `after` is the cursor of the last visible row ([`PageCursor`]); `None` is page
+/// one. There is deliberately **no** offset: an offset counts rows that another
+/// action may have deleted in the meantime, which is how a paged grid loses rows
+/// without ever showing them (measured in the probe, and pinned by the test
+/// `a_bulk_delete_cannot_make_a_paged_grid_skip_rows`).
+///
+/// The count is a separate statement on purpose, and it counts the **whole**
+/// result, cursor or no cursor — "N matches · M total" is about the predicate, not
+/// about the page. `filter_scale_probe` (TESTING item 41) measured the count at
+/// 88 ms for a dense tag and up to 174 ms for a fact range at 100k items, while a
+/// 300-row page can stop early on the `updated_at` order and costs 1-10 ms for
+/// those same fact queries: the total, not the grid, is what a keystroke must not
+/// pay. Callers that do not want the number use [`count_matches`] or
+/// [`search_item_ids`] directly.
 ///
 /// `ORDER BY updated_at DESC, items.id`: the id tie-break is not decoration. An
 /// importer stamps a dozen items with the same second, and with no tie-break the
 /// page-1 and page-2 sorts are independent, which repeats some rows and silently
-/// drops others.
+/// drops others — and a cursor could not be built from a row whose position in the
+/// order is not unique.
 pub fn search_items(
     conn: &Connection,
     scope: Scope,
     plan: &Plan,
     limit: i64,
-    offset: i64,
+    after: Option<&PageCursor>,
 ) -> rusqlite::Result<SearchPage> {
-    let sql = format!(
-        "SELECT id, kind, title, status, version,
-                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
-                updated_at
-         FROM items{}
-         ORDER BY updated_at DESC, items.id
-         LIMIT ? OFFSET ?",
-        planned_where(scope, plan)
-    );
+    let (sql, params) = page_statement(scope, plan, after, limit);
     let mut items = Vec::new();
     {
         // Scoped: the statement borrows the connection, and the count below needs
         // the connection back.
         let mut stmt = conn.prepare_cached(&sql)?;
-        let bound = planned_params(plan, &[limit, offset]);
-        let rows = stmt.query_map(rusqlite::params_from_iter(bound.iter()), map_item_summary)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(params.iter()), map_item_summary)?;
         for row in rows {
             items.push(row?);
         }
@@ -914,7 +985,7 @@ pub fn search_item_ids(
     plan: &Plan,
 ) -> rusqlite::Result<Vec<String>> {
     let sql = format!(
-        "SELECT items.id FROM items{} ORDER BY updated_at DESC, items.id",
+        "SELECT items.id FROM items{}{GRID_ORDER}",
         planned_where(scope, plan)
     );
     let mut stmt = conn.prepare_cached(&sql)?;
@@ -3608,7 +3679,7 @@ mod tests {
     fn the_page_and_the_paired_total_come_from_one_predicate() {
         let conn = query_fixture();
         let plan = query::parse("big_breasts", Scope::Media).unwrap().plan();
-        let page = search_items(&conn, Scope::Media, &plan, 300, 0).unwrap();
+        let page = search_items(&conn, Scope::Media, &plan, 300, None).unwrap();
         assert_eq!(page.items.len(), 2);
         // The fold match reaches both spellings: `big_breasts` and
         // `female:big_breasts` are one tag family for a bare word.
@@ -3647,7 +3718,7 @@ mod tests {
     #[test]
     fn the_total_counts_the_result_and_the_page_limits_the_rows() {
         let conn = query_fixture();
-        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, 0).unwrap();
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
         assert_eq!(page.items.len(), 2, "the page is a page");
         assert_eq!(page.total, 5, "the total is the whole media library");
         assert_eq!(
@@ -3668,27 +3739,89 @@ mod tests {
             matched(&conn, "", Scope::Media),
             ["q_big", "q_small", "q_unprobed", "q_video", "q_disk"]
         );
-        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, 0).unwrap();
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
         assert_eq!(
             page.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
             ["q_big", "q_small"],
             "the page is a prefix of the select-all list, not a different set"
         );
-        // Five pages of one row each, and no row appears twice or not at all.
+        // Five pages of one row each, taken by cursor, and no row appears twice or
+        // not at all. Page 2 is the interesting one: its cursor is `q_big`, which
+        // shares its stamp with `q_small`, so only the id arm of the predicate can
+        // find it.
         let mut paged: Vec<String> = Vec::new();
-        for offset in 0..5 {
-            paged.extend(
-                search_items(&conn, Scope::Media, &Plan::default(), 1, offset)
-                    .unwrap()
-                    .items
-                    .into_iter()
-                    .map(|i| i.id),
-            );
+        let mut cursor: Option<PageCursor> = None;
+        for _ in 0..5 {
+            let page =
+                search_items(&conn, Scope::Media, &Plan::default(), 1, cursor.as_ref()).unwrap();
+            let last = page.items.last().expect("a page of the fixture has a row");
+            cursor = Some(PageCursor {
+                updated_at: last.updated_at.clone(),
+                id: last.id.clone(),
+            });
+            paged.extend(page.items.into_iter().map(|i| i.id));
         }
         assert_eq!(
             paged,
             matched(&conn, "", Scope::Media),
-            "paging is lossless"
+            "paging is lossless: every id exactly once, in grid order"
+        );
+        let past = search_items(&conn, Scope::Media, &Plan::default(), 5, cursor.as_ref()).unwrap();
+        assert!(
+            past.items.is_empty(),
+            "and the walk ends: the cursor past the last row matches nothing"
+        );
+        assert_eq!(
+            past.total, 5,
+            "while the total still reports the whole result"
+        );
+    }
+
+    /// The reason the grid has no offset. Read one page, delete the rows on it the
+    /// way #73's *Delete selected* does, then continue the walk both ways. The
+    /// cursor shows the surviving rows in order; an offset counts the survivors from
+    /// the top of the list and so walks past rows nobody ever saw.
+    #[test]
+    fn a_bulk_delete_cannot_make_a_paged_grid_skip_rows() {
+        let conn = query_fixture();
+        let first = search_items(&conn, Scope::Media, &Plan::default(), 2, None).unwrap();
+        let shown: Vec<String> = first.items.iter().map(|i| i.id.clone()).collect();
+        assert_eq!(shown, ["q_big", "q_small"]);
+        let cursor = PageCursor {
+            updated_at: first.items[1].updated_at.clone(),
+            id: first.items[1].id.clone(),
+        };
+        conn.execute("DELETE FROM items WHERE id IN ('q_big','q_small')", [])
+            .unwrap();
+
+        // What production does: continue from the last row that was on screen.
+        let next = search_items(&conn, Scope::Media, &Plan::default(), 2, Some(&cursor)).unwrap();
+        assert_eq!(
+            next.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["q_unprobed", "q_video"],
+            "the next two survivors, in order, with nothing passed over"
+        );
+        assert_eq!(next.total, 3, "and the total is still the whole result");
+
+        // What an offset would have done, kept here as the counter-example so the
+        // hazard stays measurable. The same predicate, the same page size, the same
+        // position in the walk - and two surviving rows are never shown.
+        let sql = format!(
+            "SELECT items.id FROM items{}{GRID_ORDER} LIMIT ? OFFSET ?",
+            planned_where(Scope::Media, &Plan::default())
+        );
+        let mut stmt = conn.prepare(&sql).unwrap();
+        let skipped: Vec<String> = stmt
+            .query_map(params![2_i64, 2_i64], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            skipped,
+            ["q_disk"],
+            "the offset read lands past q_unprobed and q_video: two survivors the \
+             user would never have reached, which is exactly what deleting 20 000 rows \
+             does at 100k (filter_scale_probe prints the same effect at scale)"
         );
     }
 
@@ -3765,14 +3898,14 @@ mod tests {
         let conn = query_fixture();
         let facts = query::parse("size>1gb", Scope::Media).unwrap().plan();
         assert!(
-            search_items(&conn, Scope::Media, &facts, 300, 0)
+            search_items(&conn, Scope::Media, &facts, 300, None)
                 .unwrap()
                 .needs_facts,
             "a zero from this predicate is not yet an answer"
         );
         let plain = query::parse("big_breasts", Scope::Media).unwrap().plan();
         assert!(
-            !search_items(&conn, Scope::Media, &plain, 300, 0)
+            !search_items(&conn, Scope::Media, &plain, 300, None)
                 .unwrap()
                 .needs_facts,
             "and a tag query does not get to claim the vault is unmeasured"

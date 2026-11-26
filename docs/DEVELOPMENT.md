@@ -401,10 +401,15 @@ tools/
   `Plan::needs_facts()` riding along, so a `0 matches` from `size>1gb` renders as
   "not measured yet · measure my files" (invariant 27) instead of as an answer.
 
-  Ordering is `updated_at DESC, items.id`. The `id` is not decoration: an importer
-  stamps a batch of items with the same second, and with no tie-break the page-1
-  and page-2 sorts are independent, so a paged read repeats one row and silently
-  drops another. `updated_at` itself is compared as TEXT, which is right only
+  Ordering is `db::GRID_ORDER` = `updated_at DESC, items.id`. The `id` is not
+  decoration: an importer stamps a batch of items with the same second, and with no
+  tie-break the page-1 and page-2 sorts are independent, so a paged read repeats one
+  row and silently drops another — and no cursor could name a position to resume
+  after. That order is one string used by the page, by `search_item_ids` and by
+  `filter_scale_probe`, so the three cannot drift into three different orders, and
+  `db::AFTER_CURSOR` is its cursor form: `<` on the stamp (DESC), `>` on the id inside
+  the tie (ASC). Compare in any other way and paging skips or repeats rows at exactly
+  the ties the tie-break exists for. `updated_at` itself is compared as TEXT, which is right only
   because every stamp the writers make (`now_epoch_text()`) has one width — and
   `items_updated_idx` is the index the page walks. Putting a `CAST` there, as the
   *predicate* side needs for `added:`, would trade that index for a sort of the
@@ -417,7 +422,7 @@ tools/
   nothing drifts while both halves are alive.
 
 - **The query box on the wire** (stage S4) is three commands and one new argument:
-  `search_items(view, query, limit, offset)` → `SearchPage`,
+  `search_items(view, query, limit, after)` → `SearchPage`,
   `search_item_ids(view, query)` → `Vec<String>`, and
   `filter_suggest(view, text, limit)` → `Vec<Suggestion>`, all in `lib.rs` behind
   `planned_query(view, text)`, which is deliberately the **only** place a command
@@ -425,6 +430,17 @@ tools/
   `tag`/`site`/`source` arguments still exist for the rails, and S5 deletes the
   callers and the command in the same commit (plan §5: one wire shape, no legacy
   branch).
+
+  `after` is a `PageCursor { updatedAt, id }` — the sort key of the last row the grid
+  actually showed — and there is **no offset anywhere in the codebase**. An offset is
+  a position in a list that a bulk action keeps changing: at 100k items, deleting
+  20 000 matched rows and then reading "page 5" by offset lands **1 200 surviving
+  rows past** where the user was, so those rows are never shown, while the cursor
+  read lands on the first survivor after it (measured in `filter_scale_probe`,
+  pinned by `a_bulk_delete_cannot_make_a_paged_grid_skip_rows`; open decision 10 is
+  closed on those numbers, not on preference). `updatedAt` crosses as the stored TEXT
+  stamp because that is what the grid orders by; a cursor that cast it would compare
+  in one order and sort in another.
 
   The view travels as a **word**, parsed by `query::Scope::parse_wire`: exactly
   `media` and `games` are legal and anything else is refused *naming both*, so a
@@ -784,6 +800,22 @@ tools/
     general rule: when quoting a green check, know what the command actually
     looked at — a pass line with no coverage count is a red flag, and audit tools
     must state their coverage.
+
+30. **A grid page resumes on its own sort key, never on a row count** (#76, plan
+    open decision 10, closed by measurement rather than preference). `search_items`
+    takes `after: PageCursor { updatedAt, id }` and there is **no `OFFSET` anywhere in
+    the query path**. The reason is a measured one. `filter_scale_probe` at 100k items
+    reads four pages of `big_breasts` (64 092 matches), deletes 20 000 of the matched
+    rows in grid order — the shape of #73's *Delete selected* — and continues the walk
+    both ways: the offset read resumes at **survivor #1200**, so 1 200 rows the user
+    was never shown leave the walk, while the cursor read resumes at survivor #0 and
+    passes nothing over. Depth is the other half: on the last page of a 5 000-match
+    fact query the offset page costs 187 ms p50 and the cursor page 7 ms. Both halves
+    are pinned — `a_bulk_delete_cannot_make_a_paged_grid_skip_rows` in `goon-core` and
+    the probe's `delete shift` section (TESTING item 44). A cursor is only correct
+    while it compares on exactly the key the `ORDER BY` sorts by, so the order lives
+    in one string (`db::GRID_ORDER`), its cursor form in the const beside it
+    (`db::AFTER_CURSOR`), and the two are never written out separately again.
 
 ## 5. Testing
 
