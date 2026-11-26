@@ -550,6 +550,18 @@ tools/
     path can carry, `INLINE_MAX` and `MAX_MEDIA_BYTES` move together — storing more
     than the viewer can be shown is not allowed.
 
+29. **A check that cannot fail is worse than no check** (found 2026-11-26 while
+    reviewing #76). `tools/char-audit.js` read only its file arguments, so
+    `node tools\char-audit.js` with no arguments audited **nothing** and printed
+    `CLEAN`. Several commit messages, including ones written by this repo's
+    reviewer, quoted that `CLEAN` as evidence. The tool now audits every
+    git-tracked text file by default, reports how many files it examined, treats a
+    BOM or U+FFFD as a finding on its own (the signature of a text round-trip
+    through PowerShell), and exits non-zero when anything needs inspection. The
+    general rule: when quoting a green check, know what the command actually
+    looked at — a pass line with no coverage count is a red flag, and audit tools
+    must state their coverage.
+
 ## 5. Testing
 
 ```powershell
