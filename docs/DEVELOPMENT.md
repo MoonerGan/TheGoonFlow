@@ -321,7 +321,9 @@ tools/
   starts with a keyword is reached with `tag:"ext:something"`. Closed value sets
   are `type:` (video/image/gif), `has:` (thumb/tags), `stored:` (vault/disk/link)
   and `status:` (the five `model::Status` stages); `source:` and `ext:` take any
-  slug, since their vocabulary is the vault's (invariant 10). Three things the
+  slug, since their vocabulary is the vault's (invariant 10). A quoted token on
+  its own is the free-text search over `title` or `circle` — the same pair the old
+  search box read, so replacing that box costs no capability. Three things the
   SQL has to get right: timestamps are TEXT epoch seconds so date predicates
   compare `CAST(created_at AS INTEGER)` against an epoch the **parser** computed
   (`'999999999' > '1000000000'` is true as text); a bare `added:2026-11-01` is the

@@ -465,7 +465,10 @@ the board's *In review* column is the current list.
         extension arm was one parenthesis short, which SQLite would have refused
         to prepare and no AST test would have caught.
       - the colon stays overloaded on purpose: `female:big_breasts`, `foo:bar` and
-        `other:variant_set` are literal tags, while `ext:banana` is a **predicate**
+        `other:variant_set` are literal tags, and so is the `<site>:<name>` form
+        (`ehentai:big_breasts`, `local:clip`) — plan §9 decision 2 deliberately
+        does not reserve that shorthand, so a grammar sugar added later cannot
+        break a query that exists today. Meanwhile `ext:banana` is a **predicate**
         whatever the value (`ext_is_reserved_whatever_the_value_is` — reservation
         must not depend on what a vault happens to contain), and
         `tag:"ext:something"` / `tag:"type:video"` / `tag:size` are the escape

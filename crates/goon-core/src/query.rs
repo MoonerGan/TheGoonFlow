@@ -159,7 +159,9 @@ pub enum Node {
     ExactTag {
         name: String,
     },
-    /// A quoted phrase on its own: the free-text title search.
+    /// A quoted phrase on its own: the free-text search, over `title` or
+    /// `circle` — exactly what the old search box read, so replacing that box
+    /// costs no capability.
     Title {
         phrase: String,
     },
@@ -1515,6 +1517,16 @@ mod tests {
                 matches!(nodes(token)[0], Node::Tag { .. }),
                 "{token:?} should be a tag, got {:?}",
                 nodes(token)[0]
+            );
+        }
+        // Plan §9 decision 2: the `<site>:<name>` shorthand is deliberately NOT
+        // reserved, so a query written today still means a literal tag match if
+        // a future grammar adds the sugar - nothing that exists can break.
+        for token in ["ehentai:big_breasts", "local:clip", "gelbooru:big_breasts"] {
+            assert_eq!(
+                nodes(token),
+                vec![Node::Tag { name: token.into() }],
+                "{token} must stay a literal tag until the shorthand is reserved"
             );
         }
     }

@@ -198,9 +198,12 @@ plan, with no database handle anywhere in the module.
   predicate exactly like `ext:gif` (`ext_is_reserved_whatever_the_value_is`).
   The escape hatch is pinned in both directions: `tag:"ext:something"`,
   `tag:"type:video"` and `tag:size` reach a literal name that contains (or is) a
-  keyword. Autocomplete note for S5: when a keyword form matches nothing, the
-  suggester may add "no items with `ext:x`; did you mean the tag literally named
-  `ext:x`?" — that is what `Node::ExactTag` exists for.
+  keyword, while the `<site>:<name>` form (`ehentai:big_breasts`) stays a literal
+  tag because decision 2 deliberately does not reserve that shorthand — a sugar
+  added later cannot break a query that exists today. Autocomplete note for S5:
+  when a keyword form matches nothing, the suggester may add "no items with
+  `ext:x`; did you mean the tag literally named `ext:x`?" — that is what
+  `Node::ExactTag` exists for.
 * **Requirement 2 — dates are integer comparisons.** The parser converts the
   typed value itself (`2026-11-01`, `2026-11-01T14:30`, `…:14:30:15`, or a bare
   epoch) and the plan compares `CAST(items.created_at AS INTEGER)` /
