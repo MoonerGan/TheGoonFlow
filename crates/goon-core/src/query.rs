@@ -453,10 +453,12 @@ pub fn parse(input: &str, scope: Scope) -> Result<Query, ParseError> {
 /// The characters that make a query look right and parse wrong: a control,
 /// format or bidi mark (invisible, so `big_breasts<U+200B>anal` is one tag name
 /// that matches nothing) or a lookalike of the `-`, `:` or `=` the grammar runs
-/// on (`–anal` with an en dash is not a negation at all, and `type：video` with a
-/// fullwidth colon is not a predicate). Rejected in the grammar, never silently
-/// normalized: normalizing would mean the text shown in the chip row is not what
-/// the user typed.
+/// on (`–anal` with an en dash is not a negation at all, and `type` followed by
+/// U+FF1A, a fullwidth colon, is not a predicate). Named by codepoint rather than
+/// spelled, because `tools/char-audit.js` audits this file and a doc comment that
+/// embeds the very glyph the grammar refuses reads like mojibake. Rejected in the
+/// grammar, never silently normalized: normalizing would mean the text shown in
+/// the chip row is not what the user typed.
 fn invisible_or_lookalike(c: char) -> Option<&'static str> {
     if c.is_control() && !c.is_whitespace() {
         return Some("a control character");

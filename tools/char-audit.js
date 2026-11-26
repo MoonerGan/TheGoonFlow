@@ -23,6 +23,8 @@ const OK = new Set([
   0x201c, 0x201d, // “ ” curly quotes inside UI sentences
   0x21ba, 0x25c0, 0x25b8, // ↺ revert, ◀ ▶ step buttons the viewer really draws
   0x1f512, // 🔒 the lock screen's glyph
+  0x274c, // ❌ completes the ✅ / ⚠ / ❌ feasibility legend in docs/plan/76-map.md
+  0x2208, // ∈ element-of, in the plan's state vocabulary (`state ∈ {…}`)
 ]);
 const CJK = (c) => c >= 0x3000 && c <= 0x9fff;
 
