@@ -21,15 +21,28 @@
 //!   27). Most fragments get that for free from SQL's three-valued logic:
 //!   `NULL > 100` is NULL, and a NULL in a `WHERE` is not a match. The one place
 //!   it has to be spelled out is `ratio`, where the division needs a
-//!   non-zero-divisor guard first.
-//! * **Dates are integer comparisons.** `items.created_at` / `items.updated_at`
-//!   are TEXT holding epoch *seconds*, and `CAST(… AS INTEGER)` is the whole
-//!   point: `'999999999' > '1000000000'` is true lexically, false numerically.
-//!   The parser converts a typed date to an epoch itself, so a date string is
-//!   never bound as a string.
+//!   non-zero-divisor guard first. A [`Plan`] also reports which facts it read
+//!   ([`Plan::unmeasured`]) so the caller can say "not measured yet" instead of
+//!   presenting a zero as an answer.
+//! * **Dates are integer comparisons, and a day is a UTC day.**
+//!   `items.created_at` / `items.updated_at` are TEXT holding epoch *seconds*, and
+//!   `CAST(… AS INTEGER)` is the whole point: `'999999999' > '1000000000'` is true
+//!   lexically, false numerically. The parser converts a typed date to an epoch
+//!   itself, so a date string is never bound as a string. The day boundary is UTC
+//!   on purpose: the same query text must select the same rows on every machine,
+//!   which a per-machine timezone would break (and would make the tests depend on
+//!   where they ran). The wording users see says "UTC day" rather than pretending
+//!   to know the user's zone.
 //! * **Negation is exact.** Every negated term is `items.id NOT IN (…)` or
 //!   `NOT EXISTS (…)`, never "filter the page afterwards" — the whole query
-//!   result is what filtering, counts and *Select all* act on (76-rulings C).
+//!   result is what filtering, counts and *Select all* act on (76-rulings C). The
+//!   exception is a negated **fact**: `-size>10mb` plans the contrary comparison
+//!   (`bytes <= ?`), because `NOT (bytes > ?)` is true for a file nobody ever
+//!   measured, and "un-measured" is not the same fact as "small".
+//! * **Media predicates are `EXISTS`, never a join.** An item has several `media`
+//!   rows (`thumb`, `full`, `video`), so a `JOIN media` in the grid query would
+//!   multiply both the rows and the paired `COUNT(*)`; and no fact predicate ever
+//!   reads a `thumb` row, because a re-encoded tile is not the item's size.
 //! * **Nothing here is stored.** The box's text is session state: this module
 //!   takes a `&str`, returns an AST and a parameterized fragment, and never
 //!   writes to the vault — no connection exists in this file at all. A [`Plan`]
@@ -74,6 +87,23 @@ impl Cmp {
         }
     }
 
+    /// The comparison that means "measured, and not this". Used for a **negated
+    /// fact** term (`-size>10mb`), where wrapping the fragment in `NOT (…)` would
+    /// be a lie: `NOT (bytes > ?)` is true for a NULL column, so every un-probed
+    /// item would answer "not big" — the exact claim invariant 27 forbids. A
+    /// negated fact must name the contrary measurement instead, and SQL's
+    /// three-valued logic then does the honest part: `NULL <= ?` is NULL, so an
+    /// un-measured item matches neither side.
+    fn opposite_sql(self) -> &'static str {
+        match self {
+            Cmp::Eq => "<>",
+            Cmp::Gt => "<=",
+            Cmp::Ge => "<",
+            Cmp::Lt => ">=",
+            Cmp::Le => ">",
+        }
+    }
+
     /// True for the keywords that compare numbers or epochs, i.e. the only ones
     /// that may be typed with an operator at all.
     fn allowed(key: &str) -> bool {
@@ -102,12 +132,17 @@ pub enum HasWhat {
 }
 
 /// `stored:` — the derived storage shape (plan §3.3): vault BLOB, on-disk file,
-/// or still only a link. Derived, never a column, until #73 gives an item a
-/// real location.
+/// on-disk file *and nothing else*, or still only a link. Derived, never a
+/// column, until #73 gives an item a real location.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoredShape {
     Vault,
     Disk,
+    /// The old #40 `local_only` badge, one-to-one: a local source **and** no
+    /// source from any other site. `stored:disk` alone is wider (it also matches
+    /// an item that has a local file *and* a site page), and a preset that
+    /// silently widened the set it selected is what rulings C forbids.
+    LocalOnly,
     Link,
 }
 
@@ -248,21 +283,28 @@ impl Query {
     pub fn plan(&self) -> Plan {
         let mut fragments: Vec<String> = Vec::with_capacity(self.terms.len());
         let mut params: Vec<Value> = Vec::new();
+        let mut unmeasured: Vec<FactKey> = Vec::new();
         for term in &self.terms {
-            let one = fragment(&term.node, &mut params);
-            fragments.push(if !term.negated {
-                one
-            } else if one.starts_with("EXISTS (") {
-                // A bare existence probe reads better (and plans better) as
-                // `NOT EXISTS (…)` than as `NOT (EXISTS (…))`.
-                format!("NOT {one}")
+            fact_keys(&term.node, &mut unmeasured);
+            let one = fragment(&term.node, term.negated, &mut params);
+            fragments.push(if term.negated && !self_negates(&term.node) {
+                if one.starts_with("EXISTS (") {
+                    // A bare existence probe reads better (and plans better) as
+                    // `NOT EXISTS (…)` than as `NOT (EXISTS (…))`.
+                    format!("NOT {one}")
+                } else {
+                    format!("NOT ({one})")
+                }
             } else {
-                format!("NOT ({one})")
+                // A negated fact already planned its contrary comparison;
+                // wrapping it in NOT would let an un-measured item answer.
+                one
             });
         }
         Plan {
             sql: fragments.join(" AND "),
             params,
+            unmeasured,
         }
     }
 }
@@ -314,7 +356,7 @@ pub fn closed_values(key: &str) -> &'static [&'static str] {
     match key {
         "type" => &["video", "image", "gif"],
         "has" => &["thumb", "tags"],
-        "stored" => &["vault", "disk", "link"],
+        "stored" => &["vault", "disk", "local-only", "link"],
         "status" => STATUSES,
         _ => &[],
     }
@@ -329,14 +371,97 @@ pub fn keywords(scope: Scope) -> Vec<&'static str> {
         .collect()
 }
 
+/// How much the box may hold. Two ceilings, both chosen so the failure is an
+/// inline form state rather than a SQLite prepare error (plan §5: a parse error
+/// is a value):
+///
+/// * 50 terms — the widest fragment is `type:video` at 5 parameters, so 50 terms
+///   stay far below `SQLITE_MAX_VARIABLE_NUMBER` (999) and well inside
+///   `SQLITE_MAX_SQL_LENGTH`;
+/// * 2 048 characters, which is more query than this grammar can express
+///   usefully and keeps the suggester's per-keystroke re-plan trivial.
+pub const MAX_TERMS: usize = 50;
+pub const MAX_INPUT_CHARS: usize = 2_048;
+
+/// The vocabulary one view accepts, spelled out for an error message. Generated
+/// from [`keywords`], so a hint cannot go stale when the set grows: a
+/// hand-written "type:, stored:, has:, size:" list inside an error message is a
+/// promise the parser is not obliged to keep.
+fn keyword_hint(scope: Scope) -> String {
+    keywords(scope)
+        .iter()
+        .map(|key| format!("{key}:"))
+        .collect::<Vec<String>>()
+        .join(" ")
+}
+
 /// Parse the query box's contents for a view. An empty box is an empty query,
 /// not an error: it means "everything", which is what the grid shows.
 pub fn parse(input: &str, scope: Scope) -> Result<Query, ParseError> {
-    let mut terms = Vec::new();
-    for token in tokenize(input)? {
+    if input.chars().count() > MAX_INPUT_CHARS {
+        // An empty `token` means "the whole box" - see ParseError.
+        return Err(bad(
+            "",
+            format!(
+                "that is more query than the box holds: {MAX_INPUT_CHARS} characters, so one \
+                 fewer term"
+            ),
+        ));
+    }
+    let tokens = tokenize(input)?;
+    if tokens.len() > MAX_TERMS {
+        let extra = &tokens[MAX_TERMS];
+        return Err(bad(
+            extra,
+            format!(
+                "{MAX_TERMS} terms is the most one query can be; this is term {} - drop \
+                 something",
+                tokens.len()
+            ),
+        ));
+    }
+    let mut terms = Vec::with_capacity(tokens.len());
+    for token in tokens {
         terms.push(parse_term(&token, scope)?);
     }
     Ok(Query { terms })
+}
+
+/// The characters that make a query look right and parse wrong: a control,
+/// format or bidi mark (invisible, so `big_breasts<U+200B>anal` is one tag name
+/// that matches nothing) or a lookalike of the `-`, `:` or `=` the grammar runs
+/// on (`–anal` with an en dash is not a negation at all, and `type：video` with a
+/// fullwidth colon is not a predicate). Rejected in the grammar, never silently
+/// normalized: normalizing would mean the text shown in the chip row is not what
+/// the user typed.
+fn invisible_or_lookalike(c: char) -> Option<&'static str> {
+    if c.is_control() && !c.is_whitespace() {
+        return Some("a control character");
+    }
+    if matches!(
+        c,
+        '\u{ad}'
+            | '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{206a}'..='\u{206f}'
+            | '\u{feff}'
+    ) {
+        return Some("an invisible formatting or right-to-left mark");
+    }
+    if matches!(
+        c,
+        '\u{2010}'..='\u{2015}' | '\u{2212}' | '\u{fe58}' | '\u{fe63}' | '\u{ff0d}'
+    ) {
+        return Some("a dash that is not the '-' this grammar uses");
+    }
+    if c == '\u{ff1a}' {
+        return Some("a colon that is not the ':' this grammar uses");
+    }
+    if matches!(c, '\u{ff1d}' | '\u{2212}' | '\u{2264}' | '\u{2265}') {
+        return Some("a comparison sign this grammar cannot read");
+    }
+    None
 }
 
 /// Splits on whitespace while keeping a `"…"` run together, wherever the quote
@@ -347,6 +472,9 @@ fn tokenize(input: &str) -> Result<Vec<String>, ParseError> {
     let mut current: Option<String> = None;
     let mut chars = input.chars();
     while let Some(c) = chars.next() {
+        // `char::is_whitespace` covers NBSP and the other Unicode spaces, so a
+        // stray NBSP separates terms instead of hiding inside a tag name. Pinned
+        // on purpose: it is what makes a copy-paste from a web page behave.
         if c.is_whitespace() {
             if let Some(token) = current.take() {
                 out.push(token);
@@ -354,6 +482,9 @@ fn tokenize(input: &str) -> Result<Vec<String>, ParseError> {
             continue;
         }
         if c == '"' {
+            // Inside quotes the text is data, not grammar: a scraped title really
+            // can hold a soft hyphen or a bidi mark, and the one place the user
+            // can ask for it verbatim has to stay open.
             let mut run = String::from('"');
             let mut closed = false;
             for inner in chars.by_ref() {
@@ -371,6 +502,17 @@ fn tokenize(input: &str) -> Result<Vec<String>, ParseError> {
             }
             current.get_or_insert_with(String::new).push_str(&run);
             continue;
+        }
+        if let Some(what) = invisible_or_lookalike(c) {
+            let so_far: String = current.take().unwrap_or_default();
+            return Err(bad(
+                &format!("{so_far}{c}"),
+                format!(
+                    "that term contains {what} (U+{:04X}), which no tag in this library can \
+                     match - type '-' or ':' in plain ASCII",
+                    c as u32
+                ),
+            ));
         }
         current.get_or_insert_with(String::new).push(c);
     }
@@ -394,9 +536,20 @@ fn parse_term(token: &str, scope: Scope) -> Result<Term, ParseError> {
 
     let node = match unquoted(rest) {
         // A quoted token on its own is the free-text search, same as the old box.
-        Some(phrase) => Node::Title {
-            phrase: phrase.to_string(),
-        },
+        Some(phrase) => {
+            if phrase.trim().is_empty() {
+                // `""` would plan as `LIKE '%%'` and answer "every item in the
+                // library", which is the opposite of what an empty pair of quotes
+                // looks like it asks for.
+                return Err(bad(
+                    token,
+                    "empty quotes search for nothing: type a word, as in \"summer witch\"",
+                ));
+            }
+            Node::Title {
+                phrase: phrase.to_string(),
+            }
+        }
         None => match parse_predicate(rest, token, scope)? {
             Some(node) => node,
             // Not a keyword, so a tag name — `female:big_breasts` and an unknown
@@ -427,11 +580,18 @@ fn unquoted(value: &str) -> Option<&str> {
 }
 
 /// Splits `keyword [cmp] ':' [cmp] value` into operator and value. Both the
-/// spellings the plan freezes parse: `size>100mb` and `size:>100mb`.
+/// spellings the plan freezes parse: `size>100mb` and `size:>100mb`, and plan §4's
+/// EBNF also allows the colon-free `rating=3`.
 fn split_operator(tail: &str) -> Option<(Cmp, &str)> {
     if let Some(after_colon) = tail.strip_prefix(':') {
         let (cmp, value) = split_cmp(after_colon);
         return Some((cmp, value));
+    }
+    // `key=value` with no colon. It has to be an explicit `=`: treating "no
+    // operator" as Eq too would turn `size-ish`, `id#3` and `taggart` into
+    // predicates, and those have to stay tag names (plan §9 decision 2).
+    if let Some(after_eq) = tail.strip_prefix('=') {
+        return Some((Cmp::Eq, after_eq.strip_prefix(':').unwrap_or(after_eq)));
     }
     let (cmp, value) = split_cmp(tail);
     if cmp == Cmp::Eq {
@@ -471,8 +631,11 @@ fn parse_predicate(rest: &str, token: &str, scope: Scope) -> Result<Option<Node>
     if GAMES_ONLY_KEYWORDS.contains(&key.as_str()) && scope == Scope::Media {
         return Err(bad(
             token,
-            "`status:` is a Games word - media items have no pipeline status \
-             (what the media view can ask is type:, stored:, has:, size:, length:)",
+            format!(
+                "`status:` is a Games word - a media item has no pipeline status. The words \
+                 this view does know: {}",
+                keyword_hint(scope)
+            ),
         ));
     }
     let tail = &rest[key_len..];
@@ -551,7 +714,7 @@ fn build(key: &str, cmp: Cmp, value: &str, token: &str) -> Result<Node, ParseErr
             site: slug(value, token, "a site name: source:ehentai, -source:local")?,
         },
         "tag" => {
-            if value.is_empty() {
+            if value.trim().is_empty() {
                 return Err(bad(
                     token,
                     "tag: needs the name exactly as the site spells it, \
@@ -589,13 +752,17 @@ fn build(key: &str, cmp: Cmp, value: &str, token: &str) -> Result<Node, ParseErr
             "link" => Node::Stored {
                 shape: StoredShape::Link,
             },
+            "local-only" => Node::Stored {
+                shape: StoredShape::LocalOnly,
+            },
             other => {
                 return Err(bad(
                     token,
                     format!(
-                        "`stored:{other}` is not a storage shape - the three are stored:vault \
-                         (bytes in the vault), stored:disk (a file on this machine) and \
-                         stored:link (still only a url)"
+                        "`stored:{other}` is not a storage shape - the four are stored:vault \
+                         (bytes in the vault), stored:disk (a file on this machine), \
+                         stored:local-only (a file here and no source from any site, which \
+                         is the old 'local only' queue) and stored:link (still only a url)"
                     ),
                 ))
             }
@@ -618,7 +785,7 @@ fn build(key: &str, cmp: Cmp, value: &str, token: &str) -> Result<Node, ParseErr
             Node::Status { status: lowered }
         }
         "circle" => {
-            if value.is_empty() {
+            if value.trim().is_empty() {
                 return Err(bad(token, "circle: needs a name, or a quoted phrase"));
             }
             Node::Circle {
@@ -724,10 +891,11 @@ fn id_token(value: &str, token: &str) -> Result<String, ParseError> {
     }
 }
 
+/// A whole count that cannot be negative. `width>-100` would otherwise parse,
+/// match every measured image, and look like a filter that works.
 fn count(value: &str, token: &str, expects: &str) -> Result<i64, ParseError> {
-    value
-        .parse::<i64>()
-        .map_err(|_| bad(token, format!("expects {expects}")))
+    let parsed = value.trim().parse::<i64>().ok().filter(|n| *n >= 0);
+    parsed.ok_or_else(|| bad(token, format!("expects {expects}")))
 }
 
 fn decimal(value: &str, token: &str, expects: &str) -> Result<f64, ParseError> {
@@ -801,7 +969,12 @@ fn duration_ms(value: &str, token: &str) -> Result<i64, ParseError> {
             total =
                 step.ok_or_else(|| bad(token, "that length is too large to compare against"))?;
         }
-        return Ok(total.saturating_mul(1000));
+        // Checked, not saturating: `saturating_mul(1000)` would silently accept a
+        // length the guard above just refused, and a comparison against
+        // `i64::MAX` milliseconds matches nothing while looking like a filter.
+        return total
+            .checked_mul(1_000)
+            .ok_or_else(|| bad(token, "that length is too large to compare against"));
     }
     let (number, seconds_each) = if let Some(rest) = text.strip_suffix("ms") {
         (rest, 0.001)
@@ -815,21 +988,46 @@ fn duration_ms(value: &str, token: &str) -> Result<i64, ParseError> {
         (text, 1.0)
     };
     let amount = decimal(number, token, expect)?;
-    Ok((amount * seconds_each * 1000.0) as i64)
+    let ms = amount * seconds_each * 1000.0;
+    // Same rule as the colon form and as `byte_size`: a number this big is a
+    // typo, and `as i64` on a float that does not fit saturates to `i64::MAX`,
+    // which is a query that answers "nothing" forever without saying so.
+    if ms > i64::MAX as f64 {
+        return Err(bad(token, "that length is too large to compare against"));
+    }
+    Ok(ms as i64)
 }
 
 /// A date or datetime, converted here to epoch seconds. `2026-11-01`,
 /// `2026-11-01T14:30`, `2026-11-01T14:30:15`, and a bare epoch integer. A day is
 /// a half-open interval, never an exact second (review requirement: an equality
 /// against a second-resolution timestamp is a query that matches nothing).
+///
+/// Two bounds keep this a parser and not a panic:
+///
+/// * the year is **four digits**, because `added:11-01-02` is a typo for a date
+///   and not the year 11 CE, and because the arithmetic below is only safe for a
+///   year in `1..=9999`;
+/// * every multiply and add is **checked**, because a 12-digit year used to reach
+///   `days_from_civil(300000000000, 1, 1) * 86_400`, which overflows in a test
+///   build as a panic and in a release build as a wrapped epoch that can match
+///   every item in the library.
 fn epoch(value: &str, token: &str) -> Result<DateValue, ParseError> {
     let text = value.trim();
-    let expect = "a date: added:2026-11-01, added:>=2026-11-01, updated:<2026-11-01T14:30";
+    let expect = "a date: added:2026-11-01, added:>=2026-11-01, updated:<2026-11-01T14:30 \
+                  (a day is a UTC day)";
     if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) && text.len() >= 5 {
+        // A bare number is an epoch, and only a plausible one: everything this
+        // grammar can name as a date ends at the year 9999.
+        if text.len() > 12 {
+            return Err(bad(token, format!("expects {expect}")));
+        }
         return text
             .parse::<i64>()
+            .ok()
+            .filter(|secs| *secs <= LAST_DATE_EPOCH)
             .map(DateValue::instant)
-            .map_err(|_| bad(token, format!("expects {expect}")));
+            .ok_or_else(|| bad(token, format!("expects {expect}")));
     }
     let (date_part, time_part) = match text.split_once(['T', 't']) {
         Some((d, t)) => (d, Some(t)),
@@ -843,16 +1041,25 @@ fn epoch(value: &str, token: &str) -> Result<DateValue, ParseError> {
     {
         return Err(bad(token, format!("expects {expect}")));
     }
-    let year = bits[0].parse::<i64>().expect("all digits");
-    let month = bits[1].parse::<i64>().expect("all digits");
-    let day = bits[2].parse::<i64>().expect("all digits");
+    if bits[0].len() != 4 {
+        return Err(bad(
+            token,
+            "a year is written in full, as in added:2026-11-01 (a day is a UTC day)",
+        ));
+    }
+    let year = bits[0].parse::<i64>().expect("four digits");
+    let month = bits[1].parse::<i64>().expect("digits");
+    let day = bits[2].parse::<i64>().expect("digits");
     if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
         return Err(bad(
             token,
             format!("`{date_part}` is not a date on the calendar (check the month and day)"),
         ));
     }
-    let mut secs = days_from_civil(year, month, day) * 86_400;
+    let mut secs = match days_from_civil(year, month, day).checked_mul(86_400) {
+        Some(secs) => secs,
+        None => return Err(bad(token, "that date is too far away to compare against")),
+    };
     if let Some(time) = time_part {
         let parts: Vec<&str> = time.split(':').collect();
         if parts.len() < 2 || parts.len() > 3 || parts.iter().any(|p| p.len() != 2) {
@@ -871,12 +1078,21 @@ fn epoch(value: &str, token: &str) -> Result<DateValue, ParseError> {
         if numbers[0] > 23 || numbers[1] > 59 || (numbers.len() == 3 && numbers[2] > 59) {
             return Err(bad(token, "that time is not on the clock (HH:MM:SS)"));
         }
-        secs += numbers[0] * 3600 + numbers[1] * 60 + numbers.get(2).copied().unwrap_or(0);
+        let clock = numbers[0] * 3600 + numbers[1] * 60 + numbers.get(2).copied().unwrap_or(0);
+        secs = match secs.checked_add(clock) {
+            Some(secs) => secs,
+            None => return Err(bad(token, "that date is too far away to compare against")),
+        };
         Ok(DateValue::instant(secs))
     } else {
         Ok(DateValue::day(secs))
     }
 }
+
+/// The last epoch this grammar will name: `9999-12-31T23:59:59`. A bare epoch
+/// above it is a typo, and bounding it is what keeps the day-window arithmetic
+/// (`from + 86_400`) inside `i64` for every date that parses.
+const LAST_DATE_EPOCH: i64 = 253_402_300_799;
 
 fn is_leap(year: i64) -> bool {
     (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
@@ -940,16 +1156,32 @@ fn number(value: f64) -> Value {
 /// `?1 IS NULL OR …` shape got wrong (the placeholder-skipping bug pinned at
 /// `db.rs`'s list-query test). Stage S3 joins this with the view's `kind`
 /// predicate and binds [`Plan::bind`] positionally.
+///
+/// Every media predicate is `EXISTS`-shaped, never a `JOIN media`: one item has
+/// several media rows (`thumb`, `full`, `video`), so a join would multiply both
+/// the grid's rows and the paired `COUNT(*)` the count line prints.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Plan {
     /// Empty means "no predicate at all", i.e. the whole library.
     pub sql: String,
     pub params: Vec<Value>,
+    /// The facts this query reads that a vault may never have measured — see
+    /// [`FactKey`]. Empty means every predicate is answerable from data the vault
+    /// already holds.
+    pub unmeasured: Vec<FactKey>,
 }
 
 impl Plan {
     pub fn is_empty(&self) -> bool {
         self.sql.is_empty()
+    }
+
+    /// True when some predicate in this query reads a column nobody has measured
+    /// yet, so a `0 matches` would be an answer the vault cannot honestly give.
+    /// The caller decides what to say — stage S5 renders "not measured yet" plus
+    /// a *measure my files* affordance, never a bare zero.
+    pub fn needs_facts(&self) -> bool {
+        !self.unmeasured.is_empty()
     }
 
     /// `" WHERE …"`, or `""` when the query is empty — so a caller can append it
@@ -965,6 +1197,87 @@ impl Plan {
     /// The parameters as rusqlite wants them, in the order the `?` marks appear.
     pub fn bind(&self) -> Vec<&dyn ToSql> {
         self.params.iter().map(|v| v as &dyn ToSql).collect()
+    }
+}
+
+/// A fact a query reads that a vault may not hold yet. This is the planner
+/// reporting on **its own fragments**, not the UI guessing which words happen to
+/// be probe-dependent: the same honesty as #38's three-state verdict and #65's
+/// `? px` instead of a size nobody read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FactKey {
+    /// `media.width/height` and `sources.width/height` — read by `width:`,
+    /// `height:` and `ratio:`.
+    Pixels,
+    /// `media.animated` — read by `type:image` and `type:gif`.
+    Motion,
+    /// `media.duration_ms` and `sources.duration_ms` — read by `length:`.
+    Duration,
+    /// `media.bytes` is measured for every vaulted original (the v10 migration
+    /// backfilled it as `length(data)`), but the disk/link side of `size>` is
+    /// `sources.bytes`, which the facts job's stat pass writes.
+    CachedBytes,
+    /// The `extension` tag that `ext:` and half of `type:video` read. Not a probe:
+    /// the writers record it (stages S4/S7, #77), so a vault from before then
+    /// simply has none.
+    Extension,
+}
+
+/// The facts job's own progress question, in one read that never counts rows:
+/// is any stored original still un-measured? It is `refine_stored_facts`'s own
+/// `WHERE`, so "no row" means the job has nothing left to do — and "a row" means
+/// there is a *Measure my files* job to run. Note the half this job cannot do
+/// yet: the duration of a vaulted `video` row comes from the media probe stage S7
+/// adds, which is why `FactKey::Duration` also answers to the source probe below.
+pub const FACTS_PENDING_SQL: &str =
+    "SELECT 1 FROM media WHERE kind = 'full' AND probed_at IS NULL LIMIT 1";
+
+/// Has any source ever been measured at all? `sources.bytes` / `duration_ms` /
+/// `width` / `height` are the cache for disk files and bare links, and nothing
+/// writes them before stage S7, so `size>` on an on-disk-only item is unknown.
+pub const SOURCE_FACTS_SEEN_SQL: &str = "SELECT 1 FROM sources WHERE probed_at IS NOT NULL LIMIT 1";
+
+/// Does this vault record file extensions anywhere? `ext:` and the extension arm
+/// of `type:video` read `tags` of the `extension` type, which no writer produced
+/// before stages S4/S7 (#77), so an old vault answers `ext:gif` with "nothing"
+/// truthfully and uselessly — the UI has to say which.
+pub const EXTENSION_TAGS_SEEN_SQL: &str = "SELECT 1 FROM tags AS t \
+     JOIN tag_types AS tt ON tt.id = t.type_id WHERE tt.key = 'extension' LIMIT 1";
+
+/// Which terms plan their own negation instead of being wrapped in `NOT (…)`:
+/// the fact predicates, where `NOT (bytes > ?)` is true for a fact nobody ever
+/// measured. Everything else — tags, sources, `has:`, `stored:`, status, circle,
+/// title, dates (both stamp columns are `NOT NULL`) — is honest as a complement.
+fn self_negates(node: &Node) -> bool {
+    matches!(
+        node,
+        Node::Type { .. }
+            | Node::Size { .. }
+            | Node::Length { .. }
+            | Node::Width { .. }
+            | Node::Height { .. }
+            | Node::Ratio { .. }
+    )
+}
+
+/// Which un-measured facts one term reads, added to the plan's list without
+/// duplicates.
+fn fact_keys(node: &Node, out: &mut Vec<FactKey>) {
+    let keys: &[FactKey] = match node {
+        Node::Width { .. } | Node::Height { .. } | Node::Ratio { .. } => &[FactKey::Pixels],
+        Node::Length { .. } => &[FactKey::Duration],
+        Node::Type { kind } => match kind {
+            TypeKind::Video => &[FactKey::Extension],
+            TypeKind::Image | TypeKind::Gif => &[FactKey::Motion],
+        },
+        Node::Ext { .. } => &[FactKey::Extension],
+        Node::Size { .. } => &[FactKey::CachedBytes],
+        _ => &[],
+    };
+    for key in keys {
+        if !out.contains(key) {
+            out.push(*key);
+        }
     }
 }
 
@@ -987,6 +1300,12 @@ const EXTENSION_SEMI: &str = "items.id IN (SELECT it.item_id FROM item_tags AS i
 /// note 1 of the code map warns about.
 const ORIGINAL_MEDIA: &str = "m.kind IN ('full','video')";
 
+/// The vault row that says "a still picture": an original whose container said it
+/// does not move. `animated = 0` is a measurement, not an absence, so it never
+/// matches a NULL (invariant 27).
+const STILL_IMAGE: &str = "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
+                           AND m.kind = 'full' AND m.animated = 0)";
+
 /// LIKE wildcards and the escape character in a typed phrase are literal
 /// characters: a title that really contains `_` (and in this library most do)
 /// must not match as a one-character wildcard.
@@ -1003,7 +1322,29 @@ fn like_pattern(phrase: &str) -> String {
     out
 }
 
-fn fragment(node: &Node, params: &mut Vec<Value>) -> String {
+/// The SQL for one term.
+///
+/// `negated` is decided by the caller, and the two kinds of term answer it
+/// differently:
+///
+/// * A **tag / source / existence / date / status** term is honest as `NOT (…)`
+///   or `NOT EXISTS (…)`: the row is either there or it is not, and `created_at`
+///   / `updated_at` are `NOT NULL` columns, so the complement is a real set.
+/// * A **fact** term (`type:`, `size`, `length`, `width`, `height`, `ratio`)
+///   negates by planning the *contrary measurement* instead ([`Cmp::opposite_sql`]),
+///   because `NOT (bytes > ?)` is true for a fact nobody ever measured.
+///   [`self_negates`] is the single place that rule is stated, and it is why
+///   `-type:gif` on an un-probed vault answers "nothing" rather than "everything".
+fn fragment(node: &Node, negated: bool, params: &mut Vec<Value>) -> String {
+    // A negated *fact* keeps the columns and flips the comparison; a negated
+    // anything else keeps the operator and is wrapped in NOT by the caller.
+    let fact_op = |cmp: Cmp| -> &'static str {
+        if negated {
+            cmp.opposite_sql()
+        } else {
+            cmp.sql()
+        }
+    };
     match node {
         Node::Tag { name } => {
             let (a, b) = (name.clone(), name.clone());
@@ -1024,27 +1365,50 @@ fn fragment(node: &Node, params: &mut Vec<Value>) -> String {
         }
         Node::Type { kind } => match kind {
             TypeKind::Video => {
-                // A vault video is decided by its own row; a link or on-disk
-                // video has no row, so the only fact about it is the extension
-                // its file carries (D17: videos stay links by default).
-                let mut placeholders: Vec<&str> = Vec::with_capacity(VIDEO_EXTS.len());
-                for ext in VIDEO_EXTS {
-                    params.push(Value::Text((*ext).to_string()));
-                    placeholders.push("?");
+                if negated {
+                    // `-type:video` is "the vault row says still picture", not
+                    // "everything except a video": an on-disk file whose extension
+                    // nobody recorded has no answer, and an unknown may not be
+                    // reported as a fact (invariant 27).
+                    STILL_IMAGE.to_string()
+                } else {
+                    // A vault video is decided by its own row; a link or on-disk
+                    // video has no row, so the only fact about it is the extension
+                    // its file carries (D17: videos stay links by default).
+                    let mut placeholders: Vec<&str> = Vec::with_capacity(VIDEO_EXTS.len());
+                    for ext in VIDEO_EXTS {
+                        params.push(Value::Text((*ext).to_string()));
+                        placeholders.push("?");
+                    }
+                    format!(
+                        "(EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
+                         AND m.kind = 'video') OR {EXTENSION_SEMI}tt.key = 'extension' \
+                         AND t.name IN ({})))",
+                        placeholders.join(", ")
+                    )
                 }
+            }
+            TypeKind::Image => {
+                if negated {
+                    // The contrary of a measured still is a measured moving picture
+                    // or a vault video row, never "a row we never asked".
+                    "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
+                     AND m.kind IN ('full','video') \
+                     AND (m.kind = 'video' OR m.animated = 1))"
+                        .to_string()
+                } else {
+                    STILL_IMAGE.to_string()
+                }
+            }
+            // `animated` is the container's own answer, so both directions are a
+            // comparison against 0 or 1 and NULL (never asked) answers neither.
+            TypeKind::Gif => {
+                let answer = if negated { "= 0" } else { "= 1" };
                 format!(
-                    "(EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
-                     AND m.kind = 'video') OR {EXTENSION_SEMI}tt.key = 'extension' \
-                     AND t.name IN ({})))",
-                    placeholders.join(", ")
+                    "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
+                     AND {ORIGINAL_MEDIA} AND m.animated {answer})"
                 )
             }
-            TypeKind::Image => "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
-                 AND m.kind = 'full' AND m.animated = 0)"
-                .to_string(),
-            TypeKind::Gif => "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id \
-                              AND m.animated = 1)"
-                .to_string(),
         },
         Node::Ext { ext } => {
             params.push(Value::Text(ext.clone()));
@@ -1069,6 +1433,18 @@ fn fragment(node: &Node, params: &mut Vec<Value>) -> String {
             StoredShape::Disk => "EXISTS (SELECT 1 FROM sources AS s WHERE s.item_id = items.id \
                                   AND s.site = 'local')"
                 .to_string(),
+            StoredShape::LocalOnly => {
+                // Word-for-word the old #40 `local_only` badge (`db.rs`'s list
+                // query and `source_stats`): a local source **and** no source from
+                // any other site. The aliases are the rail's own, so a reviewer
+                // diffing the two sees the identity; `presets_are_the_old_rails_predicate`
+                // is what keeps it true after the rails are deleted in S5.
+                "(EXISTS (SELECT 1 FROM sources AS sl WHERE sl.item_id = items.id \
+                  AND sl.site = 'local') \
+                  AND NOT EXISTS (SELECT 1 FROM sources AS so WHERE so.item_id = items.id \
+                  AND so.site <> 'local'))"
+                    .to_string()
+            }
             StoredShape::Link => format!(
                 "(NOT EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id AND \
                  {ORIGINAL_MEDIA}) AND NOT EXISTS (SELECT 1 FROM sources AS s WHERE \
@@ -1087,32 +1463,46 @@ fn fragment(node: &Node, params: &mut Vec<Value>) -> String {
             params.push(number(*value));
             format!("items.rating {} ?", cmp.sql())
         }
-        Node::Size { cmp, bytes } => {
-            fact_pair("m.bytes", "s.bytes", cmp.sql(), Value::Int(*bytes), params)
-        }
+        Node::Size { cmp, bytes } => fact_pair(
+            "m.bytes",
+            "s.bytes",
+            fact_op(*cmp),
+            Value::Int(*bytes),
+            params,
+        ),
         Node::Length { cmp, ms } => fact_pair(
             "m.duration_ms",
             "s.duration_ms",
-            cmp.sql(),
+            fact_op(*cmp),
             Value::Int(*ms),
             params,
         ),
         Node::Width { cmp, px } => {
-            fact_pair("m.width", "s.width", cmp.sql(), Value::Int(*px), params)
+            fact_pair("m.width", "s.width", fact_op(*cmp), Value::Int(*px), params)
         }
-        Node::Height { cmp, px } => {
-            fact_pair("m.height", "s.height", cmp.sql(), Value::Int(*px), params)
-        }
+        Node::Height { cmp, px } => fact_pair(
+            "m.height",
+            "s.height",
+            fact_op(*cmp),
+            Value::Int(*px),
+            params,
+        ),
         Node::Ratio { cmp, ratio } => {
-            params.push(number(*ratio));
-            // The NULL guard is spelled out here because the arithmetic is: an
-            // unmeasured picture has no ratio, and a zero height is not a
-            // divide-by-zero invitation either (invariant 27).
+            // Symmetric with `width`/`height`: the same two places a pixel size
+            // can be recorded, so an item measured only on its disk/link source
+            // answers `ratio:>2` as honestly as it answers `width>1200`.
+            let bound = number(*ratio);
+            params.push(bound.clone());
+            params.push(bound);
+            let mguard = ratio_guard("m");
+            let sguard = ratio_guard("s");
             format!(
-                "EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id AND \
-                 {ORIGINAL_MEDIA} AND m.width IS NOT NULL AND m.height IS NOT NULL AND \
-                 m.height > 0 AND CAST(m.width AS REAL) / m.height {} ?)",
-                cmp.sql()
+                "(EXISTS (SELECT 1 FROM media AS m WHERE m.item_id = items.id AND \
+                 {ORIGINAL_MEDIA} AND {mguard} AND CAST(m.width AS REAL) / m.height {} ?) OR \
+                 EXISTS (SELECT 1 FROM sources AS s WHERE s.item_id = items.id AND {sguard} \
+                 AND CAST(s.width AS REAL) / s.height {} ?))",
+                fact_op(*cmp),
+                fact_op(*cmp)
             )
         }
         Node::Id { id } => {
@@ -1145,6 +1535,13 @@ fn fact_pair(
          EXISTS (SELECT 1 FROM sources AS s WHERE s.item_id = items.id AND \
          {source_column} {op} ?))"
     )
+}
+
+/// The guards a ratio needs before it divides: both sides measured, and a height
+/// that is not zero. An unmeasured picture has no ratio and must not match, and a
+/// zero height is not a divide-by-zero invitation (invariant 27).
+fn ratio_guard(alias: &str) -> String {
+    format!("{alias}.width IS NOT NULL AND {alias}.height IS NOT NULL AND {alias}.height > 0")
 }
 
 /// `added:` / `updated:`. The `CAST` is not decoration: those columns are TEXT
@@ -1469,6 +1866,12 @@ mod tests {
         "stored:link -source:local type:video length:>90s",
         "type:image -has:tags size<2mb width>1200 ratio:<1",
         "added:>2026-01-01 added:<2027-01-01 has:thumb",
+        "stored:local-only",
+        "stored:disk -stored:local-only",
+        "stored:link -stored:disk",
+        "-type:video length<30s",
+        "rating=3",
+        "circle:renpy -rating:>3",
     ];
 
     /// The invariant behind the per-example tests: a fragment and its bound
@@ -1519,6 +1922,698 @@ mod tests {
             assert!(matched <= 5, "{query:?} ignored its LIMIT");
         }
     }
+
+    // ---- the review pass: values never travel as SQL text -------------------
+
+    /// Every fragment of planned SQL that legitimately contains a digit. If a new
+    /// arm of the planner wants a number in its text, it has to appear here - which
+    /// is the point: a value reaching the SQL text instead of a parameter is the one
+    /// mistake this module must never make.
+    const CODE_OWNED_DIGITS: &[&str] = &[
+        "SELECT 1 FROM",
+        "animated = 0",
+        "animated = 1",
+        "height > 0",
+    ];
+
+    /// The one string the planner is allowed to write into SQL text: `local` is a
+    /// code-owned site slug (DEVELOPMENT §4 invariant 10), and the `stored:` shapes
+    /// read it exactly as the #40 rails did.
+    const CODE_OWNED_LITERALS: &[&str] = &["local"];
+    fn strip_code_owned_digits(sql: &str) -> String {
+        let mut out = sql.to_string();
+        for frag in CODE_OWNED_DIGITS {
+            out = out.replace(frag, "<code>");
+        }
+        out
+    }
+
+    /// The placeholder-count test cannot catch a fragment that interpolated the
+    /// value instead of binding it (0 `?` and 0 parameters would pass it), so this
+    /// pins the other half: the only digits in planned SQL are the code-owned ones
+    /// named by `CODE_OWNED_DIGITS`, and no bound value's own text may show up.
+    #[test]
+    fn a_value_is_bound_and_never_written_into_the_sql() {
+        for query in WORKED {
+            let plan = media(query).plan();
+            // Only three kinds of digit may appear in planned SQL at all, and
+            // every one of them is code-owned text: the `1` of an `EXISTS
+            // (SELECT 1 …)`, the `0`/`1` an `animated` comparison is written
+            // against, and `ratio`'s zero-divisor guard. Any other digit is a
+            // typed value that skipped its parameter.
+            let clean = strip_code_owned_digits(&plan.sql);
+            assert!(
+                !clean.bytes().any(|b| b.is_ascii_digit()),
+                "{query:?} put a number in the SQL text instead of a parameter: {}",
+                plan.sql
+            );
+            for value in &plan.params {
+                let text = match value {
+                    Value::Text(s) => s.clone(),
+                    Value::Int(i) => i.to_string(),
+                    Value::Real(f) => f.to_string(),
+                };
+                if text.is_empty() || CODE_OWNED_LITERALS.contains(&text.as_str()) {
+                    // The `local` site slug appears as SQL text in the storage
+                    // shapes, word-for-word as the #40 rails wrote it: it is part
+                    // of the derivation, not a value the box supplied.
+                    continue;
+                }
+                // A number is looked for in the SQL with the code-owned digits
+                // removed, so a bound `1` is not confused with the `1` of a
+                // `SELECT 1`; a string has no such collision to allow for.
+                let haystack = if matches!(value, Value::Text(_)) {
+                    plan.sql.as_str()
+                } else {
+                    clean.as_str()
+                };
+                assert!(
+                    !haystack.contains(&text),
+                    "{query:?} interpolated {text:?} into: {}",
+                    plan.sql
+                );
+            }
+        }
+    }
+
+    /// SQL text a user types is data. It goes to SQLite as one bound parameter,
+    /// and the library is still there afterwards.
+    #[test]
+    fn a_quoted_phrase_cannot_reach_the_sql_text() {
+        let query = media("\"'); DROP TABLE items;--\"");
+        let plan = query.plan();
+        assert!(
+            !plan.sql.to_ascii_uppercase().contains("DROP"),
+            "{}",
+            plan.sql
+        );
+        // The phrase travels as a bound LIKE pattern - twice, for title and
+        // circle - and never as SQL text.
+        assert_eq!(
+            plan.params,
+            vec![
+                Value::Text("%'); DROP TABLE items;--%".into()),
+                Value::Text("%'); DROP TABLE items;--%".into()),
+            ]
+        );
+        let conn = seeded_library();
+        let before = item_count(&conn);
+        let read = run_plan(&conn, "SELECT items.id FROM items", "", &plan);
+        assert!(
+            read.is_empty(),
+            "{read:?} matched a phrase that is not a title"
+        );
+        // And the library is still there: the text never became a statement.
+        assert_eq!(item_count(&conn), before, "the library survived it");
+    }
+
+    // ---- the review pass: a parse error is a value, never a panic -----------
+
+    /// The plan §4 EBNF allows `key=value` with no colon, and a user types it.
+    /// What must not change is that a keyword run that merely *looks* like a
+    /// keyword is still a tag name: `size-ish` and `id#3` are literal.
+    #[test]
+    fn an_equals_sign_makes_a_predicate_and_a_dash_does_not() {
+        assert_eq!(
+            nodes("rating=3"),
+            vec![Node::Rating {
+                cmp: Cmp::Eq,
+                value: 3.0
+            }],
+            "`rating=3` is a predicate, not a tag named `rating=3` that matches nothing"
+        );
+        assert_eq!(
+            nodes("type=video"),
+            vec![Node::Type {
+                kind: TypeKind::Video
+            }]
+        );
+        assert_eq!(
+            nodes("added=2026-11-01"),
+            vec![Node::Added {
+                cmp: Cmp::Eq,
+                at: DateValue {
+                    from: 1_793_491_200,
+                    to: 1_793_577_600
+                }
+            }]
+        );
+        for token in ["size-ish", "id#3", "taggart", "added-daily"] {
+            assert!(
+                matches!(nodes(token)[0], Node::Tag { .. }),
+                "{token:?} has no '=' and no operator, so it stays a tag: {:?}",
+                nodes(token)[0]
+            );
+        }
+    }
+
+    /// A 12-digit year used to reach `days_from_civil(...) * 86_400` and overflow:
+    /// a panic under `cargo test`, and in release a wrapped epoch that matches
+    /// every item in the library. A two-digit year is the same class of trap:
+    /// `added:11-01-02` is a typo, not the year 11 CE.
+    #[test]
+    fn no_date_can_overflow_the_epoch_arithmetic() {
+        for value in [
+            "added:300000000000-01-01",
+            "added:999999999999-12-31",
+            "added:11-01-02",
+            "added:1-2-3",
+            "updated:17934912009999999999",
+            "added:2026-11-01T99:99",
+        ] {
+            let e = error(value, Scope::Media);
+            assert!(
+                e.message.contains("date")
+                    || e.message.contains("year")
+                    || e.message.contains("time")
+                    || e.message.contains("far away"),
+                "{value:?} said: {}",
+                e.message
+            );
+        }
+        // The top of the legal range still works, and so does a real epoch.
+        assert!(
+            matches!(nodes("added:9999-12-31")[0], Node::Added { .. }),
+            "year 9999 is the last one the grammar names"
+        );
+        assert!(matches!(nodes("added:253402282800")[0], Node::Added { .. }));
+    }
+
+    #[test]
+    fn a_count_or_a_length_out_of_range_is_refused_not_guessed() {
+        // `width>-100` parses today and matches every measured image.
+        for value in ["width>-100", "height>-1", "size>-5mb", "rating:>-2"] {
+            let e = error(value, Scope::Media);
+            assert!(
+                e.message.contains("expects") || e.message.contains("e.g."),
+                "{value:?} said: {}",
+                e.message
+            );
+        }
+        // A length this large is a typo; saturating it to `i64::MAX` would make a
+        // predicate that answers "nothing" for the rest of the vault's life.
+        for value in [
+            "length>9999999999999999h",
+            "length>999999999999999999999s",
+            "length>999999999999999:00",
+        ] {
+            let e = error(value, Scope::Media);
+            assert!(
+                e.message.contains("too large") || e.message.contains("a length:"),
+                "{value:?} said: {}",
+                e.message
+            );
+        }
+        assert!(matches!(
+            nodes("width=0")[0],
+            Node::Width {
+                cmp: Cmp::Eq,
+                px: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn invisible_and_lookalike_characters_are_refused() {
+        // Invisible: the term looks like two tags and is one that matches nothing.
+        for (query, what) in [
+            ("big_breasts\u{200b}anal", "U+200B"),
+            ("anal\u{200f}", "U+200F"),
+            ("type:vi\u{202a}deo", "U+202A"),
+            ("stored:vau\u{feff}lt", "U+FEFF"),
+        ] {
+            let e = error(query, Scope::Media);
+            assert!(
+                e.message.contains(what) && e.message.contains("invisible"),
+                "{query:?} said: {}",
+                e.message
+            );
+        }
+        // A dash that is not `-`: `-anal` typed with an en dash or a minus sign is
+        // not a negation, and would become a tag name that matches nothing.
+        for query in ["\u{2013}anal", "-anal\u{2013}x", "type\u{ff1a}video"] {
+            let e = error(query, Scope::Media);
+            assert!(
+                e.message.contains("that is not the") || e.message.contains("invisible"),
+                "{query:?} said: {}",
+                e.message
+            );
+        }
+        // NBSP splits terms, because `char::is_whitespace` says so and a paste
+        // from a web page should behave like a space, not like a hidden byte
+        // inside a tag name.
+        assert_eq!(
+            nodes("big_breasts\u{a0}anal"),
+            vec![
+                Node::Tag {
+                    name: "big_breasts".into()
+                },
+                Node::Tag {
+                    name: "anal".into()
+                }
+            ]
+        );
+        // Inside quotes the text is data: a scraped title really can hold a soft
+        // hyphen, and the one place to ask for it verbatim has to stay open.
+        assert!(matches!(nodes("\"\u{2013}anal\"")[0], Node::Title { .. }));
+        // Non-ASCII that is not invisible is a legitimate tag name (this library
+        // has Japanese tags), so it stays legal.
+        assert_eq!(
+            nodes("東方"),
+            vec![Node::Tag {
+                name: "東方".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_quotes_search_for_nothing_and_are_refused() {
+        // `""` plans as `LIKE '%%'`, which is the whole library - the opposite of
+        // what an empty pair of quotes looks like it asks for.
+        for query in ["\"\"", "\" \"", "circle:\"\t\""] {
+            let e = error(query, Scope::Media);
+            assert!(!e.message.is_empty(), "{query:?} gave no message");
+        }
+        assert!(!media("\"a\"").plan().sql.is_empty());
+    }
+
+    #[test]
+    fn a_quote_that_opens_mid_query_names_itself() {
+        let e = error("type:video \"open", Scope::Media);
+        assert_eq!(e.token, "\"open");
+        assert!(e.message.contains("never closes"), "{}", e.message);
+    }
+
+    #[test]
+    fn one_box_holds_a_query_not_an_argument_list() {
+        // Past this, SQLite would answer with a prepare error; plan §5 promises the
+        // form state instead, so the grammar has to stop it first.
+        let too_many_terms = vec!["big_breasts"; MAX_TERMS + 1].join(" ");
+        let e = error(&too_many_terms, Scope::Media);
+        assert!(e.message.contains("terms"), "{}", e.message);
+        let long_input = format!("\"{}\"", "z".repeat(MAX_INPUT_CHARS + 10));
+        let e = error(&long_input, Scope::Media);
+        assert!(e.message.contains("characters"), "{}", e.message);
+        // Exactly at the limit still parses.
+        let at_limit = vec!["big_breasts"; MAX_TERMS].join(" ");
+        assert_eq!(
+            parse(&at_limit, Scope::Media).unwrap().terms.len(),
+            MAX_TERMS
+        );
+    }
+
+    // ---- the review pass: two documents, one vocabulary ---------------------
+
+    /// Plan §1 says Media never gets `circle:`/`rating:`; plan §4's vocabulary
+    /// table says both views do. §4 wins, against the schema: `items.circle` and
+    /// `items.rating` are columns every item row has, and an e-hentai gallery
+    /// genuinely has a circle. Rejecting the key would hide a fact that exists.
+    #[test]
+    fn circle_and_rating_are_valid_in_both_views_because_items_carry_them() {
+        for query in ["circle:renpy", "rating:>3", "circle:\"Red Sun\" rating=4"] {
+            assert!(
+                parse(query, Scope::Media).is_ok(),
+                "media view must accept {query:?}"
+            );
+            assert!(
+                parse(query, Scope::Games).is_ok(),
+                "games view must accept {query:?}"
+            );
+        }
+        // And the columns really are on the shared table, which is the reason.
+        assert_eq!(
+            nodes("circle:renpy"),
+            vec![Node::Circle {
+                phrase: "renpy".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn status_is_games_only_and_says_which_words_this_view_has() {
+        let e = error("status:wishlist", Scope::Media);
+        assert!(e.message.contains("Games"), "{}", e.message);
+        // The hint is generated from `keywords(Scope::Media)`, so it cannot go
+        // stale when the set changes: everything this view knows is in the message.
+        for key in keywords(Scope::Media) {
+            assert!(
+                e.message.contains(&format!("{key}:")),
+                "the hint lost {key:?}: {}",
+                e.message
+            );
+        }
+        assert!(!keyword_hint(Scope::Media).contains("status:"));
+        assert!(parse("status:wishlist", Scope::Games).is_ok());
+    }
+
+    // ---- the review pass: negation, NULL, and the old badges ----------------
+
+    /// B3: a negated **fact** has to require the measurement to exist. `NOT
+    /// (animated = 1)` is true for every item the facts job has not touched, so
+    /// "the non-gifs" would claim to be a set of contents nobody has read. A
+    /// negated derived/existence predicate (`-has:tags`, `-stored:disk`, `-tag`)
+    /// has no unknown, so it stays a plain complement.
+    #[test]
+    fn a_negated_fact_never_counts_an_unmeasured_item() {
+        let gif = media("-type:gif").plan().sql;
+        assert!(gif.contains("m.animated = 0"), "{gif}");
+        assert!(!gif.contains("NOT ("), "{gif}");
+        let size = media("-size>1gb").plan().sql;
+        assert!(size.contains("m.bytes <= ?"), "{size}");
+        assert!(size.contains("s.bytes <= ?"), "{size}");
+        assert!(!size.contains("NOT ("), "{size}");
+        // A negated fact and its positive read the same two places.
+        for (positive, negative) in [
+            ("width>1200", "-width>1200"),
+            ("length<1:30", "-length<1:30"),
+            ("ratio:>2", "-ratio:<2"),
+        ] {
+            let up = media(positive).plan().sql;
+            let down = media(negative).plan().sql;
+            for needle in ["FROM media AS m", "FROM sources AS s"] {
+                assert!(
+                    up.contains(needle) && down.contains(needle),
+                    "{positive} / {negative} read different tables: {up} vs {down}"
+                );
+            }
+        }
+        // The existence predicates keep their complement, because there is no
+        // unknown behind them.
+        assert!(
+            media("-has:tags").plan().sql.starts_with("NOT EXISTS"),
+            "{}",
+            media("-has:tags").plan().sql
+        );
+        assert!(
+            media("-stored:disk").plan().sql.starts_with("NOT EXISTS"),
+            "{}",
+            media("-stored:disk").plan().sql
+        );
+
+        // And settled against rows, which is the part an AST assertion cannot do:
+        // an item with no measurement anywhere answers neither `size>1gb` nor
+        // `-size>1gb`. The two that do answer are the measured ones.
+        let conn = seeded_library();
+        assert_eq!(matched(&conn, "size>1gb"), ["i_huge"]);
+        assert_eq!(
+            matched(&conn, "-size>1gb"),
+            ["i_diskonly", "i_small"],
+            "i_site_only, i_local_only and i_both_sites have no size at all"
+        );
+        assert_eq!(matched(&conn, "type:gif"), ["i_huge"]);
+        assert_eq!(matched(&conn, "-type:gif"), ["i_small"]);
+        assert_eq!(
+            matched(&conn, "ratio:>2"),
+            ["i_diskonly", "i_small"],
+            "ratio reads the sources cache too (review S6): i_diskonly has pixels only there"
+        );
+        assert_eq!(
+            matched(&conn, "-ratio:>2"),
+            ["i_huge"],
+            "and its negation only claims what was measured"
+        );
+    }
+
+    /// The planner reports which facts its own fragments read, so the empty state
+    /// can say "not measured yet" instead of presenting a zero as an answer.
+    #[test]
+    fn a_query_that_reads_unmeasured_columns_reports_itself() {
+        assert!(!media("big_breasts").plan().needs_facts());
+        assert_eq!(media("type:gif").plan().unmeasured, vec![FactKey::Motion]);
+        assert_eq!(media("width>1200").plan().unmeasured, vec![FactKey::Pixels]);
+        assert_eq!(
+            media("length>1m").plan().unmeasured,
+            vec![FactKey::Duration]
+        );
+        assert_eq!(media("ext:gif").plan().unmeasured, vec![FactKey::Extension]);
+        assert_eq!(
+            media("size>1mb").plan().unmeasured,
+            vec![FactKey::CachedBytes]
+        );
+        // A negated fact needs the measurement just as much.
+        assert_eq!(media("-type:gif").plan().unmeasured, vec![FactKey::Motion]);
+        // One entry per key, whatever the order it was typed in.
+        let all = media("ratio:>2 width>1 length>1s ext:gif size>1kb type:image").plan();
+        for key in [
+            FactKey::Pixels,
+            FactKey::Motion,
+            FactKey::Duration,
+            FactKey::CachedBytes,
+            FactKey::Extension,
+        ] {
+            assert!(
+                all.unmeasured.contains(&key),
+                "lost {key:?}: {:?}",
+                all.unmeasured
+            );
+        }
+        assert_eq!(all.unmeasured.len(), 5, "{:?}", all.unmeasured);
+    }
+
+    /// The three #40 queues have to map to grammar text exactly, or a preset chip
+    /// silently widens the set it selects - which is what rulings C forbids. Pinned
+    /// against the rails' own SQL, so the badge count and the query count agree by
+    /// construction and keep agreeing after S5 deletes the rails.
+    #[test]
+    fn the_old_source_queues_are_the_same_predicate_in_grammar_text() {
+        let conn = seeded_library();
+        let rail = |source: &str, kind: &str| -> Vec<String> {
+            crate::db::list_items(
+                &conn,
+                &crate::db::ListQuery {
+                    limit: 300,
+                    kind: Some(kind),
+                    source: Some(source),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .map(|i| i.id)
+            .collect()
+        };
+        let mut local_only = rail("local_only", "media");
+        local_only.sort();
+        assert_eq!(matched(&conn, "stored:local-only"), local_only);
+        let mut no_local = rail("no_local", "media");
+        no_local.sort();
+        assert_eq!(matched(&conn, "-stored:disk"), no_local);
+        let mut no_tags = rail("no_tags", "media");
+        no_tags.sort();
+        assert_eq!(matched(&conn, "-has:tags"), no_tags);
+        // `stored:disk` is strictly wider than the old badge: one item has a local
+        // source *and* an ehentai page, and the badge excluded it.
+        assert_eq!(
+            matched(&conn, "stored:disk"),
+            ["i_both_sites", "i_diskonly", "i_local_only"],
+            "stored:disk must not quietly become the old badge"
+        );
+        assert_eq!(
+            matched(&conn, "stored:local-only"),
+            ["i_diskonly", "i_local_only"],
+            "a folder import with no site page is the old local-only queue"
+        );
+        // And the badge count agrees with the query count.
+        // And the badge count agrees with the query count, for all three queues:
+        // the same predicate counted two ways, not two predicates that happen to
+        // agree today.
+        let stats = crate::db::source_stats(&conn, Some("media")).unwrap();
+        assert_eq!(
+            stats.local_only as usize,
+            matched(&conn, "stored:local-only").len(),
+            "the local-only badge and stored:local-only disagree"
+        );
+        assert_eq!(
+            stats.no_local as usize,
+            matched(&conn, "-stored:disk").len(),
+            "the no-local badge and -stored:disk disagree"
+        );
+        assert_eq!(
+            stats.no_tags as usize,
+            matched(&conn, "-has:tags").len(),
+            "the no-tags badge and -has:tags disagree"
+        );
+    }
+
+    #[test]
+    fn stored_local_only_is_the_badges_own_sql() {
+        let sql = media("stored:local-only").plan().sql;
+        assert!(
+            sql.contains("EXISTS (SELECT 1 FROM sources AS sl WHERE sl.item_id = items.id AND sl.site = 'local')"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("NOT EXISTS (SELECT 1 FROM sources AS so WHERE so.item_id = items.id AND so.site <> 'local')"),
+            "{sql}"
+        );
+    }
+
+    // ---- helpers the fixture tests share -----------------------------------
+
+    /// Runs one planned query against a seeded vault, ordered by id so the
+    /// assertions read as a set.
+    fn matched(conn: &rusqlite::Connection, query: &str) -> Vec<String> {
+        run_plan(
+            conn,
+            "SELECT items.id FROM items",
+            " ORDER BY items.id",
+            &media(query).plan(),
+        )
+    }
+
+    /// Runs a plan the way stage S3 will: one SELECT, the planned `WHERE`, the
+    /// planned parameters, nothing interpolated.
+    fn run_plan(
+        conn: &rusqlite::Connection,
+        select: &str,
+        order: &str,
+        plan: &Plan,
+    ) -> Vec<String> {
+        let sql = format!("{select}{}{order}", plan.where_clause());
+        let mut stmt = conn.prepare(&sql).unwrap();
+        stmt.query_map(rusqlite::params_from_iter(plan.bind()), |r| {
+            r.get::<_, String>(0)
+        })
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+    }
+
+    fn item_count(conn: &rusqlite::Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM items", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A seeded, obviously synthetic vault: six items covering the storage shapes
+    /// and the three states of a fact (measured big, measured small, measured only
+    /// on the source cache, never measured at all). No id or title here belongs to
+    /// a real library.
+    fn seeded_library() -> rusqlite::Connection {
+        use crate::db;
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        db::init_schema(&conn).unwrap();
+        for id in [
+            "i_local_only",
+            "i_both_sites",
+            "i_site_only",
+            "i_huge",
+            "i_small",
+            "i_diskonly",
+        ] {
+            db::insert_item(&conn, &fixture_item(id, &format!("Fixture {id}"))).unwrap();
+        }
+        db::insert_source(
+            &conn,
+            "i_local_only",
+            "local",
+            "file:///D:/fixture/a.png",
+            None,
+            None,
+        )
+        .unwrap();
+        db::insert_source(
+            &conn,
+            "i_both_sites",
+            "local",
+            "file:///D:/fixture/b.png",
+            None,
+            None,
+        )
+        .unwrap();
+        db::insert_source(
+            &conn,
+            "i_both_sites",
+            "ehentai",
+            "https://eh.example/fixture/1",
+            None,
+            None,
+        )
+        .unwrap();
+        db::insert_source(
+            &conn,
+            "i_diskonly",
+            "local",
+            "file:///D:/fixture/d.png",
+            None,
+            None,
+        )
+        .unwrap();
+        for (id, url) in [
+            ("i_site_only", "https://eh.example/fixture/2"),
+            ("i_huge", "https://eh.example/fixture/3"),
+            ("i_small", "https://eh.example/fixture/4"),
+        ] {
+            db::insert_source(&conn, id, "ehentai", url, None, None).unwrap();
+        }
+        // The fact columns say what was measured and when. A row with NULL facts is
+        // a row nobody ever asked, and it must answer neither a fact predicate nor
+        // its negation (invariant 27). Scoped, because a prepared statement borrows
+        // the connection and the function hands the connection back.
+        {
+            let mut media = conn
+                .prepare(
+                    "INSERT INTO media (item_id, kind, hash, mime, width, height, data,
+                                        bytes, duration_ms, animated, probed_at)
+                     VALUES (?1, 'full', ?2, 'image/png', ?3, ?4, x'89504e470d0a1a0a',
+                            ?5, ?6, ?7, ?8)",
+                )
+                .unwrap();
+            // measured big, and the container says it moves
+            media
+                .execute(rusqlite::params![
+                    "i_huge",
+                    "fixture-hash-huge",
+                    400,
+                    300,
+                    5_000_000_000_i64,
+                    1,
+                    1,
+                    "1760000000"
+                ])
+                .unwrap();
+            // measured small, and still
+            media
+                .execute(rusqlite::params![
+                    "i_small",
+                    "fixture-hash-small",
+                    1_200,
+                    400,
+                    1_024_i64,
+                    None::<i64>,
+                    0,
+                    "1760000000"
+                ])
+                .unwrap();
+        }
+        // a source measured on disk (the cache the #65 probe and the facts job
+        // write), with no vault row behind it: `width`/`ratio` must both read it.
+        conn.execute(
+            "UPDATE sources SET bytes = 4096, width = 3000, height = 1000,
+                     probed_at = '1760000000' WHERE item_id = 'i_diskonly'",
+            [],
+        )
+        .unwrap();
+        db::add_item_tag(&conn, "i_huge", "fixture_content", db::TYPE_CONTENT).unwrap();
+        conn
+    }
+
+    fn fixture_item(id: &str, title: &str) -> crate::model::Item {
+        crate::model::Item {
+            id: id.to_string(),
+            kind: crate::model::ItemKind::Gallery,
+            title: title.to_string(),
+            original_title: None,
+            circle: Some("Fixture Circle".to_string()),
+            status: crate::model::Status::Seen,
+            dnf: false,
+            rating: None,
+            notes: String::new(),
+            version: None,
+            created_at: "1760000000".to_string(),
+            updated_at: "1760000000".to_string(),
+        }
+    }
+
     // ---- the colon is already taken, so keywords need an escape hatch -------
 
     #[test]
@@ -1707,6 +2802,17 @@ mod tests {
             vec![Node::Size {
                 cmp: Cmp::Gt,
                 bytes: 1_572_864
+            }]
+        );
+        // The decimal written out, not a product, because that is the number the
+        // ruling asked to pin: `size>100mb` means the 104 857 600 the grid and
+        // Explorer print beside the same file, not the 100 000 000 a hard-drive
+        // advertisement would call 100 MB.
+        assert_eq!(
+            nodes("size>100mb"),
+            vec![Node::Size {
+                cmp: Cmp::Gt,
+                bytes: 104_857_600
             }]
         );
     }
@@ -1939,19 +3045,29 @@ mod tests {
     fn a_fact_never_measures_a_thumbnail() {
         // The review note that started this: `media.width/height` were only ever
         // written on thumb rows, so a `width>1200` query measured the 360 px
-        // tile and lied. Every fact predicate reads originals only.
+        // tile and lied. Every fact predicate - and every negation of one - reads
+        // originals only.
         for query in [
             "size>1mb",
+            "-size>1gb",
             "width>1200",
             "height>800",
             "ratio:>2",
+            "length>1m",
             "stored:vault",
+            "type:gif",
+            "-type:gif",
+            "type:image",
+            "-type:image",
         ] {
             let sql = media(query).plan().sql;
             assert!(
-                sql.contains("m.kind IN ('full','video')"),
-                "{query:?} can match a thumb row: {sql}"
+                sql.contains("m.kind IN ('full','video')")
+                    || sql.contains("m.kind = 'full'")
+                    || sql.contains("m.kind = 'video'"),
+                "{query:?} can measure a thumb row: {sql}"
             );
+            assert!(!sql.contains("'thumb'"), "{query:?} mentions a tile: {sql}");
         }
         // A thumb still answers `has:thumb`, which is the one predicate that
         // wants the tile.
@@ -1996,8 +3112,14 @@ mod tests {
             ("-tag:\"ext:x\"", "NOT (items.id IN"),
             ("-has:tags", "NOT EXISTS (SELECT 1 FROM item_tags"),
             ("-stored:disk", "NOT EXISTS (SELECT 1 FROM sources"),
-            ("-size>1gb", "NOT ((EXISTS"),
-            ("-width<400", "NOT ((EXISTS"),
+            (
+                "-stored:local-only",
+                "NOT ((EXISTS (SELECT 1 FROM sources AS sl",
+            ),
+            // A negated *fact* is not a NOT: it plans the contrary measurement,
+            // so an un-measured item cannot answer it (review B3).
+            ("-size>1gb", "m.bytes <= ?"),
+            ("-width<400", "m.width >= ?"),
         ];
         for (query, needle) in cases {
             let sql = media(query).plan().sql;
@@ -2129,7 +3251,10 @@ mod tests {
         }
         // The value lists S5's autocomplete shows, and which keys are open.
         assert_eq!(closed_values("type"), &["video", "image", "gif"]);
-        assert_eq!(closed_values("stored"), &["vault", "disk", "link"]);
+        assert_eq!(
+            closed_values("stored"),
+            &["vault", "disk", "local-only", "link"]
+        );
         assert_eq!(closed_values("has"), &["thumb", "tags"]);
         assert!(closed_values("ext").is_empty(), "ext: is an open value set");
         assert!(closed_values("source").is_empty());

@@ -138,8 +138,10 @@ fn registrable_domain(host: &str) -> String {
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"];
 /// One list, not two: #76's `type:video` predicate reads the same vocabulary
 /// from `goon_core::query::VIDEO_EXTS`, and a private copy here would drift from
-/// the grammar the query box promises. Pinned by
-/// `the_video_extension_list_is_the_one_the_grammar_reads`.
+/// the grammar the query box promises. The alias is the guarantee, so there is
+/// nothing to assert about the alias itself; what `media_ext_follows_the_grammars_video_list`
+/// checks is the half that could still be wrong - that this importer classifies
+/// every extension the grammar calls a video.
 const VIDEO_EXTS: &[&str] = goon_core::query::VIDEO_EXTS;
 
 pub fn media_ext(path: &str) -> Option<&'static str> {
@@ -2992,10 +2994,12 @@ mod tests {
 
     /// #76: the query grammar's `type:video` and this importer's idea of a video
     /// have to be the same list, or `type:video` misses what the app imported.
+    /// The list itself is an alias of `goon_core::query::VIDEO_EXTS`, so what is
+    /// actually at risk is the classification: every extension the grammar names
+    /// must classify as a video here, whatever that list grows to.
     #[test]
-    fn the_video_extension_list_is_the_one_the_grammar_reads() {
-        assert_eq!(VIDEO_EXTS, goon_core::query::VIDEO_EXTS);
-        for ext in ["mp4", "webm", "mkv", "mov", "avi"] {
+    fn media_ext_follows_the_grammars_video_list() {
+        for ext in goon_core::query::VIDEO_EXTS {
             assert_eq!(
                 media_ext(&format!("https://cdn.example/a/b/clip.{ext}?s=1")),
                 Some("video"),

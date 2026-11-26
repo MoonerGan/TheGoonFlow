@@ -453,13 +453,15 @@ the board's *In review* column is the current list.
       worked example in `docs/plan/76-plan.md` §4 parses to the AST the plan
       promises, and the same set **prepares and binds as real SQL against the
       real v10 schema**, so stage S3 has nothing left to discover. Pinned by the
-      `goon-core::query` tests, measured 2026-11-26 with `cargo test --workspace`
-      = **194 passed, 0 failed, 8 ignored** (goon-core **87**, desktop **101** + 8
+       `goon-core::query` tests, measured 2026-11-26 and again after the S2
+       review pass described below, with `cargo test --workspace` = **209
+       passed, 0 failed, 8 ignored** (goon-core **102**, desktop **101** + 8
+       ignored, vault 4, locator 2):
       ignored, vault 4, locator 2):
       - one test per worked example, all **14** (`example_01…example_14`), plus
-        `every_placeholder_has_exactly_one_parameter` over **22** queries (the `?`
+        `every_placeholder_has_exactly_one_parameter` over **28** queries (the `?`
         count equals the parameter count, and the parenthesis depth returns to
-        **0**) and `every_example_is_sql_the_schema_can_run` (the same 22
+        **0**) and `every_example_is_sql_the_schema_can_run` (the same 28
         prepared, bound and stepped against `init_schema`'s v10 tables in
         memory). The depth check earned its keep immediately: `type:video`'s
         extension arm was one parenthesis short, which SQLite would have refused
@@ -494,7 +496,8 @@ the board's *In review* column is the current list.
         Games — D14 enforced in the grammar, not only in the rails.
       - one vocabulary, not two: `ingest::VIDEO_EXTS` **is**
         `goon_core::query::VIDEO_EXTS`
-        (`the_video_extension_list_is_the_one_the_grammar_reads`), so `type:video`
+        (`media_ext_follows_the_grammars_video_list` in `ingest`, which iterates
+        the grammar's own list rather than a copy of it), so `type:video`
         cannot miss a file the importer called a video.
       - `an_id_predicate_is_exact_and_knows_the_real_id_shape` pins the id shape
         against the code rather than the plan: ids are `new_id(prefix)` —
@@ -502,12 +505,109 @@ the board's *In review* column is the current list.
         and an id that simply does not exist is a query matching nothing, not an
         error (only `id:cl/ip`, which cannot be an id, is refused).
 
+      The second review pass (same day) added the half the AST tests could not
+      see — what the planned SQL *selects* — so `query.rs` grew a synthetic
+      fixture library (`seeded_library`, `fixture_item`, `matched`) and runs the
+      planned `WHERE` against the real v10 schema:
+
+      - **a negated fact plans the contrary comparison, not `NOT (…)`**
+        (`a_negated_fact_never_counts_an_unmeasured_item`, `Cmp::opposite_sql`,
+        `Term::self_negates`): `NOT (bytes > ?)` is true of an item nobody ever
+        measured, so `-size>1gb` becomes `bytes <= ?` and the never-probed item
+        is missed by both halves. Existence and derived predicates (`has:`,
+        `stored:`, `source:`, `ext:`, a tag, a date) stay plain complements,
+        because there is no unknown behind them. `type:` negation is derived the
+        same way: `-type:video` wants a still row, `-type:image` wants a video
+        row *or* an animated one, and a gif arm may read `kind IN
+        ('full','video')` — it is not tied to the container alone.
+      - **the three #40 rails are the same predicate in grammar text**
+        (`the_old_source_queues_are_the_same_predicate_in_grammar_text`):
+        `stored:local-only` is the old `local_only` badge word for word
+        (`EXISTS sources site='local'` **and** `NOT EXISTS sources
+        site<>'local'`), `-stored:disk` is `no_local`, `-has:tags` is `no_tags`,
+        and the plan's `WHERE` counted by `COUNT(*)` equals what
+        `db::source_stats` badges — so a preset chip cannot silently widen a
+        queue the user already knows. That is why `stored:` has **four** values
+        (`vault | disk | local-only | link`), and
+        `closed_values("stored")` is what the error text lists.
+      - a value never reaches SQL text: `every_placeholder_has_exactly_one_parameter`
+        over **26** queries, and `a_value_is_bound_and_never_written_into_the_sql`
+        which strips the code-owned fragments (`CODE_OWNED_DIGITS`: `SELECT 1
+        FROM`, `animated = 0/1`, `height > 0`) and then insists no bound value's
+        own text appears anywhere in the statement — the case the placeholder
+        count cannot catch. `a_quoted_phrase_cannot_reach_the_sql_text` runs
+        `"); DROP TABLE items;--"` as a phrase and checks the library still has
+        the rows it had.
+      - the bounds are refused, not guessed: `MAX_TERMS` **50** and
+        `MAX_INPUT_CHARS` **2 048** (past which SQLite answers with a prepare
+        error instead of a result, so the grammar says no first), a negative
+        pixel count, a colon-form length whose milliseconds would overflow
+        (`length>999999999999999:00`), a five-digit year, an epoch past
+        `LAST_DATE_EPOCH`, and empty `""` / `circle:` / `tag:` values. Every
+        epoch computation is `checked_mul`/`checked_add`: before this, a
+        12-digit year overflowed — a panic in debug, a wrapped timestamp in
+        release.
+      - invisible input is caught where it is grammar: control, format, bidi,
+        zero-width, en/em dash and fullwidth colon are refused **inside a term**
+        (an en dash is not the `-` that negates, and that mistake is invisible),
+        while inside quotes the text stays verbatim data, because a scraped
+        title really does contain soft hyphens and NBSP.
+      - `circle:` and `rating:` are valid in **both** views
+        (`circle_and_rating_are_valid_in_both_views_because_items_carry_them` —
+        the columns are on the shared `items` row and an e-hentai gallery has a
+        circle), and only `status:` is Games-only
+        (`status_is_games_only…`). Plan §1 said "Games get `status:`/`circle:`;
+        Media never do", which contradicted §4's own vocabulary table; the
+        sentence is corrected, and `keyword_hint(Scope::Media)` is generated from
+        `keywords()` so a hint list can never drift from the grammar.
+
       What it costs, measured 2026-11-26 with a throwaway harness over 20 000
       rounds (the per-keystroke path stage S5 will use): parse+plan is **0.0032 ms**
       for one term, **0.0096 ms** for three, **0.0199 ms** for seven; typing the
       longest worked example parses every one of its **77** prefixes for **0.62 ms**
       in total. The parse is noise next to the SQL it feeds, so the suggester can
       re-plan on every debounce tick without a cache.
+
+   41. **100k items, filtered, in milliseconds** (#76 stage S2, plan §6/§8.3).
+      `cargo run -p goon-core --release --example filter_scale_probe` builds a
+      throwaway plaintext vault under `%TEMP%` (**100 000 items**, 10 tags each
+      ≈ **1 000 000** `item_tags` rows, 20 000 distinct tags, half vaulted, 70 %
+      of those probed, the rest deliberately un-probed so invariant 27 has rows
+      to hide) and prints p50/p95 for both statements every filtered grid runs:
+      the page (`… ORDER BY items.updated_at DESC LIMIT 300`) and the paired
+      `COUNT(*)` behind "N matches · M total". Fixture ids, titles and tag names
+      are synthetic (`fixture_tag_00421`), the media BLOB is an 8-byte stub, and
+      the whole thing is deleted again. It also prints `EXPLAIN QUERY PLAN` for
+      four shapes, which is where the one cost the grammar knowingly accepts is
+      recorded: `CAST(created_at AS INTEGER)` makes an index on the TEXT stamps
+      useless, so `added:` is a **scan** of `items`. Measured 2026-11-26 in
+      `tools/filter-scale-20261126.log` (release build, plaintext vault, 104 MiB,
+      built in 13.9 s): the slowest grid page is the dense tag
+      `big_breasts` (64 092 matches) at **197 ms p50 / 199 ms p95**, and
+      `big_breasts -anal` is **190 ms**; every other shape is under **80 ms**, and
+      several are under 10 ms (`stored:local-only` 1 ms, `size>100mb type:image`
+      2 ms, `-size>1gb type:gif` 10 ms, the date window 0 ms). The paired
+      `COUNT(*)` is the honest surprise: **86 ms** for the same tag query, and up
+      to **171 ms p95** for `ratio:>2 height>800`, because a `LIMIT 300` page can
+      stop early on the `updated_at` order while a total cannot. Stage S3's job is
+      not to make the count fast but to stop running it on every keystroke.
+      The fixture is also what makes `-has:tags` measurable: one item in twelve
+      carries no tags at all, and 1 in 6 knows no extension, which is the pre-v10
+      gap #77 has to close before `ext:` means what it says.
+
+      Two numbers the log records on purpose rather than leaving to be inferred.
+      `ext:gif ext:mp4` matches **0 rows by construction** - an item carries one
+      `extension` tag, since `db::set_item_extension_tag` writes exactly one - so
+      the conjunction the plan's example shows is a query that can never be true,
+      which stage S5 must handle as a hint ("did you mean `ext:gif` **or**
+      `ext:mp4`?") rather than a result. And the `EXPLAIN QUERY PLAN` lines show
+      `size>100mb`, `type:video` and every `added:` window start with `SCAN items`
+      plus a correlated `SEARCH m USING INDEX media_hash_idx (item_id=? AND
+      kind=?)`: the plan shape is item-at-a-time with an index probe per item, so
+      the cost is the **`items` row count**, not the match count. A tag query is
+      the opposite shape - `MULTI-INDEX OR` over `tags_fold_idx` / `tags_name_idx`
+      then `item_tags_tag_idx` as a covering index - which is why it gets *slower*
+      the more items match.
 
 ## 4. House rules that prevent whole classes of damage
 

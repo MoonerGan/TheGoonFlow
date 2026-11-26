@@ -314,27 +314,73 @@ tools/
 - **The query box's grammar** is `goon-core/src/query.rs` (#76 stage S2): a pure
   parser (`parse(text, Scope::Media|Games)` → `Query` of `Term`s, each keeping the
   exact text it came from, which is what the chip row shows) plus a planner
-  (`Query::plan()` → `Plan { sql, params }` — one `WHERE` body of AND-ed
-  fragments with `?` marks and the values for them, never a string-built query).
+  (`Query::plan()` → `Plan { sql, params, unmeasured }` — one `WHERE` body of
+  AND-ed fragments with `?` marks and the values for them, never a string-built
+  query). The module holds no connection and writes nothing: the box's text is
+  session state (invariant 28).
   Keywords are a **closed, code-owned set** (`KEYWORDS`), reserved whatever the
   value is, because that is the anti-import guarantee: a tag whose name really
   starts with a keyword is reached with `tag:"ext:something"`. Closed value sets
-  are `type:` (video/image/gif), `has:` (thumb/tags), `stored:` (vault/disk/link)
-  and `status:` (the five `model::Status` stages); `source:` and `ext:` take any
-  slug, since their vocabulary is the vault's (invariant 10), and `id:` takes an
-  id in the shape the app mints (`new_id`: `c-`/`g-`/`i-`/`v-`/`b-` plus 20 hex
-  digits — the plan's `id:<ulid>` sketch was corrected against the code, since
-  every real id contains a hyphen). A quoted token on
-  its own is the free-text search over `title` or `circle` — the same pair the old
-  search box read, so replacing that box costs no capability. Three things the
-  SQL has to get right: timestamps are TEXT epoch seconds so date predicates
-  compare `CAST(created_at AS INTEGER)` against an epoch the **parser** computed
-  (`'999999999' > '1000000000'` is true as text); a bare `added:2026-11-01` is the
-  UTC day, not one second; and every fact predicate reads `media.kind IN
-  ('full','video')`, never a `thumb` row, so a 360 px tile is never what
-  `width>1200` measured (invariant 27). `ingest::VIDEO_EXTS` is this module's
-  `VIDEO_EXTS` — one list, pinned by a test, or `type:video` would miss what the
-  importer accepted.
+  are `type:` (video/image/gif), `has:` (thumb/tags), `stored:`
+  (vault/disk/**local-only**/link — `local-only` is the old #40 "local only" queue
+  one to one: a local source *and* no source from any other site, because a
+  preset that silently widened that queue is what the rulings forbid) and
+  `status:` (the five `model::Status` stages, and the **only** Games-only word:
+  `circle:`/`rating:` are valid in both views, as plan §4's table says, since the
+  columns are on the shared `items` row). `source:` and `ext:` take any slug,
+  since their vocabulary is the vault's (invariant 10), and `id:` takes an id in
+  the shape the app mints (`new_id`: `c-`/`g-`/`i-`/`v-`/`b-` plus 20 hex digits —
+  the plan's `id:<ulid>` sketch was corrected against the code, since every real
+  id contains a hyphen). A quoted token on its own is the free-text search over
+  `title` or `circle` — the same pair the old search box read, so replacing that
+  box costs no capability. Every spelling of a comparison parses (`size>100mb`,
+  `size:>100mb`, plan §4's colon-free `rating=3`), while `size-ish` and `id#3`
+  stay literal tags. Six things the SQL has to get right:
+
+  * timestamps are TEXT epoch seconds, so date predicates compare
+    `CAST(created_at AS INTEGER)` against an epoch the **parser** computed
+    (`'999999999' > '1000000000'` is true as text, false as numbers). The `CAST`
+    defeats any index on the stamps, so a date window is a scan of `items` —
+    measured by `filter_scale_probe`, and cheap enough at 100k to accept;
+  * **a day is a UTC day**: `added:2026-11-01` is `[1793491200, 1793577600)`,
+    because the same query text has to select the same rows on every machine (a
+    per-machine day boundary would make the tests machine-dependent and a
+    restore-from-export answer differently). The words the user sees say "UTC
+    day"; there is no timezone database in this crate and none is wanted. Years
+    are four digits and the epoch arithmetic is `checked_*`, because a 12-digit
+    year used to overflow — a panic under `cargo test`, a wrapped epoch in
+    release;
+  * sizes are **1024-based**, so `size>100mb` is `size>104857600`: the number the
+    grid and Explorer print beside the same file is the number the filter must
+    agree with;
+  * every fact predicate reads `media.kind IN ('full','video')`, never a `thumb`
+    row, so a 360 px tile is never what `width>1200` measured (invariant 27), and
+    every media predicate is `EXISTS`-shaped rather than a `JOIN media`: one item
+    has `thumb`/`full`/`video` rows, and a join would multiply both the grid page
+    and the paired `COUNT(*)`;
+  * **a negated fact is not `NOT (…)`**: `-size>1gb` plans the contrary
+    measurement (`bytes <= ?`), because `NOT (bytes > ?)` is true for a fact
+    nobody ever measured — "un-measured" is not the same fact as "small". Tag,
+    source, `has:`, `stored:` and date negations *are* plain complements, because
+    there is no unknown behind them;
+  * the `Plan` reports which probe-only columns its own fragments read
+    (`Plan::unmeasured`, `Plan::needs_facts()`), and `FACTS_PENDING_SQL`,
+    `SOURCE_FACTS_SEEN_SQL` and `EXTENSION_TAGS_SEEN_SQL` ask the vault in one
+    cheap read whether it holds them — so stage S5 can answer "not measured yet ·
+    measure my files" instead of a `0 matches` that reads like an answer. The
+    same rule as #38's three-state verdict and #65's `? px`.
+
+  A bad query is a `ParseError` value (inline form state, never a toast): bad
+  units, a negative pixel count, a length that would overflow, more than
+  `MAX_TERMS` terms or `MAX_INPUT_CHARS` characters (past which SQLite would
+  answer with a prepare error instead), an empty `""`, and control, bidi or
+  invisible-format characters inside a term — including a dash or colon
+  lookalike, because an en dash is not the `-` that negates a term. Inside quotes
+  the text is data, so a scraped title's soft hyphen stays reachable. Tags stay
+  **binary and case-sensitive** (`t.fold = ?`, so `Big_Breasts` finds nothing)
+  while the title `LIKE` is not: deliberate, and stage S5's placeholder has to
+  say so. `ingest::VIDEO_EXTS` **is** this module's `VIDEO_EXTS` — one list, or
+  `type:video` would miss what the importer accepted.
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
   `if v < N` steps up to `SCHEMA_VERSION` (v10). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
@@ -625,6 +671,16 @@ tools/
     carry the
     facts it already had — a row may never become un-probed. And the UI says
     *not measured* (`?`), never a pixel size, for the same reason (#65).
+    **The negation of a fact is the contrary measurement, never `NOT (…)`**:
+    `NOT (bytes > ?)` is *true* of an item nobody ever measured, so `-size>1gb`
+    plans `bytes <= ?` instead — "un-measured" is not the fact "small". Tag,
+    source, `has:`, `stored:` and date negations stay plain complements, because
+    there is no unknown behind them; `Term::self_negates` is the single place
+    that rule lives, and `a_negated_fact_never_counts_an_unmeasured_item` runs a
+    never-probed item through every fact predicate and its negation. A query
+    that reads a probe-only column also says so (`Plan::needs_facts`), so the UI
+    can offer *measure my files* rather than print a `0 matches` that reads like
+    an answer.
 
 28. **The query string is session state, never persisted (#76).** What the user
     types into the filter box lives in the view's state for the length of the

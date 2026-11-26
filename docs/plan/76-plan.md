@@ -39,14 +39,23 @@ never imported and never stored as free tags.
 
 **DESIGN decisions this respects / touches:**
 - **D14** view separation is kept: one grammar, but each view exposes a
-  different predicate vocabulary (Games get `status:`/`circle:`; Media never do).
+  different predicate vocabulary. **Only `status:` is Games-only**: it is the
+  pipeline column and a media item has no such column to read. `circle:` and
+  `rating:` are valid in *both* views, which is what §4's vocabulary table says
+  and what the schema supports — `items.circle` / `items.rating` are columns of
+  the shared `items` table, and an e-hentai gallery really does have a circle, so
+  rejecting the key would hide a fact the row carries. (This sentence replaces
+  the earlier "Games get `status:`/`circle:`; Media never do", which contradicted
+  §4; pinned by `circle_and_rating_are_valid_in_both_views_because_items_carry_them`
+  and `status_is_games_only…` in `goon-core::query`.)
 - **D9/D16**: completion stays a *tag* — `complete` is matched as a tag, `status:`
   covers only the pipeline column. Media queries can never produce a status chip.
 - **D17/D18** video semantics (link by default, vault BLOB opt-in, 512 MiB cap)
   are exactly what the `stored:` predicate codifies; no amendment needed.
 - **#73 (settings tab)** overlap: this plan *defines the storage-state
-  vocabulary* (`vault | disk | link`) that #73's "user-defined media folder" will
-  plug into. If #73 lands later it adds facts, not new predicates.
+  vocabulary* (`vault | disk | local-only | link`) that #73's "user-defined
+  media folder" will plug into. If #73 lands later it adds facts, not new
+  predicates.
 - No decision in DESIGN §2 is contradicted.
 
 ---
@@ -185,7 +194,10 @@ Fact sources (all GoonFlow-side, never imported as tags):
 - storage state is derived, not a column (until #73 adds a real location):
   `vault` = EXISTS media(kind IN ('full','video')); `disk` = EXISTS
   sources(site='local') (+ #73: a future `media(path NOT NULL, data NULL)` row);
-  `link` = neither. #73 only needs to keep those three EXISTSES honest —
+  `local-only` = `disk` AND NOT EXISTS sources(site<>'local'), which is the
+  one-to-one form of the #40 "local only" badge - added at the S2 review, because
+  `stored:disk` as a preset would silently widen the queue it selects (rulings C);
+  `link` = neither. #73 only needs to keep those EXISTSES honest —
   the grammar never changes.
 
 ---
@@ -232,8 +244,10 @@ bare     := [^ \t"-"]+                              (* ':' stays literal in tag 
 | `id:<ulid>` | items.id | exact |
 | `added:>=2026-11-01` | items.created_at | exact |
 
-GamesView gets `status:`/`circle:`; MediaView's parser rejects `status:` with a
-clear inline error (D14 enforced in the grammar, not just the rails).
+Only `status:` is Games-only: MediaView's parser rejects it with a clear inline
+error (D14 enforced in the grammar, not just the rails). `circle:` and `rating:`
+are accepted in both views, exactly as the table's "both: circle/rating" says —
+the columns are on the shared `items` row.
 
 **Qualified tags — the decision asked for:** `ehentai:female:big_breasts` style
 vs `source:ehentai tag:"female:big_breasts"`. **Recommend the latter.** The

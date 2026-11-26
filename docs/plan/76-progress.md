@@ -277,3 +277,173 @@ S3's `db::search_items`, and there is no command, wire type or UI — the stage
 order in plan §7. The query text is session state (new DEVELOPMENT §4 invariant
 28): `query.rs` has no connection and no write path, so nothing about a search
 can reach `meta`, disk, or a locked vault.
+
+
+---
+
+## S2 review pass — the grammar's second half: what the planned SQL **selects** (2026-11-26)
+
+The second grammar review said *yes, with fixes*: the tokenizer, the AST and the
+"never interpolate" discipline were accepted, but every predicate had only been
+tested as **text**. This pass adds the other half — a synthetic library and the
+planned `WHERE` run against it — and fixes the four blockers with their
+should-fix list in one commit.
+
+**B1 — `stored:` had three values where the app has four queues.**
+`stored:disk` as a preset for the old *local only* badge would have silently
+widened it: the badge means "a local source **and** no source from any other
+site", `stored:disk` means only the first half. So `stored:` now takes
+`vault | disk | local-only | link` (`closed_values("stored")` is what the error
+text lists, so a wrong value is told the real vocabulary), and
+`StoredShape::LocalOnly` writes the rail's SQL word for word, aliases `sl`/`so`
+included, from `db.rs:763`. `the_old_source_queues_are_the_same_predicate_in_grammar_text`
+proves the identity twice over: the planned rows are the badge rows, **and** the
+badge count from `db::source_stats` equals the query count for all three queues
+(`local_only` ≡ `stored:local-only`, `no_local` ≡ `-stored:disk`,
+`no_tags` ≡ `-has:tags`). Counting the same predicate two ways is the point -
+two predicates that happen to agree today are not the same predicate.
+
+**B2 — the epoch arithmetic overflowed.** A 12-digit year parsed, multiplied and
+added without checks: a panic under `cargo test`, a silently wrapped timestamp in
+release, which is worse because it selects the wrong rows for 30 years and never
+mentions it. Years must be four digits, a bare epoch at most 12 digits and at most
+`LAST_DATE_EPOCH` (9999-12-31), and every conversion is `checked_mul`/`checked_add`
+with a "too far away" error. `length>999999999999999:00` is refused for the same
+reason on the milliseconds side.
+
+**B3 — a negated fact is not `NOT (…)`.** `NOT (bytes > ?)` is *true* of an item
+nobody ever measured, so `-size>1gb` used to select every un-probed item: "never
+measured" is not the fact "small", and the two being confused is exactly the lie
+invariant 27 exists to stop. `Cmp::opposite_sql` (`>`→`<=`, `=`→`<>`) plus
+`Term::self_negates` make the contrary comparison the plan, in one place, and
+`a_negated_fact_never_counts_an_unmeasured_item` runs a never-probed row through
+every fact predicate **and** its negation and requires it to be missed by both.
+Existence and derived predicates (`has:`, `stored:`, `source:`, `ext:`, a tag, a
+date) keep the plain complement, because nothing behind them is unknown.
+`type:` negation is derived the same way: `-type:video` wants a still row,
+`-type:image` wants a video row *or* an animated one.
+
+**B4 — `key=value` was read as a tag.** The plan's §4 table writes `rating=3` and
+`type=video`; `split_operator` only knew the comparison characters, so those two
+examples became tag names and matched nothing. `=` now splits when the left side is
+a keyword — and only then, which is what keeps `size-ish`, `id#3` and `added-daily`
+literal tags (`an_equals_sign_makes_a_predicate_and_a_dash_does_not`).
+
+**Also in this pass.**
+
+* `MAX_TERMS` **50** and `MAX_INPUT_CHARS` **2 048**. Past roughly 500 `?` marks
+  SQLite stops answering with a result and starts answering with a prepare error,
+  so the grammar says no first and names the limit, pointing at the term that
+  crossed it. A query box that fails with "too many parameters" is a bug report;
+  one that says "50 terms is the most one query can be" is a sentence.
+* Invisible and lookalike characters inside a term are refused: control, bidi and
+  format characters, ZWSP, an en/em dash where the negating `-` was meant, a
+  fullwidth colon where the keyword separator was meant. This is grammar, so
+  **quoted** text is exempt — a scraped title's soft hyphen and NBSP are data and
+  stay reachable. NBSP outside quotes splits terms, because that is what it does.
+* Empty `""`, `circle:` and `tag:` values are refused rather than turned into a
+  `LIKE '%%'` that matches the whole library — the one place a typo could silently
+  *widen* a search.
+* `Plan { sql, params, unmeasured }` and `Plan::needs_facts()`: the planner
+  reports which probe-only columns its own fragments read (`FactKey::Pixels`,
+  `Motion`, `Duration`, `CachedBytes`, `Extension`), and `FACTS_PENDING_SQL`,
+  `SOURCE_FACTS_SEEN_SQL` and `EXTENSION_TAGS_SEEN_SQL` ask the vault in one cheap
+  `SELECT 1 … LIMIT 1` whether it holds them. That is the difference between a UI
+  that says "not measured yet · measure my files" and one that prints
+  `0 matches` for a fact nobody ever measured — which reads like an answer.
+* Media predicates are `EXISTS`-shaped, never `JOIN media`, and that is now said
+  in the `Plan` doc comment: one item has `thumb`, `full` and `video` rows, so a
+  join multiplies the grid page *and* the paired `COUNT(*)`. `ratio` reads media
+  **and** `sources` (`ratio_guard`) for the same symmetry stage S6 needs.
+* `circle:` and `rating:` are valid in **both** views
+  (`circle_and_rating_are_valid_in_both_views_because_items_carry_them`); only
+  `status:` is Games-only. Plan §1's "Games get `status:`/`circle:`; Media never
+  do" contradicted §4's own vocabulary table and the schema — `items.circle` and
+  `items.rating` are columns of the shared `items` row and an e-hentai gallery
+  really has a circle — so the §1 and §4 sentences are corrected here, in this
+  commit. `keyword_hint(scope)` is generated from `keywords()`, so a hint string
+  cannot drift from the grammar it describes.
+* `ingest::VIDEO_EXTS` is an alias of `goon_core::query::VIDEO_EXTS`; the
+  tautological drift test that only compared the alias to itself is gone,
+  replaced by `media_ext_follows_the_grammars_video_list`, which iterates the
+  grammar's list and asserts the importer classifies each one.
+* The digit pin (`a_value_is_bound_and_never_written_into_the_sql`) now names its
+  exceptions instead of hard-coding two replacements: `CODE_OWNED_DIGITS` lists the
+  only fragments of planned SQL allowed to contain a number (`SELECT 1 FROM`,
+  `animated = 0`, `animated = 1`, `height > 0`), and `CODE_OWNED_LITERALS` the only
+  string (`local`, the site slug of invariant 10). A new arm that wants a literal
+  has to be added to that list, which is the whole point of the test.
+
+**Measured** (`tools/cargo-test-s2fix.log`, `tools/cargo-clippy-s2fix.log`,
+`tools/filter-scale-20261126.log`):
+
+* `cargo test --workspace` = **209 passed, 0 failed, 8 ignored** (goon-core
+  **102**, desktop **101** + 8 ignored, vault 4, locator 2) — the grammar module
+  now holds **62** tests, **15** of them added in this pass, all against synthetic
+  fixtures except the ones that read the schema.
+* `cargo clippy --workspace --all-targets` = **0 warnings**; `rustfmt` clean on the
+  touched files; `node tools/char-audit.js` **CLEAN**.
+* The example set that has to hold for every fragment grew from 22 to **28**
+  queries, and each still prepares, binds and steps against the real v10 schema.
+* **The 100k scale probe plan §8.3 owed** now exists:
+  `crates/goon-core/examples/filter_scale_probe.rs`, release run logged to
+  `tools/filter-scale-20261126.log`. Fixture: **100 000 items**, 10 tags each ≈
+  **1 000 000** `item_tags` rows over 20 000 distinct tags, half vaulted, 70 % of
+  those probed, one item in twelve untagged, one in six not knowing its extension;
+  built in **13.9 s**, 104 MiB, plaintext SQLite on purpose (the plan shape is what
+  is being measured, not the codec's per-page cost, so these numbers are a floor).
+  Timed as the two statements stage S3 will emit — the `LIMIT 300` page and the
+  paired `COUNT(*)` — p50/p95 over 21 rounds, with the matched row count printed,
+  because a timing table of empty sets measures nothing.
+* Slowest page: the dense tag `big_breasts` (**64 092** matches) at **197 ms p50 /
+  199 ms p95**; `big_breasts -anal` **190 ms**; everything else under **80 ms**,
+  several under 10 (`stored:local-only` 1 ms, `size>100mb type:image` 2 ms,
+  `-size>1gb type:gif` 10 ms, a date window 0 ms).
+* **The `CAST(created_at AS INTEGER)` cost, asked for by name:** `EXPLAIN QUERY
+  PLAN` says `SCAN items` for `added:>=…`, `size>100mb` and `type:video`, then
+  `SEARCH m USING INDEX media_hash_idx (item_id=? AND kind=?)` per item — an index
+  on a TEXT stamp is useless under `CAST`, so those predicates are item-at-a-time
+  scans with an index probe, and their cost tracks the **row count**, not the match
+  count. A tag query is the opposite shape: `MULTI-INDEX OR` over `tags_fold_idx`
+  / `tags_name_idx`, then `item_tags_tag_idx` as a covering index, then
+  `SEARCH items USING INDEX sqlite_autoindex_items_1`, so it gets slower the more
+  items match. At 100k rows both are comfortably under a second, so the `CAST`
+  stays — it is what makes `'999999999' > '1000000000'` stop being true.
+* **The paired count is the one to watch:** 86 ms for `big_breasts` and up to
+  **171 ms p95** for `ratio:>2 height>800`, against a page of 197 ms and 8 ms
+  respectively, because a `LIMIT 300` page can stop early on the `updated_at` order
+  and a total cannot. S3's job is not to make `COUNT(*)` fast but to stop running
+  it on every keystroke.
+
+**What the probe caught that the fixture was lying about.** Three residues
+collided: the gif rule (`n % 40`) landed inside the video rule (`n % 20`), so every
+animated item was a video and `type:gif` timed an empty set; the local-source rule
+landed on the same residue as the `game` kind rule, so `stored:local-only` matched
+nothing inside the media scope; and untagged items all landed on one site, so
+`-has:tags source:ehentai` matched nothing. All three read as "0 matches" and were
+only visible because the log prints the row count next to the timing. That is the
+reason the count is printed, and the reason this file exists as a committed
+example instead of a scratch script.
+
+**Two findings that are stage S5's to handle, not the grammar's.**
+
+* `ext:gif ext:mp4` — one of plan §4's worked examples — matches **0 rows by
+  construction**: an item carries exactly one `extension` tag
+  (`db::set_item_extension_tag`), so the conjunction can never be true. The
+  grammar is right to AND them; the UI has to notice an unsatisfiable conjunction
+  of same-key predicates and suggest the disjunction instead of showing an empty
+  grid.
+* Tags are **binary and case-sensitive** (`t.fold = ?`, so `Big_Breasts` finds
+  nothing) while the title `LIKE` is not. Deliberate — a fuzzy tag match would
+  invent equivalences nobody declared — but the box's placeholder and the
+  "no results" row have to say so, or the difference looks like a bug.
+
+**The backfill gap, recorded where #77 will read it.** Schema v10 seeds the
+`extension` tag *type* and `set_item_extension_tag` exists, but nothing calls it,
+so `ext:` and `type:video`'s extension arm find nothing for pre-v10 items today -
+which also means `-type:video` currently under-excludes until B3's contrary arm and
+the extension tags both exist. `EXTENSION_TAGS_SEEN_SQL` is the cheap runtime check
+that says so. #77's S7 job therefore has to derive extension tags three ways, not
+one: from stored `mime`, from the `sources` url suffix, and from disk paths — the
+probe seeds type-4 tags for exactly that future state and leaves 1 item in 6
+knowing nothing, so the "not yet backfilled" case stays measurable.
