@@ -268,10 +268,16 @@ tools/
   one stored hash* — titles are useless for `1743761874698456.jpg`.
   v10 adds the **facts** the filter's meta predicates read: `bytes` (written by
   every writer, backfilled as `length(data)` — measured exact under SQLCipher,
-  TESTING item 39), `duration_ms` (NULL until the facts probe measures it) and
+  TESTING item 39), `duration_ms` (NULL until the facts probe measures it),
   `animated` (read from the container: gif frame count, PNG `acTL`, WebP
-  `ANMF`; NULL = not probed). A thumb row gets `bytes` but never `animated`: a
-  re-encoded tile says nothing about the original.
+  `ANMF`) and `probed_at` — the marker that says a container has already been
+  asked about this row, including when it answered nothing. A thumb row gets
+  `bytes` but never `animated`: a re-encoded tile says nothing about the
+  original. `db::refine_stored_facts(conn, limit)` is the bounded, resumable
+  pass that fills the facts for rows written before v10; it is a **job** (stage
+  S7), never part of the migration, because it reads every original once and
+  unlock must not block (D15). Measured: 0.014 ms/row for a tiny file, 0.19 ms
+  for a 200 KB one (the BLOB read dominates) — 1 000 rows in 185 ms.
 - `sources` v10 fact columns — `bytes`, `duration_ms`, `width`, `height`,
   `probed_at`: the same facts for a file the vault does **not** hold (a
   `file:///` path stat'ed and cached, or a link measured by a ranged probe).
@@ -311,8 +317,12 @@ tools/
   `allthefallen`); v4 adds `items.launch_path`; v5 `match_suggestions`; v6/v7
   the `mods` table and its deploy columns; v8 `pair_dismissals`; v9
   `source_images`; v10 (#76) rebuilds `tags` with provenance, adds the media and
-  source fact columns, seeds the `extension` tag type and creates the planner's
-  indexes. The v10 tag rebuild is the one structural migration: it reuses every
+  source fact columns (plus `media.probed_at`, the marker of which rows a
+  container has answered for), seeds the `extension` tag type and creates the
+  planner's indexes. v10 deliberately never reads a stored file: the facts that
+  need the bytes come from `refine_stored_facts` as a background job (stage S7),
+  so upgrading stays instant whatever the library size. The v10 tag rebuild is
+  the one structural migration: it reuses every
   old tag id so `item_tags` never moves, and it runs with `PRAGMA foreign_keys`
   off for exactly the `DROP`/`RENAME` swap (a `DROP TABLE tags` would otherwise
   cascade every tag link away), followed by `PRAGMA foreign_key_check` to prove
@@ -585,7 +595,10 @@ tools/
     never from the file name or from a thumbnail — a re-encoded tile says nothing
     about the original, so thumb rows keep `animated` NULL; durations and the
     dimensions of a link or a disk file exist only once the facts probe measured
-    them, stamped in `sources.probed_at`. A merge or a re-store must carry the
+    them, stamped in `sources.probed_at`. `media.probed_at` is the same marker
+    for the vault's own rows — and the facts job's resume point, so a row whose
+    container answered nothing is not read again. A merge or a re-store must
+    carry the
     facts it already had — a row may never become un-probed. And the UI says
     *not measured* (`?`), never a pixel size, for the same reason (#65).
 

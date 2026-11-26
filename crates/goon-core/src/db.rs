@@ -267,7 +267,8 @@ pub fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
 ///   `female:big_breasts` and gelbooru's `big_breasts` stay two rows and still
 ///   answer one bare token (plan §3.1).
 /// * The **facts** the meta predicates read. In `media` for bytes the vault
-///   holds (`bytes`, `duration_ms`, `animated`) and in `sources` for bytes it
+///   holds (`bytes`, `duration_ms`, `animated`, plus `probed_at` marking which
+///   rows a container has already answered for) and in `sources` for bytes it
 ///   does not (a disk path or a bare link: `bytes`, `duration_ms`, `width`,
 ///   `height`, `probed_at`). Every one of them is NULL until something measured
 ///   it — an unknown fact never matches a predicate (76-rulings B).
@@ -283,6 +284,7 @@ fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
         ("media", "bytes", "INTEGER"),
         ("media", "duration_ms", "INTEGER"),
         ("media", "animated", "INTEGER"),
+        ("media", "probed_at", "TEXT"),
         ("sources", "bytes", "INTEGER"),
         ("sources", "duration_ms", "INTEGER"),
         ("sources", "width", "INTEGER"),
@@ -314,14 +316,25 @@ fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
         -- arrived as content and is corrected here (plan §9 decision 11).
         UPDATE tags SET type_id = 2 WHERE name = 'f95-completed' AND type_id = 3;
 
-        -- Facts we already know from what the vault holds: the byte size of a
-        -- stored row, and gif-ness from the mime that was sniffed from its bytes
-        -- (media.rs::detect_mime). A single-frame gif is not animated, and this
-        -- says 'gif container'; the facts job re-reads the container chunks and
-        -- corrects it to 0 for a one-frame file. Everything else stays NULL.
+        -- The byte size of a stored row is a fact the engine can state exactly,
+        -- and without moving the BLOB: length() on an encrypted row returns the
+        -- plaintext length (measured through SQLCipher, TESTING item 39).
         UPDATE media SET bytes = length(data) WHERE bytes IS NULL;
-        UPDATE media SET animated = 1 WHERE animated IS NULL AND mime = 'image/gif';
 
+        -- A pre-v10 writer wrote 0 for a header it could not read. 0 px is not a
+        -- measurement, and a `width<400` query would have matched it: those
+        -- become NULL, which is what 'never measured' means (invariant 27).
+        UPDATE media SET width = NULL, height = NULL
+         WHERE kind = 'full' AND (width = 0 OR height = 0);
+
+        -- What v10 deliberately does NOT do: read the stored files. Pixel size
+        -- and animation are facts about bytes, and getting them means reading
+        -- every original once — on a large vault that is minutes of blocking
+        -- right after the passphrase, which D15 forbids. So those columns stay
+        -- NULL (and so never match a predicate) until refine_stored_facts runs
+        -- as the facts job (stage S7); anything stored from v10 forward carries
+        -- them as it is written.
+        --
         -- The planner's index set (plan §6). media(item_id,kind) is deliberately
         -- missing: media_hash_idx already covers that prefix.
         CREATE INDEX IF NOT EXISTS tags_fold_idx ON tags (fold);
@@ -334,6 +347,92 @@ fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
         COMMIT;",
     )?;
     Ok(())
+}
+
+/// Timestamps in this schema are epoch **seconds as text** — the shape every
+/// command writes through `now_epoch()` in the desktop app, and the shape the
+/// `added:` / `updated:` query predicates compare against.
+pub fn now_epoch_text() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default()
+}
+
+/// #76: measure the two facts that can only come from the bytes themselves —
+/// the picture's own pixel size (header read, no decode) and whether the
+/// container says it moves (gif frame count, PNG `acTL`, WebP `ANIM`/`ANMF`).
+///
+/// Not part of `migrate_v10`: this reads every stored original, so it runs as
+/// the facts job (stage S7) rather than inside unlock (D15: jobs, not modal
+/// blocking). It is **bounded and resumable**: `limit` rows per call, a row
+/// already looked at is marked in `media.probed_at` and never re-read, and an
+/// existing measurement is never replaced — `IFNULL` keeps it — so the job can
+/// be cancelled and resumed without un-probing anything (invariant 27).
+///
+/// `full` rows only: a re-encoded 360 px tile says nothing about the original's
+/// size or motion, so thumb rows keep `animated` NULL. `duration_ms` is not this
+/// function's to know — no image container says how long a video is, and that
+/// fact comes from the same job's media probe.
+pub fn refine_stored_facts(conn: &Connection, limit: usize) -> rusqlite::Result<FactScan> {
+    let mut out = FactScan::default();
+    let mut rows: Vec<(i64, Vec<u8>)> = Vec::new();
+    {
+        // probed_at is the progress marker: a row whose container would not
+        // answer is still a row that was read, and must not be read again.
+        let mut stmt = conn.prepare(
+            "SELECT id, data FROM media
+             WHERE kind = 'full' AND probed_at IS NULL
+             ORDER BY id LIMIT ?1",
+        )?;
+        let mapped = stmt.query_map(params![limit as i64], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
+        for row in mapped {
+            rows.push(row?);
+        }
+    }
+    // IFNULL on the measurements: a container that will not answer here must
+    // not erase a size some earlier path did record (invariant 27 only lets a
+    // fact be unknown, never unknown again).
+    let mut upd = conn.prepare(
+        "UPDATE media
+         SET width = IFNULL(?2, width),
+             height = IFNULL(?3, height),
+             animated = IFNULL(?4, animated),
+             probed_at = ?5
+         WHERE id = ?1",
+    )?;
+    for (id, data) in rows {
+        out.scanned += 1;
+        let dims = crate::media::image_dimensions(&data);
+        if dims.is_some() {
+            out.dims += 1;
+        }
+        let animated = crate::media::is_animated(&data).map(|a| a as i64);
+        match animated {
+            Some(1) => out.animated += 1,
+            Some(_) => out.still += 1,
+            None => out.unknown_animation += 1,
+        }
+        let (w, h) = match dims {
+            Some((w, h)) if w > 0 && h > 0 => (Some(w as i64), Some(h as i64)),
+            _ => (None, None),
+        };
+        upd.execute(params![id, w, h, animated, now_epoch_text()])?;
+    }
+    Ok(out)
+}
+
+/// What one fact-scan pass looked at and what it learned. Returned rather than
+/// logged so the job can report progress and a test can assert the numbers.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct FactScan {
+    pub scanned: usize,
+    pub dims: usize,
+    pub animated: usize,
+    pub still: usize,
+    pub unknown_animation: usize,
 }
 
 fn has_column(conn: &Connection, table: &str, col: &str) -> bool {
@@ -1844,8 +1943,8 @@ pub fn merge_items(conn: &Connection, keep_id: &str, drop_id: &str) -> rusqlite:
     // Media rows: keep hashes distinct (UNIQUE item/kind/hash). The v10 fact
     // columns travel with the row — a merge must not un-probe what was measured.
     conn.execute(
-        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, duration_ms, animated)
-         SELECT ?1, kind, hash, mime, width, height, data, bytes, duration_ms, animated FROM media WHERE item_id = ?2",
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, duration_ms, animated, probed_at)
+         SELECT ?1, kind, hash, mime, width, height, data, bytes, duration_ms, animated, probed_at FROM media WHERE item_id = ?2",
         params![keep_id, drop_id],
     )?;
     conn.execute("DELETE FROM media WHERE item_id = ?1", params![drop_id])?;
@@ -1893,7 +1992,7 @@ mod tests {
         assert!(has_column(&conn, "tags", "site"));
         assert!(has_column(&conn, "tags", "ns"));
         assert!(has_column(&conn, "tags", "fold"));
-        for col in ["bytes", "duration_ms", "animated"] {
+        for col in ["bytes", "duration_ms", "animated", "probed_at"] {
             assert!(has_column(&conn, "media", col), "media.{col} missing");
         }
         for col in ["bytes", "duration_ms", "width", "height", "probed_at"] {
@@ -1911,11 +2010,17 @@ mod tests {
 
     /// #76: the v10 rebuild must keep every `item_tags` link (the old id space
     /// is reused, and DROP TABLE tags would otherwise cascade them away), split
-    /// namespaced names into ns + fold, and backfill the facts the vault already
-    /// holds. Built on a hand-made v9-shaped vault, the same shape a field-test
-    /// vault arrives as.
+    /// namespaced names into ns + fold, prove the byte lengths the engine can
+    /// state without reading a file, and leave every fact that needs a file
+    /// unread until `refine_stored_facts` runs. Built on a hand-made v9-shaped
+    /// vault, the same shape a field-test vault arrives as.
     #[test]
     fn v10_rebuild_keeps_links_folds_names_and_backfills_facts() {
+        let gif = crate::media::fixtures::gif_with_frames(3);
+        let png = crate::media::fixtures::sample_png();
+        // a container we can sniff but read no size or frame count out of
+        let junk = b"GIF89a".to_vec();
+        let (gif_len, png_len, junk_len) = (gif.len() as i64, png.len() as i64, junk.len() as i64);
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
             "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -1960,12 +2065,54 @@ mod tests {
                  (15,'foo:bar',3);
              INSERT INTO item_tags (item_id,tag_id) VALUES
                  ('eh1',10),('eh1',12),('gb1',11),('gb1',13),('gb1',14),('gb1',15);
-             INSERT INTO media (item_id,kind,hash,mime,data) VALUES
-                 ('eh1','full','h1','image/gif',X'474946383961'),
-                 ('gb1','full','h2','image/jpeg',X'ffd8ff00112233');
              INSERT INTO meta (key,value) VALUES ('schema_version','9');",
         )
         .unwrap();
+        // The media rows go in as real files, bound as parameters: a fixture
+        // that is merely shaped like a gif would prove nothing about a pass that
+        // reads containers. This is what a pre-v10 writer left behind — `full`
+        // rows with no size (the old writer wrote NULL there), one row with the
+        // 0 px an interrupted write could leave, and a tile with its own dims.
+        let mut ins = conn
+            .prepare(
+                "INSERT INTO media (item_id,kind,hash,mime,width,height,data)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            )
+            .unwrap();
+        ins.execute(params![
+            "eh1",
+            "full",
+            "h1",
+            "image/gif",
+            None::<i64>,
+            None::<i64>,
+            gif
+        ])
+        .unwrap();
+        ins.execute(params![
+            "gb1",
+            "full",
+            "h2",
+            "image/png",
+            None::<i64>,
+            None::<i64>,
+            png
+        ])
+        .unwrap();
+        ins.execute(params!["eh1", "full", "h3", "image/gif", 0i64, 0i64, junk])
+            .unwrap();
+        ins.execute(params![
+            "gb1",
+            "thumb",
+            "h4",
+            "image/gif",
+            360i64,
+            360i64,
+            crate::media::fixtures::gif_with_frames(3)
+        ])
+        .unwrap();
+        drop(ins);
+
         assert_eq!(schema_version(&conn).unwrap(), 9);
 
         init_schema(&conn).unwrap();
@@ -2039,26 +2186,67 @@ mod tests {
             .unwrap();
         assert_eq!(type_id, TYPE_SITE_FLAG);
 
-        // facts the vault already proves: bytes of each stored row, and the gif
-        // container says animated; the jpeg does not get a fact it never had.
-        let (bytes, animated): (i64, Option<i64>) = conn
-            .query_row(
-                "SELECT bytes, animated FROM media WHERE hash = 'h1'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+        // Upgrading must not read a single file: the byte length comes from
+        // SQLite (no BLOB leaves the engine) and every fact that needs the
+        // container is still NULL, so a `width>` or `type:gif` query matches
+        // nothing yet rather than guessing (invariant 27). What a pre-v10 writer
+        // left as 0 px is gone, because 0 px would match `width<400`.
+        let facts = |hash: &str| -> (Option<i64>, Option<i64>, Option<i64>, Option<i64>) {
+            conn.query_row(
+                "SELECT bytes, width, height, animated FROM media WHERE hash = ?1",
+                params![hash],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
-            .unwrap();
-        assert_eq!(bytes, 6);
-        assert_eq!(animated, Some(1));
-        let (bytes, animated): (i64, Option<i64>) = conn
-            .query_row(
-                "SELECT bytes, animated FROM media WHERE hash = 'h2'",
-                [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(bytes, 7);
-        assert_eq!(animated, None);
+            .unwrap()
+        };
+        assert_eq!(facts("h1"), (Some(gif_len), None, None, None));
+        assert_eq!(facts("h2"), (Some(png_len), None, None, None));
+        assert_eq!(facts("h3"), (Some(junk_len), None, None, None));
+        assert_eq!(facts("h4"), (Some(gif_len), Some(360), Some(360), None));
+
+        // Now the facts job's pass (stage S7 wires it to a job). Each container
+        // answers for itself: the 3-frame gif says animated and 4x4, the still
+        // PNG says 8x8 and *not* animated, and the 6-byte stub says nothing —
+        // which stays NULL rather than becoming a 'still'.
+        let one = refine_stored_facts(&conn, 2).unwrap();
+        assert_eq!(
+            one,
+            FactScan {
+                scanned: 2,
+                dims: 2,
+                animated: 1,
+                still: 1,
+                unknown_animation: 0,
+            },
+            "the first two rows by id are the gif and the png"
+        );
+        assert_eq!(facts("h1"), (Some(gif_len), Some(4), Some(4), Some(1)));
+        assert_eq!(facts("h2"), (Some(png_len), Some(8), Some(8), Some(0)));
+        let two = refine_stored_facts(&conn, 9).unwrap();
+        assert_eq!(two.scanned, 1, "the stub is the only row left to read");
+        assert_eq!(
+            facts("h3"),
+            (Some(junk_len), None, None, None),
+            "an unreadable header stays unknown"
+        );
+        assert_eq!(
+            refine_stored_facts(&conn, 9).unwrap().scanned,
+            0,
+            "a row already read is not read again"
+        );
+        // The `IFNULL` guard: a container that cannot answer must not delete a
+        // fact another path recorded. `h3` keeps its size while its animation
+        // stays the unknown it always was.
+        conn.execute(
+            "UPDATE media SET width = 999, height = 66, probed_at = NULL WHERE hash = 'h3'",
+            [],
+        )
+        .unwrap();
+        refine_stored_facts(&conn, 9).unwrap();
+        assert_eq!(facts("h3"), (Some(junk_len), Some(999), Some(66), None));
+        // the tile keeps its own size and never gains an animation fact: its
+        // bytes are a re-encode, so they say nothing about the original
+        assert_eq!(facts("h4"), (Some(gif_len), Some(360), Some(360), None));
 
         // the planner's indexes exist
         for idx in [

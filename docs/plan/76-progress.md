@@ -109,3 +109,68 @@ grammar. If an existing tag is literally named `ext` with a colon in it
 tag. Nothing in the repo's fixtures looks like that; I will quote-escape it in
 the parser tests (`"ext:something"`) and keep the behaviour — flag it if you
 would rather `ext:` only be reserved when the value is a known extension.
+
+---
+
+## S1 follow-up — the facts are measured, and measuring is a job (2026-11-26)
+
+Caught while re-reading `76-map.md` §10 note 1 after the S1 commit: the plan's
+`width>`/`height>` predicates were listed as if they were free, and the map's
+whole point is that they were not — `media.width/height` were only ever written
+on `thumb` rows, so a `width>1200` query measured the 360 px tile and lied.
+
+**What landed.**
+
+* `media.probed_at` (v10 column, idempotent `ALTER` guard like the rest). It
+  marks that a container has been *asked* about a row — including when it
+  answered nothing — which is what makes a backfill pass resumable.
+* `db::refine_stored_facts(conn, limit)`: the bounded pass. For each unread
+  `full` row it reads the picture's own pixels from the header (no decode) and
+  `animated` from the container's chunks, writes `probed_at`, and uses `IFNULL`
+  for the two measurements so a container that will not answer can never erase a
+  fact some earlier path recorded. Rows already read are skipped by the marker,
+  so cancellation and resume are free. Thumb rows are out of scope entirely.
+  `pub` now so stage S7's job can drive it.
+* **It is deliberately not in `migrate_v10`.** My first version put the scan in
+  the migration; that was wrong. The scan reads every original once, so on a
+  large vault it means minutes of blocking between the passphrase and the grid —
+  exactly what D15 ("jobs, not modal blocking") forbids. The migration now does
+  only what SQLite can prove without moving a BLOB (`bytes = length(data)`) and
+  turns the old `0 px` into NULL. The version stamp moved back into the same
+  batch.
+* `put_full_image` writes `probed_at` as it writes the other facts (it did read
+  the container), `put_video` does not (nothing probed the duration), so the job
+  picks video rows up later. `merge_items` carries `probed_at` with the row.
+* `db::now_epoch_text()` — the schema's epoch-seconds-as-text timestamps in one
+  place, which the `added:`/`updated:` predicates will compare against in S2.
+
+**Measured.**
+
+* The pass costs about what reading the library once costs: **71 ms for 5 000
+  tiny originals** (0.014 ms/row, header parse dominates) and **185 ms for 1 000
+  rows at 200 KB** (0.19 ms/row, the BLOB read dominates ≈ 1 GB/s). A re-run over
+  the same rows: **0.9 ms, scanned 0**. Extrapolated honestly, a 100k-item
+  library of 2 MB originals is ~3 minutes of reading — a job with progress, not
+  an unlock step.
+* `cargo test -p goon-core` = **40 passed, 0 failed**. The v10 test's media
+  fixtures are now **real files** bound as parameters (`media::fixtures` —
+  `gif_with_frames`, `sample_png`, `gif_with_descriptors`, `png_with_chunk`,
+  `webp` — now a shared `#[cfg(test)] pub mod fixtures` so `db.rs` and
+  `media.rs` prove the same thing about the same bytes): after the migration
+  every file-shaped fact is NULL, then `refine_stored_facts(&conn, 2)` returns
+  `scanned 2, dims 2, animated 1, still 1`, writes `4x4/animated=1` and
+  `8x8/animated=0`, the third call scans 0, and the tile keeps `animated NULL`.
+  `stored_facts_are_written_with_the_row` also pins that a `full` row comes back
+  probed and a `video` row does not.
+
+**Process note, so the record is complete.** While timing that pass I used
+`Get-Content -Raw` / `Set-Content` on `db.rs` — the exact thing `TESTING.md` §4
+forbids. It wrote a BOM, mangled 43 em dashes / `§` / `…` into Shift_JIS
+mojibake and swallowed three newlines. Repaired with
+`node tools/restore-nonascii.js` (34 lines restored from HEAD, one merged pair)
+plus a hand fix of the 9 lines that script could not resolve because they were
+new this session; verified with `node tools/char-audit.js` (**CLEAN**, 0
+unexpected characters) and a byte inventory against `HEAD` (`§x6 —x26→34 …x2
+↔x2 ·x3` — nothing lost, 8 em dashes added by the new comments). Temporary
+timing code was removed from the source; the numbers live here and in DEVELOPMENT
+§3 / TESTING item 39.

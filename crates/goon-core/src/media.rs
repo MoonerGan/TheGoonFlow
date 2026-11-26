@@ -509,6 +509,10 @@ pub fn delete_video(conn: &Connection, item_id: &str) {
 /// their length, `width`/`height` come from the header without a decode, and
 /// `animated` is read from the container's own chunks (`Some(true)` for APNG /
 /// animated WebP / multi-frame gif, `None` for a container that cannot answer).
+/// `probed_at` says this row's container has been read, which is what keeps the
+/// facts job (`db::refine_stored_facts`) from re-reading a file that already
+/// answered — and a `None` here is recorded as "asked, no answer", not as a
+/// fact to go and invent later.
 pub fn put_full_image(conn: &Connection, item_id: &str, bytes: &[u8]) -> bool {
     let Some(mime) = detect_mime(bytes) else {
         return false;
@@ -518,8 +522,8 @@ pub fn put_full_image(conn: &Connection, item_id: &str, bytes: &[u8]) -> bool {
         .unwrap_or((0, 0));
     let animated = is_animated(bytes).map(|a| a as i64);
     conn.execute(
-        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, animated)
-         VALUES (?1, 'full', ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        "INSERT OR IGNORE INTO media (item_id, kind, hash, mime, width, height, data, bytes, animated, probed_at)
+         VALUES (?1, 'full', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         params![
             item_id,
             sha256_hex(bytes),
@@ -530,7 +534,8 @@ pub fn put_full_image(conn: &Connection, item_id: &str, bytes: &[u8]) -> bool {
             (h > 0).then_some(h),
             bytes,
             bytes.len() as i64,
-            animated
+            animated,
+            crate::db::now_epoch_text()
         ],
     )
     .is_ok()
@@ -654,12 +659,17 @@ pub fn media_count(conn: &Connection, item_id: &str) -> usize {
     usize::try_from(rows).unwrap_or(0)
 }
 
+/// Byte fixtures shared by this crate's tests (#76: the v10 migration test in
+/// `db.rs` needs the same real gif / real PNG the fact readers are tested with,
+/// and two different fixtures for one container is how a migration test starts
+/// lying). Real files where a real file matters, hand-built block tables where
+/// the *walk* is what is under test.
 #[cfg(test)]
-mod tests {
-    use super::*;
+pub mod fixtures {
+    use super::Cursor;
 
     /// 8x8 solid PNG used by several tests.
-    fn sample_png() -> Vec<u8> {
+    pub fn sample_png() -> Vec<u8> {
         let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
             8,
             8,
@@ -670,6 +680,93 @@ mod tests {
             .unwrap();
         buf
     }
+
+    /// A real gif written by `image`'s own encoder, with `n` frames.
+    pub fn gif_with_frames(n: u8) -> Vec<u8> {
+        let mut buf = Cursor::new(Vec::new());
+        {
+            let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
+            let frames: Vec<image::Frame> = (0..n)
+                .map(|i| {
+                    // deliberately different colours: the gif encoder drops a
+                    // frame that quantizes to the last one, and a fixture that
+                    // quietly becomes one frame would test nothing
+                    let shade = (u16::from(i) * 120) as u8;
+                    image::Frame::new(image::RgbaImage::from_pixel(
+                        4,
+                        4,
+                        image::Rgba([shade, 50, 90, 255]),
+                    ))
+                })
+                .collect();
+            enc.encode_frames(frames).unwrap();
+            drop(enc);
+        }
+        buf.into_inner()
+    }
+
+    /// N image descriptors in a real GIF block structure, written by hand. The
+    /// LZW payloads are placeholders — this fixture proves the block **walk**
+    /// (where one block ends and the next starts), which the encoder-produced
+    /// file above cannot pin on its own.
+    pub fn gif_with_descriptors(n: u8) -> Vec<u8> {
+        let mut out = b"GIF89a".to_vec();
+        out.extend_from_slice(&[4, 0, 4, 0, 0x80, 0, 0]); // 4x4, 2-entry global colour table
+        out.extend_from_slice(&[10, 50, 90, 0, 0, 0]);
+        for _ in 0..n {
+            // graphic control extension: introducer, label, one sub-block of
+            // four bytes, and the block terminator a real GIF always writes
+            out.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 0x0A, 0x00, 0x00, 0x00]);
+            out.push(0x2C); // image descriptor
+            out.extend_from_slice(&[0, 0, 0, 0, 4, 0, 4, 0, 0x00]);
+            out.push(2); // LZW minimum code size
+            out.push(3); // one data sub-block
+            out.extend_from_slice(&[0x44, 0x04, 0x00]);
+            out.push(0); // end of sub-blocks
+        }
+        out.push(0x3B); // trailer
+        out
+    }
+
+    /// A PNG chunk spliced into a real PNG after IHDR — which is exactly how a
+    /// PNG says it is animated (`acTL`), and the reader walks the chunk table,
+    /// it does not decode a frame.
+    pub fn png_with_chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = sample_png();
+        let at = 8 + 8 + 13 + 4; // signature + IHDR header/len + data + CRC
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        chunk.extend_from_slice(kind);
+        chunk.extend_from_slice(body);
+        chunk.extend_from_slice(&[0, 0, 0, 0]); // the reader never checks the CRC
+        out.splice(at..at, chunk);
+        out
+    }
+
+    /// A RIFF/WEBP container holding exactly these chunks.
+    pub fn webp(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+        let mut body = b"WEBP".to_vec();
+        for (kind, data) in chunks {
+            body.extend_from_slice(*kind);
+            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            body.extend_from_slice(data);
+            if data.len() % 2 == 1 {
+                body.push(0); // RIFF chunks are padded to an even length
+            }
+        }
+        let mut out = b"RIFF".to_vec();
+        out.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fixtures::{
+        gif_with_descriptors, gif_with_frames, png_with_chunk, sample_png, webp,
+    };
+    use super::*;
 
     /// PNG-headed bytes that differ by one byte, for tests that need several
     /// *distinct* originals on one item (#62). They are only ever sniffed and
@@ -704,84 +801,6 @@ mod tests {
             detect_mime(b"<html><body>Access denied</body></html>"),
             None
         );
-    }
-
-    /// A real gif written by `image`'s own encoder, with `n` frames.
-    fn gif_with_frames(n: u8) -> Vec<u8> {
-        let mut buf = Cursor::new(Vec::new());
-        {
-            let mut enc = image::codecs::gif::GifEncoder::new(&mut buf);
-            let frames: Vec<image::Frame> = (0..n)
-                .map(|i| {
-                    // deliberately different colours: the gif encoder drops a
-                    // frame that quantizes to the last one, and a fixture that
-                    // quietly becomes one frame would test nothing
-                    let shade = (u16::from(i) * 120) as u8;
-                    image::Frame::new(image::RgbaImage::from_pixel(
-                        4,
-                        4,
-                        image::Rgba([shade, 50, 90, 255]),
-                    ))
-                })
-                .collect();
-            enc.encode_frames(frames).unwrap();
-            drop(enc);
-        }
-        buf.into_inner()
-    }
-
-    /// N image descriptors in a real GIF block structure, written by hand. The
-    /// LZW payloads are placeholders — this fixture proves the block **walk**
-    /// (where one block ends and the next starts), which the encoder-produced
-    /// file above cannot pin on its own.
-    fn gif_with_descriptors(n: u8) -> Vec<u8> {
-        let mut out = b"GIF89a".to_vec();
-        out.extend_from_slice(&[4, 0, 4, 0, 0x80, 0, 0]); // 4x4, 2-entry global colour table
-        out.extend_from_slice(&[10, 50, 90, 0, 0, 0]);
-        for _ in 0..n {
-            // graphic control extension: introducer, label, one sub-block of
-            // four bytes, and the block terminator a real GIF always writes
-            out.extend_from_slice(&[0x21, 0xF9, 0x04, 0x00, 0x0A, 0x00, 0x00, 0x00]);
-            out.push(0x2C); // image descriptor
-            out.extend_from_slice(&[0, 0, 0, 0, 4, 0, 4, 0, 0x00]);
-            out.push(2); // LZW minimum code size
-            out.push(3); // one data sub-block
-            out.extend_from_slice(&[0x44, 0x04, 0x00]);
-            out.push(0); // end of sub-blocks
-        }
-        out.push(0x3B); // trailer
-        out
-    }
-
-    /// A PNG chunk spliced into a real PNG after IHDR — which is exactly how a
-    /// PNG says it is animated (`acTL`), and the reader walks the chunk table,
-    /// it does not decode a frame.
-    fn png_with_chunk(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
-        let mut out = sample_png();
-        let at = 8 + 8 + 13 + 4; // signature + IHDR header/len + data + CRC
-        let mut chunk = Vec::new();
-        chunk.extend_from_slice(&(body.len() as u32).to_be_bytes());
-        chunk.extend_from_slice(kind);
-        chunk.extend_from_slice(body);
-        chunk.extend_from_slice(&[0, 0, 0, 0]); // the reader never checks the CRC
-        out.splice(at..at, chunk);
-        out
-    }
-
-    fn webp(chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
-        let mut body = b"WEBP".to_vec();
-        for (kind, data) in chunks {
-            body.extend_from_slice(*kind);
-            body.extend_from_slice(&(data.len() as u32).to_le_bytes());
-            body.extend_from_slice(data);
-            if data.len() % 2 == 1 {
-                body.push(0); // RIFF chunks are padded to an even length
-            }
-        }
-        let mut out = b"RIFF".to_vec();
-        out.extend_from_slice(&((body.len() + 8) as u32).to_le_bytes());
-        out.extend_from_slice(&body);
-        out
     }
 
     /// #76 rulings A: animation is read from the container's own chunk table,
@@ -876,6 +895,24 @@ mod tests {
         assert_eq!(bytes, mp4.len() as i64);
         assert_eq!(duration, None);
         assert_eq!(animated, None);
+
+        // `probed_at` is the facts job's resume marker: a `full` row whose
+        // container was just read is marked, so the job will not re-read it; a
+        // video row is not, because the duration/dimension probe has not run.
+        let probed: Option<String> = conn
+            .query_row("SELECT probed_at FROM media WHERE kind = 'full'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(probed.is_some(), "put_full_image read this container");
+        let probed: Option<String> = conn
+            .query_row(
+                "SELECT probed_at FROM media WHERE kind = 'video'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(probed, None, "nothing has probed the video yet");
 
         // a tile carries its own byte size and deliberately no animation fact:
         // a re-encoded tile says nothing about whether the original moved
@@ -1225,7 +1262,10 @@ mod tests {
         // The gallery cover case: the sheet is exactly the advertised box.
         let cover = crop_tile(&sheet, 0, 0, 300, 100).expect("the whole sheet is one box");
         assert_eq!((cover.width, cover.height), (300, 100));
-        assert_eq!(cover.mime, "image/jpeg", "an opaque tile comes back as jpeg");
+        assert_eq!(
+            cover.mime, "image/jpeg",
+            "an opaque tile comes back as jpeg"
+        );
 
         // And the grid case: the same sheet cut at the offsets the page names.
         let second = crop_tile(&sheet, 100, 0, 100, 100).expect("the second tile");
@@ -1247,9 +1287,17 @@ mod tests {
         // Refusals, each with the reason in the message.
         // `.err()` rather than `expect_err()`: `Thumbnail` carries the bytes, so
         // it deliberately has no `Debug` and a failed unwrap would print them.
-        let off = crop_tile(&sheet, 250, 0, 100, 100).err().expect("hangs off the right edge");
-        assert!(off.contains("300x100"), "the sheet size must be in the reason: {off}");
-        assert!(crop_tile(&sheet, 0, 100, 10, 10).is_err(), "starts below the sheet");
+        let off = crop_tile(&sheet, 250, 0, 100, 100)
+            .err()
+            .expect("hangs off the right edge");
+        assert!(
+            off.contains("300x100"),
+            "the sheet size must be in the reason: {off}"
+        );
+        assert!(
+            crop_tile(&sheet, 0, 100, 10, 10).is_err(),
+            "starts below the sheet"
+        );
         assert!(crop_tile(&sheet, 0, 0, 0, 10).is_err(), "a zero-sized box");
         assert!(
             crop_tile(&sheet, 0, 0, 5000, 4000).is_err(),

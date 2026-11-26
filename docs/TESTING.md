@@ -407,20 +407,30 @@ the board's *In review* column is the current list.
    39. **Schema v10: an old vault upgrades without losing one tag** (#76 stage
       S1). Unlock a field-test vault made before this change: the grid holds the
       same items, every item's tag chips are the tags it had (the rebuild reuses
-      the old tag ids, so `item_tags` never moves), and the schema is at v10. The
+      the old tag ids, so `item_tags` never moves), the schema is at v10, and
+      unlock must not stall — the upgrade reads no stored file at all, so a big
+      vault is as quick as a small one. The
       automated trio that pins it, measured 2026-11-26 with `cargo test
       --workspace` = **146 passed, 0 failed, 8 ignored** (goon-core 40, desktop
       100 + 8 ignored, vault 4, locator 2):
 
       - `v10_rebuild_keeps_links_folds_names_and_backfills_facts` builds a
-        v9-shaped vault by hand (6 tags, 6 item-links, 2 media rows), runs the
-        migration twice, and asserts all **6** links still point at the tags they
-        used to; `female:big_breasts` folds to `big_breasts` while `foo:bar`
-        folds to **itself** (an unknown prefix is part of the tag); **0** rows
-        gained a site (the backfill never invents provenance, invariant 21);
-        `f95-completed` became `site_flag`; and the two media rows came back with
-        `bytes` **6** and **7** — the exact plaintext lengths — the gif
-        `animated = 1` and the jpeg `animated = NULL`.
+        v9-shaped vault by hand (6 tags, 6 item-links, 4 media rows whose bytes
+        are **real files** — a 3-frame gif, a still PNG, a 6-byte gif stub and a
+        tile), runs the migration twice, and asserts all **6** links still point
+        at the tags they used to; `female:big_breasts` folds to `big_breasts`
+        while `foo:bar` folds to **itself** (an unknown prefix is part of the
+        tag); **0** rows gained a site (the backfill never invents provenance,
+        invariant 21); `f95-completed` became `site_flag`; every stored row came
+        back with `bytes` equal to its own plaintext length and **every** fact
+        that needs the file still NULL — the upgrade reads no file, so the
+        pre-v10 `0 px` row became NULL rather than a size `width<400` would
+        match. Then the facts pass runs: `refine_stored_facts(&conn, 2)` returns
+        `scanned 2, dims 2, animated 1, still 1` and writes `4x4 / animated=1`
+        for the gif and `8x8 / animated=0` for the PNG; the next call scans the
+        1 unreadable row and leaves it NULL; the third call scans **0** rows,
+        which is the resume marker working; and the tile row never gained an
+        animation fact.
       - `encrypted_media_length_equals_the_plaintext_length` runs the very
         statement the backfill uses (`bytes = length(data)`) inside a **real
         SQLCipher vault** on a body of **1 048 613 bytes** (1 MiB + 37, many
@@ -431,6 +441,13 @@ the board's *In review* column is the current list.
         `Some(false)` for a 1-frame gif and `Some(true)` for a 2-frame one; a PNG
         with an `acTL` chunk and a WebP with an `ANMF` chunk are `Some(true)`; an
         mp4 is **`None`** — not probed, which is not the same as "not animated".
+
+      What a user notices before stage S7 runs the facts job: `size>` works for
+      everything (byte lengths come from the migration, free), while `width>`,
+      `type:gif` and `length>` only match items stored from v10 forward. That is
+      the honest state, not a bug to paper over — the pass costs about the time
+      it takes to read the library once (measured **185 ms** for 1 000 rows at
+      200 KB, ~1 GB/s), so it runs as a job with progress, never inside unlock.
 
 ## 4. House rules that prevent whole classes of damage
 
