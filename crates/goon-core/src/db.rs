@@ -2,6 +2,7 @@
 //! DB (whole-vault nuke stays trivial); content-hash keyed for dedup.
 
 use crate::model::{Item, ItemKind, Status};
+use crate::query::{Plan, Scope, Value};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -792,8 +793,206 @@ fn map_item_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
     })
 }
 
-/// Sidebar badges for the source-state filters: "local only" (no online link — /// the fix-my-metadata queue), "no local file" (folder lost / never linked),
+// ---------- the query box, run (stage S3) ---------------------------------------
+
+/// The `WHERE` every query-shaped read runs: the view's own `kind` scope AND the
+/// planned body, parenthesised. Two things that shape is deliberate about:
+///
+/// * the **view** decides which kinds exist and the query never does (D14), which
+///   is why [`Scope`] and [`Plan`] stay separate arguments instead of the grammar
+///   growing a `kind:` word of its own;
+/// * the page, the paired total, the select-all id list, the tag cloud and the
+///   site counts all come through this one function, so they cannot drift apart.
+///   The library used to keep three hand-maintained copies of the same sentence
+///   (`list_items`, `source_stats`, `games_needing_match`) and they had already
+///   diverged; plan §9 names that, and this is the fix for it.
+///
+/// Public because `filter_scale_probe` feeds this exact string to
+/// `EXPLAIN QUERY PLAN`: a probe that rebuilt the SQL by hand would be measuring
+/// something other than what ships.
+pub fn planned_where(scope: Scope, plan: &Plan) -> String {
+    let scope_sql = match scope {
+        Scope::Games => "items.kind = 'game'",
+        Scope::Media => "items.kind IN ('gallery','post')",
+    };
+    if plan.sql.is_empty() {
+        format!(" WHERE {scope_sql}")
+    } else {
+        format!(" WHERE {scope_sql} AND ({})", plan.sql)
+    }
+}
+
+/// The plan's own parameters, then the statement's trailing values, in that
+/// order: the planned `?` marks are anonymous and always appear first in the SQL.
+/// One function rather than five call sites, because getting this order wrong is
+/// the placeholder-skipping bug `db.rs`'s old list query had.
+fn planned_params(plan: &Plan, tail: &[i64]) -> Vec<Value> {
+    let mut out = plan.params.clone();
+    out.extend(tail.iter().map(|v| Value::Int(*v)));
+    out
+}
+
+/// One grid page, plus the size of the result it came from.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPage {
+    pub items: Vec<ItemSummary>,
+    /// Everything the predicate matches, not what fits on this page: 300 rows out
+    /// of 64 000 matches has to say 64 000 (rulings C, and the old grid capped
+    /// both numbers at `limit` without ever saying so).
+    pub total: i64,
+    /// The plan read a fact column this vault may never have measured
+    /// ([`Plan::needs_facts`]). `total == 0` **and** `needs_facts` is not an answer
+    /// — stage S5 renders "not measured yet · measure my files" for it instead of
+    /// a count that reads like one (invariant 27).
+    pub needs_facts: bool,
+}
+
+/// The grid, filtered by a parsed query: one page and the paired total.
+///
+/// The count is a separate statement on purpose. `filter_scale_probe`
+/// (TESTING item 41) measured it at 88 ms for a dense tag and up to 174 ms for a
+/// fact range at 100k items, while a `LIMIT 300` page can stop early on the
+/// `updated_at` order and costs 1-10 ms for those same fact queries: the total, not
+/// the grid, is what a keystroke must not pay. Callers that do not want the number
+/// use [`count_matches`] or [`search_item_ids`] directly.
+///
+/// `ORDER BY updated_at DESC, items.id`: the id tie-break is not decoration. An
+/// importer stamps a dozen items with the same second, and with no tie-break the
+/// page-1 and page-2 sorts are independent, which repeats some rows and silently
+/// drops others.
+pub fn search_items(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+    limit: i64,
+    offset: i64,
+) -> rusqlite::Result<SearchPage> {
+    let sql = format!(
+        "SELECT id, kind, title, status, version,
+                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
+                updated_at
+         FROM items{}
+         ORDER BY updated_at DESC, items.id
+         LIMIT ? OFFSET ?",
+        planned_where(scope, plan)
+    );
+    let mut items = Vec::new();
+    {
+        // Scoped: the statement borrows the connection, and the count below needs
+        // the connection back.
+        let mut stmt = conn.prepare_cached(&sql)?;
+        let bound = planned_params(plan, &[limit, offset]);
+        let rows = stmt.query_map(rusqlite::params_from_iter(bound.iter()), map_item_summary)?;
+        for row in rows {
+            items.push(row?);
+        }
+    }
+    Ok(SearchPage {
+        items,
+        total: count_matches(conn, scope, plan)?,
+        needs_facts: plan.needs_facts(),
+    })
+}
+
+/// How many items the predicate matches across the whole library. With an empty
+/// plan it is the view's total, which is the `M` in "N matches · M total".
+pub fn count_matches(conn: &Connection, scope: Scope, plan: &Plan) -> rusqlite::Result<i64> {
+    let sql = format!("SELECT COUNT(*) FROM items{}", planned_where(scope, plan));
+    let mut stmt = conn.prepare_cached(&sql)?;
+    stmt.query_row(rusqlite::params_from_iter(plan.params.iter()), |r| r.get(0))
+}
+
+/// Every id the predicate matches, in grid order, with no `LIMIT`: what "select
+/// all" has to mean once the grid is a query instead of a capped page (plan §9,
+/// rulings C). Same `planned_where` as the page and the count, so the header
+/// number, the visible page and a bulk action on the selection are one predicate
+/// seen three ways.
+pub fn search_item_ids(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+) -> rusqlite::Result<Vec<String>> {
+    let sql = format!(
+        "SELECT items.id FROM items{} ORDER BY updated_at DESC, items.id",
+        planned_where(scope, plan)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(plan.params.iter()), |r| {
+        r.get::<_, String>(0)
+    })?;
+    rows.collect()
+}
+
+/// The tag cloud **of the current result**. With a query active, a tag that only
+/// appears on rows the query excluded is not a suggestion, it is a dead end — the
+/// rail used to count the whole library and then show a filtered grid, which is
+/// how a chip could produce an empty page. `items` is deliberately left unaliased,
+/// because every planned fragment is written against that name.
+pub fn top_tags_matching(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+    limit: i64,
+) -> rusqlite::Result<Vec<TagCount>> {
+    let sql = format!(
+        "SELECT t.id, t.name, tt.key, count(*) AS c
+         FROM item_tags AS it
+         JOIN tags AS t ON t.id = it.tag_id
+         JOIN tag_types AS tt ON tt.id = t.type_id
+         JOIN items ON items.id = it.item_id
+         {}
+         GROUP BY t.id ORDER BY c DESC, t.name LIMIT ?",
+        planned_where(scope, plan)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let bound = planned_params(plan, &[limit]);
+    let rows = stmt.query_map(rusqlite::params_from_iter(bound.iter()), |r| {
+        Ok(TagCount {
+            id: r.get(0)?,
+            name: r.get(1)?,
+            type_key: r.get(2)?,
+            count: r.get(3)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// The "where is it from" counts, over the current result, for the same reason as
+/// the tag cloud. A site badge counted library-wide above a filtered grid is what
+/// `source_stats` was: a second copy of the predicate, free to drift from it.
+pub fn counts_by_site_matching(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+) -> rusqlite::Result<Vec<SiteCount>> {
+    let sql = format!(
+        "SELECT s.site, count(DISTINCT s.item_id)
+         FROM sources AS s
+         JOIN items ON items.id = s.item_id
+         {}
+         GROUP BY s.site
+         ORDER BY count(DISTINCT s.item_id) DESC, s.site",
+        planned_where(scope, plan)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(plan.params.iter()), |r| {
+        Ok(SiteCount {
+            site: r.get(0)?,
+            count: r.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
+/// Sidebar badges for the source-state filters: "local only" (no online link —
+/// the fix-my-metadata queue), "no local file" (folder lost / never linked),
 /// "no tags" (bare imports and unresolved direct-file clips).
+///
+/// The three queues each have an exact grammar equivalent, pinned by
+/// `the_old_source_queues_are_the_same_predicate_in_grammar_text`: `local_only` ≡
+/// `stored:local-only`, `no_local` ≡ `-stored:disk`, `no_tags` ≡ `-has:tags`.
+/// Stage S5 removes this function with the rails that call it.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceStats {
@@ -3146,5 +3345,320 @@ mod tests {
             source_images_for(&conn, "p1").is_empty(),
             "deleting the item takes its candidates with it"
         );
+    }
+    // ---------- #76 stage S3: the planned predicate, run -----------------------
+
+    use crate::query::{self, Plan, Scope};
+
+    /// A synthetic vault holding each storage shape and both states of a fact,
+    /// written with this module's own helpers where they reach, so a fixture bug
+    /// cannot hide a planner bug. Every id and title here is invented.
+    ///
+    /// The stamps are ten digits wide on purpose: `updated_at` is TEXT and the
+    /// grid orders by it without a `CAST`, which is only the same thing as a
+    /// numeric order while every stamp has the same width. That is the contract
+    /// `now_epoch_text()` keeps, and `items_updated_idx` is the index the page
+    /// walks — a `CAST` there would trade that index for a sort of the whole table,
+    /// which is exactly the cost `filter_scale_probe` prints for `added:`.
+    ///
+    /// * `q_big` / `q_small`: measured, tagged, from ehentai, stamped the same
+    ///   second — which is what an importer does to a batch, and why the grid order
+    ///   needs a tie-break;
+    /// * `q_unprobed`: a stored row nobody ever measured, every fact column NULL.
+    ///   It must answer neither `size>1gb` nor `-size>1gb` (invariant 27);
+    /// * `q_video`: a vaulted video with a duration;
+    /// * `q_disk`: a folder import, local source only, no vault row;
+    /// * `q_game`: the one game, so a scope mistake cannot hide inside "media".
+    fn query_fixture() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO items (id, kind, title, status, created_at, updated_at) VALUES
+                 ('q_big','gallery','Fixture big','seen','1760000000','1760000500'),
+                 ('q_small','gallery','Fixture small','seen','1760000000','1760000500'),
+                 ('q_unprobed','gallery','Fixture unprobed','seen','1760000000','1760000400'),
+                 ('q_video','post','Fixture clip','seen','1760000000','1760000300'),
+                 ('q_disk','gallery','Fixture folder import','seen','1760000000','1760000200'),
+                 ('q_game','game','Fixture game','wishlist','1760000000','1760000600');",
+        )
+        .unwrap();
+        for (id, site, url) in [
+            ("q_big", "ehentai", "https://eh.example/fixture/1"),
+            ("q_small", "ehentai", "https://eh.example/fixture/2"),
+            ("q_unprobed", "gelbooru", "https://gb.example/fixture/3"),
+            ("q_video", "gelbooru", "https://gb.example/fixture/4"),
+            ("q_disk", "local", "file:///D:/fixture/q_disk.png"),
+            ("q_game", "f95", "https://f95.example/fixture/5"),
+        ] {
+            insert_source(&conn, id, site, url, None, None).unwrap();
+        }
+        {
+            // A prepared statement borrows the connection, so it is scoped.
+            let mut media = conn
+                .prepare(
+                    "INSERT INTO media (item_id, kind, hash, mime, width, height, data,
+                                        bytes, duration_ms, animated, probed_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, x'89504e470d0a1a0a', ?7, ?8, ?9, ?10)",
+                )
+                .unwrap();
+            // measured big, moving
+            media
+                .execute(params![
+                    "q_big",
+                    "full",
+                    "fixture-hash-big",
+                    "image/gif",
+                    400,
+                    300,
+                    5_000_000_000_i64,
+                    None::<i64>,
+                    1,
+                    "1760000000"
+                ])
+                .unwrap();
+            // measured small, still
+            media
+                .execute(params![
+                    "q_small",
+                    "full",
+                    "fixture-hash-small",
+                    "image/png",
+                    1_200,
+                    400,
+                    1_024_i64,
+                    None::<i64>,
+                    0,
+                    "1760000000"
+                ])
+                .unwrap();
+            // never asked: the row that must stay invisible to a fact predicate
+            media
+                .execute(params![
+                    "q_unprobed",
+                    "full",
+                    "fixture-hash-unprobed",
+                    "image/png",
+                    None::<i64>,
+                    None::<i64>,
+                    None::<i64>,
+                    None::<i64>,
+                    None::<i64>,
+                    None::<i64>
+                ])
+                .unwrap();
+            // a vaulted video: duration yes, `animated` NULL, because a container
+            // says nothing about frames and inventing 0 would make `-type:gif` a lie
+            media
+                .execute(params![
+                    "q_video",
+                    "video",
+                    "fixture-hash-clip",
+                    "video/mp4",
+                    720,
+                    480,
+                    900_000_i64,
+                    240_000_i64,
+                    None::<i64>,
+                    "1760000000"
+                ])
+                .unwrap();
+        }
+        add_item_tag(&conn, "q_big", "female:big_breasts", TYPE_CONTENT).unwrap();
+        add_item_tag(&conn, "q_small", "big_breasts", TYPE_CONTENT).unwrap();
+        conn
+    }
+
+    /// The ids one query selects through the S3 entry point, in grid order.
+    fn matched(conn: &Connection, text: &str, scope: Scope) -> Vec<String> {
+        let plan = query::parse(text, scope)
+            .unwrap_or_else(|e| panic!("{text:?}: {}", e.message))
+            .plan();
+        search_item_ids(conn, scope, &plan).unwrap()
+    }
+
+    #[test]
+    fn the_page_and_the_paired_total_come_from_one_predicate() {
+        let conn = query_fixture();
+        let plan = query::parse("big_breasts", Scope::Media).unwrap().plan();
+        let page = search_items(&conn, Scope::Media, &plan, 300, 0).unwrap();
+        assert_eq!(page.items.len(), 2);
+        // The fold match reaches both spellings: `big_breasts` and
+        // `female:big_breasts` are one tag family for a bare word.
+        let ids: Vec<&str> = page.items.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["q_big", "q_small"]);
+        assert_eq!(page.total, 2, "the count is the result, not the page");
+        assert!(!page.items.iter().any(|i| i.kind == "game"), "D14");
+    }
+
+    #[test]
+    fn a_never_measured_item_matches_neither_a_fact_nor_its_negation() {
+        let conn = query_fixture();
+        // The row with NULL facts is invisible to both halves. If `-size>1gb`
+        // selected it, the filter would be claiming to know the file is small.
+        assert_eq!(matched(&conn, "size>1gb", Scope::Media), ["q_big"]);
+        assert_eq!(
+            matched(&conn, "-size>1gb", Scope::Media),
+            ["q_small", "q_video"],
+            "the contrary measurement, so only the two rows known to be smaller"
+        );
+        assert_eq!(matched(&conn, "width>1000", Scope::Media), ["q_small"]);
+        assert_eq!(
+            matched(&conn, "-width>1000", Scope::Media),
+            ["q_big", "q_video"],
+            "q_video is 720 px wide and measured; q_unprobed was never asked"
+        );
+        assert_eq!(matched(&conn, "length>2m", Scope::Media), ["q_video"]);
+        assert_eq!(matched(&conn, "type:gif", Scope::Media), ["q_big"]);
+        assert_eq!(
+            matched(&conn, "-type:gif", Scope::Media),
+            ["q_small"],
+            "a video row keeps `animated` NULL on purpose, so it answers neither"
+        );
+    }
+
+    #[test]
+    fn the_total_counts_the_result_and_the_page_limits_the_rows() {
+        let conn = query_fixture();
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, 0).unwrap();
+        assert_eq!(page.items.len(), 2, "the page is a page");
+        assert_eq!(page.total, 5, "the total is the whole media library");
+        assert_eq!(
+            count_matches(&conn, Scope::Games, &Plan::default()).unwrap(),
+            1,
+            "and the games total is the games library"
+        );
+    }
+
+    #[test]
+    fn select_all_ids_are_the_whole_result_in_grid_order() {
+        let conn = query_fixture();
+        // Grid order, with the id breaking a stamp tie - and the tie is real here,
+        // because both items were stamped the same second, which is what an
+        // importer writes. Without the tie-break these two rows could swap between
+        // page 1 and page 2 and a paged read would repeat one and drop the other.
+        assert_eq!(
+            matched(&conn, "", Scope::Media),
+            ["q_big", "q_small", "q_unprobed", "q_video", "q_disk"]
+        );
+        let page = search_items(&conn, Scope::Media, &Plan::default(), 2, 0).unwrap();
+        assert_eq!(
+            page.items.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            ["q_big", "q_small"],
+            "the page is a prefix of the select-all list, not a different set"
+        );
+        // Five pages of one row each, and no row appears twice or not at all.
+        let mut paged: Vec<String> = Vec::new();
+        for offset in 0..5 {
+            paged.extend(
+                search_items(&conn, Scope::Media, &Plan::default(), 1, offset)
+                    .unwrap()
+                    .items
+                    .into_iter()
+                    .map(|i| i.id),
+            );
+        }
+        assert_eq!(
+            paged,
+            matched(&conn, "", Scope::Media),
+            "paging is lossless"
+        );
+    }
+
+    #[test]
+    fn the_view_scope_is_what_keeps_kinds_apart_not_the_query() {
+        let conn = query_fixture();
+        // `status:` parses only in the games grammar, and even a games plan run
+        // through the media scope cannot reach a game row: the scope is AND-ed in
+        // first, always. That is D14 enforced in SQL, not left to the UI.
+        let games = query::parse("status:wishlist", Scope::Games)
+            .unwrap()
+            .plan();
+        assert_eq!(matched(&conn, "status:wishlist", Scope::Games), ["q_game"]);
+        assert!(
+            search_item_ids(&conn, Scope::Media, &games)
+                .unwrap()
+                .is_empty(),
+            "a games predicate cannot open the media view"
+        );
+        assert!(
+            query::parse("status:wishlist", Scope::Media).is_err(),
+            "and the media grammar never accepts the word in the first place"
+        );
+    }
+
+    #[test]
+    fn the_tag_cloud_and_the_site_counts_follow_the_query() {
+        let conn = query_fixture();
+        let all = top_tags_matching(&conn, Scope::Media, &Plan::default(), 10).unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|t| (t.name.as_str(), t.count))
+                .collect::<Vec<_>>(),
+            [("big_breasts", 1), ("female:big_breasts", 1)]
+        );
+        // Narrow the result and the rail narrows with it: a tag that only exists
+        // on excluded rows is not a suggestion, it is a dead end.
+        let gelbooru = query::parse("source:gelbooru", Scope::Media)
+            .unwrap()
+            .plan();
+        assert!(
+            top_tags_matching(&conn, Scope::Media, &gelbooru, 10)
+                .unwrap()
+                .is_empty(),
+            "neither tagged item came from gelbooru"
+        );
+        let sites = counts_by_site_matching(&conn, Scope::Media, &Plan::default()).unwrap();
+        assert_eq!(
+            sites
+                .iter()
+                .map(|s| (s.site.as_str(), s.count))
+                .collect::<Vec<_>>(),
+            [("ehentai", 2), ("gelbooru", 2), ("local", 1)]
+        );
+        let folder = query::parse("stored:local-only", Scope::Media)
+            .unwrap()
+            .plan();
+        assert_eq!(
+            counts_by_site_matching(&conn, Scope::Media, &folder)
+                .unwrap()
+                .iter()
+                .map(|s| (s.site.as_str(), s.count))
+                .collect::<Vec<_>>(),
+            [("local", 1)]
+        );
+    }
+
+    #[test]
+    fn a_query_reading_unmeasured_facts_says_so_on_the_page() {
+        let conn = query_fixture();
+        let facts = query::parse("size>1gb", Scope::Media).unwrap().plan();
+        assert!(
+            search_items(&conn, Scope::Media, &facts, 300, 0)
+                .unwrap()
+                .needs_facts,
+            "a zero from this predicate is not yet an answer"
+        );
+        let plain = query::parse("big_breasts", Scope::Media).unwrap().plan();
+        assert!(
+            !search_items(&conn, Scope::Media, &plain, 300, 0)
+                .unwrap()
+                .needs_facts,
+            "and a tag query does not get to claim the vault is unmeasured"
+        );
+    }
+
+    #[test]
+    fn the_scope_is_anded_before_the_plan_never_replaced_by_it() {
+        assert_eq!(
+            planned_where(Scope::Games, &Plan::default()),
+            " WHERE items.kind = 'game'"
+        );
+        let plan = query::parse("big_breasts", Scope::Media).unwrap().plan();
+        let where_sql = planned_where(Scope::Media, &plan);
+        assert!(
+            where_sql.starts_with(" WHERE items.kind IN ('gallery','post') AND ("),
+            "{where_sql}"
+        );
+        assert!(where_sql.ends_with(')'), "{where_sql}");
     }
 }

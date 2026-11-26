@@ -381,6 +381,41 @@ tools/
   while the title `LIKE` is not: deliberate, and stage S5's placeholder has to
   say so. `ingest::VIDEO_EXTS` **is** this module's `VIDEO_EXTS` — one list, or
   `type:video` would miss what the importer accepted.
+- **Running the query box** (stage S3) has exactly one place where a query-shaped
+  read builds SQL: `db::planned_where(scope, plan)`, which ANDs the **view's** own
+  `kind` scope with the planned body in parentheses. Every reader goes through it:
+  `search_items` (a page plus its paired total), `count_matches` (the total alone),
+  `search_item_ids` (every matching id, no `LIMIT` — what "select all" means once
+  the grid is a query), `top_tags_matching` and `counts_by_site_matching` (the tag
+  cloud and the site counts **of the current result**, so a chip can never offer a
+  tag the query already excluded). Two reasons that one function matters. The
+  library used to keep three hand-written copies of the same sentence — `list_items`,
+  `source_stats`, `games_needing_match` — and they had already drifted. And the
+  **scope is SQL, not a UI convention**: a games plan run through the media scope
+  matches nothing, so D14 cannot be bypassed by a caller that forgot to check.
+
+  `SearchPage { items, total, needs_facts }` is what the grid gets. `total` is the
+  whole result, never the page — the old grid capped both numbers at `limit`
+  without saying so, which is what plan §9 meant by "there is no server-side
+  *everything matching this query*" (rulings C). `needs_facts` is
+  `Plan::needs_facts()` riding along, so a `0 matches` from `size>1gb` renders as
+  "not measured yet · measure my files" (invariant 27) instead of as an answer.
+
+  Ordering is `updated_at DESC, items.id`. The `id` is not decoration: an importer
+  stamps a batch of items with the same second, and with no tie-break the page-1
+  and page-2 sorts are independent, so a paged read repeats one row and silently
+  drops another. `updated_at` itself is compared as TEXT, which is right only
+  because every stamp the writers make (`now_epoch_text()`) has one width — and
+  `items_updated_idx` is the index the page walks. Putting a `CAST` there, as the
+  *predicate* side needs for `added:`, would trade that index for a sort of the
+  whole table; `filter_scale_probe` prints what that trade costs.
+
+  Not replaced yet: `list_items` and `source_stats` still exist, because the rails
+  that call them come out in stage S5/S6. S3 only adds the new entry points and
+  their fixture tests; the grammar tests already pin that `stored:local-only`,
+  `-stored:disk` and `-has:tags` are the same predicates those badges compute, so
+  nothing drifts while both halves are alive.
+
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
   `if v < N` steps up to `SCHEMA_VERSION` (v10). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
@@ -392,8 +427,7 @@ tools/
   planner's indexes. v10 deliberately never reads a stored file: the facts that
   need the bytes come from `refine_stored_facts` as a background job (stage S7),
   so upgrading stays instant whatever the library size. The v10 tag rebuild is
-  the one structural migration: it reuses every
-  old tag id so `item_tags` never moves, and it runs with `PRAGMA foreign_keys`
+  the one structural migration: it reuses every old tag id so `item_tags` never
   off for exactly the `DROP`/`RENAME` swap (a `DROP TABLE tags` would otherwise
   cascade every tag link away), followed by `PRAGMA foreign_key_check` to prove
   it did not. Any new schema change is a new numbered step — never edit the

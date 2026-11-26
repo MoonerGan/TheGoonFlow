@@ -1,8 +1,10 @@
 //! Probe: does the #76 query grammar hold up at the design target of **100k
 //! items**? Plan §6 asks for measurement instead of assumption, and plan §8.3
 //! names this file: it builds a throwaway vault (100k items, ~1M `item_tags`)
-//! and prints p50/p95 for every worked example of plan §4, for both queries the
-//! grid needs - the page of rows and the paired total.
+//! and prints p50/p95 for every worked example of plan §4, through the stage S3
+//! entry points themselves — `db::search_items` (the grid page plus its paired
+//! total, the one call the desktop makes) and `db::count_matches` (that total on
+//! its own, so the difference between the columns is what the page alone costs).
 //!
 //! Run: `cargo run -p goon-core --release --example filter_scale_probe`
 //!
@@ -19,7 +21,7 @@
 //! touches a real vault.
 
 use goon_core::db;
-use goon_core::query::{self, Plan, Scope, Value};
+use goon_core::query::{self, Scope};
 use rusqlite::Connection;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -31,6 +33,9 @@ const ITEMS: i64 = 100_000;
 const TAGS_PER_ITEM: usize = 10;
 const TAG_POOL: usize = 20_000;
 const REPS: usize = 21;
+
+/// The grid's ceiling, the same one the desktop command has always passed.
+const PAGE: i64 = 300;
 
 /// The queries being timed: plan §4's worked examples plus the shapes the grid
 /// actually runs (a date window, a bare tag, a fact range, a negation, and the
@@ -84,37 +89,25 @@ fn main() -> Result<(), String> {
     let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     println!("build: {build_ms} ms, db {} MiB\n", bytes / 1_048_576);
 
-    // The two statements every filtered view runs, in the shape stage S3 will
-    // emit them: the grid page, and the paired count that makes
-    // "N matches · M total" true for the whole result rather than the page. The
-    // view's own scope and the plan's body are AND-ed by `scoped`, never pasted
-    // together: `Plan::where_clause()` brings its own `WHERE`, and a second one
-    // is a prepare error.
-    let grid = |wh: &str| {
-        format!(
-            "SELECT items.id, items.kind, items.title, items.status, items.version,
-                    EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
-                    items.updated_at
-             FROM items
-             {wh}
-             ORDER BY items.updated_at DESC LIMIT 300"
-        )
-    };
-    let count = |wh: &str| format!("SELECT COUNT(*) FROM items {wh}");
-
+    // Every number below comes out of stage S3's own functions, not out of a
+    // copy of their SQL: a probe that rebuilt the statements by hand would be
+    // timing something that never runs in production. `search_items` is the one
+    // call the grid makes (page **and** paired total); `count_matches` is the
+    // total by itself, so the difference between the two columns is what the page
+    // alone costs, which is the number stage S5 needs when it decides what to
+    // re-run on every keystroke.
     println!(
         "{:<44} {:>9} {:>9} {:>9} {:>9} {:>9}",
-        "query", "grid p50", "grid p95", "count p50", "count p95", "matches"
+        "query", "grid+tot", "p95", "count p50", "count p95", "matches"
     );
     let mut worst = (0_u128, String::new());
     for text in QUERIES {
         let plan = query::parse(text, Scope::Media)
             .unwrap_or_else(|e| panic!("{text:?} must parse for the probe: {}", e.message))
             .plan();
-        let wh = scoped(&plan);
-        let matches = match_total(&conn, &count(&wh), &plan);
-        let page = run_pair(&conn, &grid(&wh), &plan.params);
-        let total = run_pair(&conn, &count(&wh), &plan.params);
+        let matches = db::count_matches(&conn, Scope::Media, &plan).expect("counts");
+        let page = timed(|| db::search_items(&conn, Scope::Media, &plan, PAGE, 0).expect("page"));
+        let total = timed(|| db::count_matches(&conn, Scope::Media, &plan).expect("counts"));
         println!(
             "{:<44} {:>8} ms {:>8} ms {:>8} ms {:>8} ms {:>9}",
             text, page.0, page.1, total.0, total.1, matches
@@ -123,13 +116,16 @@ fn main() -> Result<(), String> {
             worst = (page.1, (*text).to_string());
         }
     }
-    println!("\nslowest grid page: {:?} at {} ms", worst.1, worst.0);
+    println!(
+        "\nslowest grid call (page + total): {:?} at {} ms",
+        worst.1, worst.0
+    );
 
     // The cost the grammar knowingly accepts, printed instead of left to be
     // discovered later: `CAST(created_at AS INTEGER)` makes an index on the TEXT
     // stamps useless, so a date window is a scan of `items`.
     println!("\nwhy a date query is a scan (EXPLAIN QUERY PLAN):");
-    explain(&conn, "added:>=2026-06-01");
+    explain(&conn, "added:>=2024-06-01");
     explain(&conn, "big_breasts");
     explain(&conn, "\"summer witch\"");
     explain(&conn, "size>100mb");
@@ -140,42 +136,14 @@ fn main() -> Result<(), String> {
     Ok(())
 }
 
-/// The `WHERE` a media grid runs: the view's own scope AND the planned body.
-/// Stage S3 does the same thing in `db::search_items`; the probe measures what
-/// that call will emit, not something easier.
-fn scoped(plan: &Plan) -> String {
-    let scope = "items.kind IN ('gallery','post')";
-    if plan.sql.is_empty() {
-        format!(" WHERE {scope}")
-    } else {
-        format!(" WHERE {scope} AND ({})", plan.sql)
-    }
-}
-
-/// How many rows the query really selects. Printed because a timing table where
-/// every query matches nothing measures an empty walk, not the predicate.
-fn match_total(conn: &Connection, sql: &str, plan: &Plan) -> i64 {
-    let mut stmt = conn.prepare(sql).expect("prepared");
-    stmt.query_row(rusqlite::params_from_iter(plan.bind()), |r| {
-        r.get::<_, i64>(0)
-    })
-    .unwrap_or(0)
-}
-
-/// Runs one statement `REPS` times and returns (p50, p95) in milliseconds.
-fn run_pair(conn: &Connection, sql: &str, params: &[Value]) -> (u128, u128) {
+/// Times one closure `REPS` times and returns (p50, p95) in milliseconds. The
+/// closure returns a value on purpose: a statement whose rows are never drained
+/// measures a half-finished query, which is the mistake this file exists to avoid.
+fn timed<T>(f: impl Fn() -> T) -> (u128, u128) {
     let mut times: Vec<u128> = Vec::with_capacity(REPS);
     for _ in 0..REPS {
         let started = Instant::now();
-        {
-            let mut stmt = conn.prepare_cached(sql).expect("prepared");
-            let bound: Vec<&dyn rusqlite::ToSql> =
-                params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
-            let _ = stmt
-                .query_map(bound.as_slice(), |r| r.get::<_, String>(0))
-                .expect("runs")
-                .count();
-        }
+        std::hint::black_box(f());
         times.push(started.elapsed().as_millis());
     }
     times.sort_unstable();
@@ -189,7 +157,7 @@ fn explain(conn: &Connection, text: &str) {
     let plan = query::parse(text, Scope::Media).expect("parses").plan();
     let sql = format!(
         "EXPLAIN QUERY PLAN SELECT items.id FROM items{}",
-        scoped(&plan)
+        db::planned_where(Scope::Media, &plan)
     );
     let params: Vec<&dyn rusqlite::ToSql> = plan.bind();
     let mut stmt = conn.prepare(&sql).expect("explain prepares");

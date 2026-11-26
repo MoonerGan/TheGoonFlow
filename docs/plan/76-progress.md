@@ -447,3 +447,135 @@ that says so. #77's S7 job therefore has to derive extension tags three ways, no
 one: from stored `mime`, from the `sources` url suffix, and from disk paths — the
 probe seeds type-4 tags for exactly that future state and leaves 1 item in 6
 knowing nothing, so the "not yet backfilled" case stays measurable.
+
+## S3 — running the plan: `db::search_items` and the four readers that must agree with it (2026-11-26)
+
+The grammar proved what a query *means*; S3 makes it *select rows*. One new
+composition point and five readers sit on it, and the point of the shape is that
+the grid page, its total, the select-all list, the tag cloud and the site counts
+become **one predicate seen five ways** instead of five sentences that happen to
+agree. All in `crates/goon-core/src/db.rs`, still no DB handle anywhere in
+`query.rs` (invariant 28).
+
+**The one place SQL is built: `planned_where(scope, plan)` (`db.rs:813`).** It
+emits ` WHERE ` + the view's own `kind` scope + ` AND (` + the plan body + `)`, and
+every query-shaped read calls it. Two things that shape is deliberate about:
+
+* the **view** decides which kinds exist and the query never does (D14). That is
+  why `search_items(conn, scope, plan, limit, offset)` takes the scope as its own
+  argument rather than the grammar growing a `kind:` word, and why a `status:`
+  plan parsed in the games grammar and run through the media scope returns
+  nothing: the scope is AND-ed in first, always. D14 stops being a UI convention
+  and becomes SQL a caller cannot forget.
+* `items` stays **unaliased** in every host statement, because every planned
+  fragment is written against that name. An `AS i` on the grid query would break
+  the plan, not the query, which is worth knowing before anyone "tidies" it.
+
+**The five readers.** `search_items` (`db.rs:862`) returns
+`SearchPage { items, total, needs_facts }` (`db.rs:838`); `count_matches`
+(`db.rs:898`) is the total by itself, for callers that only want a number;
+`search_item_ids` (`db.rs:909`) is every matching id in grid order with no
+`LIMIT`, which is what "select all" has to mean once the grid is a query
+(rulings C: plan §9's "there is no server-side *everything matching this query*"
+is a description of the old code, not a decision); `top_tags_matching`
+(`db.rs:930`) and `counts_by_site_matching` (`db.rs:962`) are the tag cloud and
+the site counts **of the current result**, so a chip can never offer a tag or a
+site the active query already excluded — the drift the whole-library rails lived on.
+
+`total` is the whole result, never the page. `needs_facts` is
+`Plan::needs_facts()` riding along on the same value, so the UI has the fact in
+the same object as the count: `total = 0` **and** `needs_facts` is "not measured
+yet · measure my files", not an answer (invariant 27).
+
+**Order is `updated_at DESC, items.id`, and the `id` is not decoration.** The
+fixture writes `q_big` and `q_small` with the same stamp because that is exactly
+what an importer does to a batch; without the tie-break page 1 and page 2 are
+independent sorts, so a paged read repeats one row and silently drops another.
+`select_all_ids_are_the_whole_result_in_grid_order` walks five pages of one row
+each and requires every id exactly once. The `updated_at` half is compared as
+**TEXT**, with no `CAST`: correct only while every stamp the writers make
+(`now_epoch_text()`) has one width, and it is what lets the page walk
+`items_updated_idx` instead of sorting the table. The predicate side needs the
+`CAST` for `added:`; the order side must not have one — that asymmetry is now said
+out loud in the fixture doc comment and pinned in the test list.
+
+**The scale probe stopped timing a copy of the code.** Until now
+`filter_scale_probe` assembled the page and count SQL itself, so it measured
+something production never ran. It now calls `db::search_items` (page **and**
+paired total, the one call the grid makes) and `db::count_matches` separately,
+and feeds `EXPLAIN QUERY PLAN` the string from `db::planned_where`; the hand-written
+statement timer is gone, replaced by a `timed` closure that drains its result.
+That rewrite also moved the conclusions, because the "grid" column used to hide
+the count inside it:
+
+| query | matches | page + total p50 / p95 | count alone p50 | page alone |
+| --- | ---: | --- | ---: | ---: |
+| `big_breasts` | 64 092 | 288 / 290 ms | 88 ms | 200 ms |
+| `big_breasts -anal` | 29 654 | 330 / 331 ms | 137 ms | 193 ms |
+| `size>100mb type:image` | 17 018 | 157 / 158 ms | 153 ms | 4 ms |
+| `ratio:>2 height>800` | 6 467 | 184 / 184 ms | 174 ms | 10 ms |
+| `-size>1gb type:gif` | 5 000 | 172 / 173 ms | 162 ms | 10 ms |
+| `stored:local-only` | 20 000 | 92 / 92 ms | 90 ms | 2 ms |
+| `added:>=2024-06-01 updated:>2023-01-15` | 7 876 | 16 / 16 ms | 15 ms | 1 ms |
+| `ext:gif ext:mp4` | 0 | 24 / 25 ms | 12 ms | 12 ms |
+
+So the earlier "everything but two queries is under 80 ms" was a page-only truth.
+At 100k items the **total** is the expensive half for every fact query (153 of
+157 ms, 174 of 184 ms, 90 of 92 ms) and the cheap half is the page (1 — 10 ms). That
+is the number stage S5 has to design around: re-run the page on the debounce
+tick, never the total per keystroke. The 0-match row is still printed with its
+count, which is the honesty rule the fixture residues taught.
+
+**Measured** (`tools/cargo-test-s3.log`, `tools/cargo-clippy-s3.log`,
+`tools/filter-scale-20261126.log`):
+
+* `cargo test --workspace` = **217 passed, 0 failed, 8 ignored** (goon-core
+  **110** (was 102), desktop **101** + 8 ignored, vault 4, locator 2).
+* **8 new tests** in `db::tests` against a new synthetic vault
+  (`query_fixture()`, ids `q_big` / `q_small` / `q_unprobed` / `q_video` /
+  `q_disk` / `q_game`, built with this module's own helpers where they reach):
+  `the_page_and_the_paired_total_come_from_one_predicate`,
+  `a_never_measured_item_matches_neither_a_fact_nor_its_negation`,
+  `the_total_counts_the_result_and_the_page_limits_the_rows`,
+  `select_all_ids_are_the_whole_result_in_grid_order`,
+  `the_view_scope_is_what_keeps_kinds_apart_not_the_query`,
+  `the_tag_cloud_and_the_site_counts_follow_the_query`,
+  `a_query_reading_unmeasured_facts_says_so_on_the_page`,
+  `the_scope_is_anded_before_the_plan_never_replaced_by_it`.
+  The invariant-27 one is the reason this stage exists: `q_unprobed` has a stored
+  row with every fact column NULL and is matched by **neither** `size>1gb` nor
+  `-size>1gb`; `q_video` keeps `animated` NULL, because a container says nothing
+  about frames and writing 0 would make `-type:gif` a lie, so that row answers
+  neither `type:gif` nor `-type:gif` either.
+* `cargo clippy --workspace --all-targets` = **0 warnings**; `rustfmt` clean on
+  `db.rs` and the example (`cookies.rs`, `http.rs`, `ingest.rs`, `video.rs` are
+  still non-clean on main, untouched here); `node tools/char-audit.js` **CLEAN**.
+* Probe re-run: same fixture (**100 000 items**, ~1 000 000 `item_tags`, 104 MiB,
+  built in 13.8 s), 18 queries, p50/p95 over 21 rounds, every timing printed
+  beside its matched row count.
+
+**Deliberately not replaced yet.** `list_items`, `source_stats` and
+`games_needing_match` still exist and are still what the two views call, because
+the rails that call them come out in S5/S6 — removing the callers and the SQL in the
+same commit is how a review loses the ability to see what changed. Their three
+counts were measured instead of assumed: each planned facet count costs the same
+**45·90 ms** at 100k as the ones S3 now runs, so a sidebar that re-counted all three
+per keystroke would cost ~200 ms per keypress for numbers that shrink to nothing
+once the rails go. Nothing drifts meanwhile, because the grammar tests already
+prove `stored:local-only` ≡ `local_only`, `-stored:disk` ≡ `no_local` and
+`-has:tags` ≡ `no_tags` against `db::source_stats` itself.
+
+**Docs updated in this commit.** `docs/DEVELOPMENT.md` §3 gains a
+"**Running the query box**" bullet: the one-composition-point rule, the
+scope-is-SQL rule, `SearchPage`, the `updated_at DESC, items.id` order and the
+TEXT-stamp contract, and what is *not* replaced yet. `docs/TESTING.md` item 41 is
+rewritten around the numbers above (it described the page-only probe), and item
+**42** records the eight S3 predicate tests.
+
+**For S4 (the wire).** `search_items` / `count_matches` / `search_item_ids` are
+ready to wrap as commands; the `api.ts` mirror has to carry `needs_facts` across
+the boundary or the front end cannot tell "0 matches" from "not measured yet".
+`top_tags_matching` is the suggestion source for `filter_suggest` — it is already
+result-scoped, so the suggester does not need its own filtering. The
+`add_item_tag` site argument and the extension-tag writer call sites listed under
+#77 stay queued for their own stage.

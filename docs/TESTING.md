@@ -568,36 +568,48 @@ the board's *In review* column is the current list.
       in total. The parse is noise next to the SQL it feeds, so the suggester can
       re-plan on every debounce tick without a cache.
 
-   41. **100k items, filtered, in milliseconds** (#76 stage S2, plan §6/§8.3).
+    41. **100k items, filtered, in milliseconds** (#76 stages S2 and S3, plan §6/§8.3).
       `cargo run -p goon-core --release --example filter_scale_probe` builds a
       throwaway plaintext vault under `%TEMP%` (**100 000 items**, 10 tags each
       ≈ **1 000 000** `item_tags` rows, 20 000 distinct tags, half vaulted, 70 %
       of those probed, the rest deliberately un-probed so invariant 27 has rows
-      to hide) and prints p50/p95 for both statements every filtered grid runs:
-      the page (`… ORDER BY items.updated_at DESC LIMIT 300`) and the paired
-      `COUNT(*)` behind "N matches · M total". Fixture ids, titles and tag names
-      are synthetic (`fixture_tag_00421`), the media BLOB is an 8-byte stub, and
-      the whole thing is deleted again. It also prints `EXPLAIN QUERY PLAN` for
-      four shapes, which is where the one cost the grammar knowingly accepts is
-      recorded: `CAST(created_at AS INTEGER)` makes an index on the TEXT stamps
-      useless, so `added:` is a **scan** of `items`. Measured 2026-11-26 in
+      to hide) and prints p50/p95 for the two things stage S3 does. The grid call is
+      `db::search_items`: a 300-row page **and** the paired `COUNT(*)`, which is the
+      one call the desktop makes. `db::count_matches` is timed on its own as well, so
+      the difference between the two columns is what the page alone costs — the
+      number stage S5 needs to decide what may run on every keystroke. Fixture ids,
+      titles and tag names are synthetic (`fixture_tag_00421`), the media BLOB is an
+      8-byte stub, and the whole thing is deleted again. It also prints
+      `EXPLAIN QUERY PLAN` for five shapes through `db::planned_where` — the same
+      string the shipping code builds — which is where the one cost the grammar
+      knowingly accepts is recorded: `CAST(created_at AS INTEGER)` makes an index on
+      the TEXT stamps useless, so `added:` is a **scan** of `items`.
       `tools/filter-scale-20261126.log` (release build, plaintext vault, 104 MiB,
-      built in 13.9 s): the slowest grid page is the dense tag
-      `big_breasts` (64 092 matches) at **197 ms p50 / 199 ms p95**, and
-      `big_breasts -anal` is **190 ms**; every other shape is under **80 ms**, and
-      several are under 10 ms (`stored:local-only` 1 ms, `size>100mb type:image`
-      2 ms, `-size>1gb type:gif` 10 ms, the date window 0 ms). The paired
-      `COUNT(*)` is the honest surprise: **86 ms** for the same tag query, and up
-      to **171 ms p95** for `ratio:>2 height>800`, because a `LIMIT 300` page can
-      stop early on the `updated_at` order while a total cannot. Stage S3's job is
-      not to make the count fast but to stop running it on every keystroke.
-      The fixture is also what makes `-has:tags` measurable: one item in twelve
-      carries no tags at all, and 1 in 6 knows no extension, which is the pre-v10
-      gap #77 has to close before `ext:` means what it says.
+      built in 13.8 s): the slowest grid call is `big_breasts -anal` at **330 ms
+      p50 / 331 ms p95** (29 654 matches) and the dense single tag `big_breasts`
+      (64 092 matches) at **288 ms**. The shape of the cost is the finding, not the
+      worst case: the paired total on its own is **88 ms** for that tag, and it
+      **dominates** a fact query — `size>100mb type:image` is 157 ms as one call,
+      153 ms of it the count, `ratio:>2 height>800` is 184 ms of which 174 ms is the
+      count, `-size>1gb type:gif` 172 ms of which 162 ms is the count.
+
+      Subtracting one column from the other is how stage S5 chooses what to re-run
+      while the user types, and the answer is **the grid, not the total**:
+      `stored:local-only` costs 92 ms as a call but only 2 ms of page and 90 ms of
+      count; `added:` windows 16/15 ms; `size>100mb type:image` 4 ms of page;
+      `type:video length<1:30` 8 ms; `circle:"Red Sun" rating:>3` 20 ms.
+      So at 100k items a keystroke can afford a page, but must not pay ~170 ms for a
+      total nobody has read yet. The fixture is also what makes `-has:tags`
+      measurable — one item in twelve carries no tags at all, and 1 in 6 knows no
+      extension, which is the pre-v10 gap #77 has to close before `ext:` means what
+      it says.
+      `-has:tags` measurable — one item in twelve carries no tags at all, and 1 in
+      6 knows no extension, which is the pre-v10 gap #77 has to close before `ext:`
+      means what it says.
 
       Two numbers the log records on purpose rather than leaving to be inferred.
-      `ext:gif ext:mp4` matches **0 rows by construction** - an item carries one
-      `extension` tag, since `db::set_item_extension_tag` writes exactly one - so
+      `ext:gif ext:mp4` matches **0 rows by construction** — an item carries one
+      `extension` tag, since `db::set_item_extension_tag` writes exactly one — so
       the conjunction the plan's example shows is a query that can never be true,
       which stage S5 must handle as a hint ("did you mean `ext:gif` **or**
       `ext:mp4`?") rather than a result. And the `EXPLAIN QUERY PLAN` lines show
@@ -608,6 +620,54 @@ the board's *In review* column is the current list.
       the opposite shape - `MULTI-INDEX OR` over `tags_fold_idx` / `tags_name_idx`
       then `item_tags_tag_idx` as a covering index - which is why it gets *slower*
       the more items match.
+
+    42. **The planned predicate, run: `db::search_items` and its four siblings**
+       (#76 stage S3). The grammar proved what a query *means*; these tests prove
+       what it *returns* once the view scope, the paging and the sidebar aggregates
+       are attached — all against the synthetic `query_fixture()` vault, whose ids
+       are `q_big`, `q_small`, `q_unprobed`, `q_video`, `q_disk` and `q_game`.
+       Measured 2026-11-26 with `cargo test --workspace` = **217 passed, 0 failed,
+       8 ignored** (goon-core **110**, desktop **101** + 8 ignored, vault 4,
+       locator 2):
+      - `a_never_measured_item_matches_neither_a_fact_nor_its_negation` is the
+        invariant-27 pin stage S3 exists to hold: `q_unprobed` has a stored row with
+        every fact column NULL and appears in **neither** `size>1gb` nor
+        `-size>1gb`, neither `width>1000` nor `-width>1000`. `animated` is the same
+        story: `q_video` keeps it NULL because a container says nothing about
+        frames, so that row answers neither `type:gif` nor `-type:gif`.
+      - `the_page_and_the_paired_total_come_from_one_predicate` and
+        `the_total_counts_the_result_and_the_page_limits_the_rows`: a page of 2 out
+        of 5 media items reports `total = 5`, and the games total counts the games
+        library. The old grid capped both numbers at `limit` and never said so —
+        which is what plan §9 meant by "there is no server-side *everything
+        matching this query*" (rulings C).
+      - `select_all_ids_are_the_whole_result_in_grid_order`: `search_item_ids`
+        carries no `LIMIT`, the page is a **prefix** of it, and five pages of one row
+        each hold every id exactly once. That test is why the order is
+        `updated_at DESC, items.id`: `q_big` and `q_small` were stamped in the same
+        second — which is exactly what an importer writes to a batch —, and
+        without the tie-break page 1 and page 2 are independent sorts that repeat
+        one row and silently drop the other.
+      - `the_view_scope_is_what_keeps_kinds_apart_not_the_query`: a `status:` plan
+        parsed in the **games** grammar and run through the **media** scope returns
+        nothing, because `db::planned_where` ANDs the view scope in first. So D14 is
+        enforced in SQL rather than left to the UI to remember — and the media
+        grammar still refuses the word outright.
+      - `the_tag_cloud_and_the_site_counts_follow_the_query`:
+        `top_tags_matching` and `counts_by_site_matching` count the **current
+        result**, so `source:gelbooru` leaves an empty tag rail instead of offering a
+        chip that produces an empty grid — the drift the old whole-library rails
+        lived on. `stored:local-only` narrows the site counts to one row.
+      - `a_query_reading_unmeasured_facts_says_so_on_the_page`:
+        `SearchPage.needs_facts` makes `total = 0` from `size>1gb` a "not measured
+        yet" rather than an answer, while a tag query does not get to claim the
+        vault is unmeasured.
+      - `the_scope_is_anded_before_the_plan_never_replaced_by_it` pins the
+        composition itself. And the fixture stamps are ten digits wide because the
+        grid orders by TEXT `updated_at` with no `CAST`: that equals a numeric order
+        only while every stamp has one width, which is the contract
+        `now_epoch_text()` keeps, and `items_updated_idx` is the index the page
+        walks — a `CAST` there would trade that index for a full sort of the table.
 
 ## 4. House rules that prevent whole classes of damage
 
