@@ -15,9 +15,19 @@ cmd /c "cargo clippy --workspace --all-targets"
 cd apps\desktop
 cmd /c "npx svelte-check --tsconfig ./tsconfig.json --output human"   # must be 0 errors AND 0 warnings
 cmd /c "npm run build"
-node tools\char-audit.js <every file you touched>                     # encoding guard
+node tools\char-audit.js <every file you touched>                     # encoding guard; file arguments are mandatory — with none it reads nothing and prints CLEAN
 node tools\lost-calls.js apps\desktop\src\components\ItemEditor.svelte <rev before> HEAD
 ```
+
+`cargo fmt --all -- --check` is **not** clean on `main`: `cookies.rs`, `http.rs`,
+`ingest.rs` and `video.rs` are hand-formatted wider than rustfmt's default and stay
+that way. And `rustfmt` on a single path follows that file's `mod` declarations, so
+`rustfmt apps\desktop\src-tauri\src\lib.rs` — the crate root — **rewrites those four
+siblings too** (~470 lines of pure reflow). `--skip-children` is not an option in the
+stable `rustfmt` here, so the safe recipe is: `--check` to read, format only what the
+stage touched, then `git status --short` and `git checkout --` anything this stage did
+not mean to touch. A 200-line formatting diff in a query-box commit is review noise
+that hides the change that matters.
 
 `lost-calls.js` exists because a dialog rework can pass every compiler and still
 drop a button: it diffs the `await someApi(...)` calls and `onclick={handler}`
@@ -603,9 +613,6 @@ the board's *In review* column is the current list.
       measurable — one item in twelve carries no tags at all, and 1 in 6 knows no
       extension, which is the pre-v10 gap #77 has to close before `ext:` means what
       it says.
-      `-has:tags` measurable — one item in twelve carries no tags at all, and 1 in
-      6 knows no extension, which is the pre-v10 gap #77 has to close before `ext:`
-      means what it says.
 
       Two numbers the log records on purpose rather than leaving to be inferred.
       `ext:gif ext:mp4` matches **0 rows by construction** — an item carries one
@@ -668,6 +675,77 @@ the board's *In review* column is the current list.
         only while every stamp has one width, which is the contract
         `now_epoch_text()` keeps, and `items_updated_idx` is the index the page
         walks — a `CAST` there would trade that index for a full sort of the table.
+
+    43. **The box, read while it is being typed: `filter_suggest` and the wire that
+       carries a query** (#76 stage S4). S3 made the query select rows; S4 puts it on
+       the wire and makes the box autocomplete. Measured 2026-11-26 with
+       `cargo test --workspace` = **229 passed, 0 failed, 8 ignored** (goon-core
+       **120** (was 110), desktop **103** + 8 ignored (was 101), vault 4, locator 2);
+       `apps/desktop` `npm run build` clean and `svelte-check` **0 errors, 0
+       warnings**, because `api.ts` is part of this contract (invariant 6).
+       `tools/cargo-test-s4.log`, `tools/cargo-s4-desktop.log`,
+       `tools/cargo-clippy-s4.log`.
+      - `the_view_vocabulary_on_the_wire_is_two_words_and_no_others`: `Scope::parse_wire`
+        takes `media` / `games` and refuses anything else **naming both**, so a
+        frontend typo is an error the user can read rather than a silent default to
+        one library.
+      - `a_token_mid_flight_splits_into_the_query_and_what_is_being_typed`: the
+        suggester sees the box as two things — the query *without* the token under the
+        caret, and the token itself. `source:ehentai bi` keeps `source:ehentai` as the
+        base (so the counts are measured against it) and `bi` as the value; `-stor`
+        keeps `negated = true` with `keyword = None`, because no operator has been
+        typed yet; and `size>10` and `size:>10` resolve to the *same* keyword, so a
+        token cannot be a predicate in the parser and a tag name in the suggester.
+      - `a_colon_inside_a_tag_name_is_not_a_keyword`: `female:big` is one tag name
+        (`keyword = None`), the same rule that keeps a site vocabulary's `female:`
+        prefix importable (plan §4).
+      - `there_is_nothing_to_suggest_when_there_is_no_partial_token`: no candidates for
+        an empty box, for `big_breasts ` (the term is finished), for a closed phrase
+        `"summer witch"`, or for an **open** quote (`circle:"Red` wants a phrase and
+        this pass has no phrase candidates); `status:wishlist` in the media box has no
+        candidates either, because the media grammar already refuses it — while a bare
+        `status` is honestly a tag name there and stays completeable. A box whose base
+        does not parse (`type:banana bi`) gets nothing: completing past an error would
+        hide the inline error the form is showing.
+      - `the_suggester_only_offers_values_it_can_be_honest_about`: `type:`, `stored:`,
+        `source:` and `ext:` can be completed; `size:`, `length:`, `width:`, `height:`,
+        `ratio:`, `rating:`, `added:`, `updated:`, `circle:` and `id:` cannot, because
+        the only value available would be an invented one (invariant 27).
+      - `db::suggest`'s five tests run against the same `query_fixture()` as stage S3,
+        so the candidate counts and the page counts come from one vault and can be
+        compared: `a_half_typed_word_offers_the_grammar_first_and_the_vault_second`
+        (`stor` → `stored:` with `count = None`, since grammar is not a fact about this
+        vault; `big` → **one** row `big_breasts (2)`, because the cloud is grouped by
+        the folded name exactly like a bare tag term is matched — e-hentai's
+        `female:big_breasts` and a `big_breasts` are one family, which is what
+        `tag:"…"` exists to override);
+        `the_suggestion_for_a_closed_keyword_is_grammar_and_never_a_made_up_number`
+        (`type:` offers exactly video/image/gif in the grammar's order; `size` offers
+        the keyword, `size>10` offers nothing);
+        `a_site_completion_counts_through_the_same_sql_the_query_would_run`
+        (`source:e` → `source:ehentai (2)`, and after `stored:local-only` the candidate
+        disappears — the dead-end chip the old rails were known for);
+        `the_minus_being_typed_survives_into_the_completion` (`-has:t` →
+        `-has:thumb`, `-has:tags`: the whole token, minus included, so clicking a row
+        replaces the term instead of quietly dropping the negation); and
+        `an_extension_completion_reads_the_tag_the_grammar_reads` — after
+        `set_item_extension_tag` writes the type-4 row, `ext:g` offers `ext:gif (1)`
+        read from the **same tag table** the `ext:` predicate reads, while `ext:big`
+        offers nothing, because `ext:female:big_breasts` is a predicate that can never
+        be true.
+      - `the_query_wire_refuses_a_wrong_view_before_it_reads_the_vault` pins
+        `planned_query`: `games` + `status:wishlist` plans against `items.status`, an
+        empty box plans **no** predicate, and both refusals (`gallery` as a view word,
+        `status:` in the media box) come back as the string stage S5 renders under the
+        box as form state, not as a toast (invariant 24).
+      - `a_tag_can_record_the_site_that_spells_its_name` is the provenance pin, in both
+        directions: `tag_site_slug` normalises `  Ehentai ` to the invariant-10 slug and
+        refuses `e-hentai` (a slug `source:` could never match), the two arms write
+        `tags.site = 'ehentai'` and `tags.site = ''` respectively, and then the half
+        that matters: **tag provenance is not item provenance**. With no `sources` row,
+        `source:ehentai tag:"female:big_breasts"` matches nothing even though the tag's
+        site is recorded (invariant 21); insert the ledger row the clip actually wrote
+        and the same query finds the item.
 
 ## 4. House rules that prevent whole classes of damage
 

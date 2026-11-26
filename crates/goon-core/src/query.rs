@@ -63,6 +63,23 @@ pub enum Scope {
     Games,
 }
 
+impl Scope {
+    /// The wire spelling of the view, from the `view:` argument of the query
+    /// commands. An unknown word is refused rather than defaulted: a frontend
+    /// that sends `kind` where it means `view` would otherwise get a silently
+    /// different library, and the grid would look like it lost items.
+    pub fn parse_wire(text: &str) -> Result<Scope, ParseError> {
+        match text {
+            "media" => Ok(Scope::Media),
+            "games" => Ok(Scope::Games),
+            other => Err(bad(
+                other,
+                "the query box speaks one of two vocabularies: `media` or `games`",
+            )),
+        }
+    }
+}
+
 /// The comparison operator a term was typed with. Bare `key:value` means
 /// [`Cmp::Eq`]; for a date that equality is a *day interval*, never a
 /// second-for-second match (see [`DateValue`]).
@@ -395,20 +412,10 @@ fn keyword_hint(scope: Scope) -> String {
         .join(" ")
 }
 
-/// Parse the query box's contents for a view. An empty box is an empty query,
-/// not an error: it means "everything", which is what the grid shows.
-pub fn parse(input: &str, scope: Scope) -> Result<Query, ParseError> {
-    if input.chars().count() > MAX_INPUT_CHARS {
-        // An empty `token` means "the whole box" - see ParseError.
-        return Err(bad(
-            "",
-            format!(
-                "that is more query than the box holds: {MAX_INPUT_CHARS} characters, so one \
-                 fewer term"
-            ),
-        ));
-    }
-    let tokens = tokenize(input)?;
+/// Parse an explicit list of tokens. [`parse`] is exactly this over
+/// [`tokenize`], and the autocomplete path needs the token-list form: the token
+/// being typed has to come off the end before the rest can be understood.
+fn parse_terms(tokens: &[String], scope: Scope) -> Result<Query, ParseError> {
     if tokens.len() > MAX_TERMS {
         let extra = &tokens[MAX_TERMS];
         return Err(bad(
@@ -422,9 +429,25 @@ pub fn parse(input: &str, scope: Scope) -> Result<Query, ParseError> {
     }
     let mut terms = Vec::with_capacity(tokens.len());
     for token in tokens {
-        terms.push(parse_term(&token, scope)?);
+        terms.push(parse_term(token, scope)?);
     }
     Ok(Query { terms })
+}
+
+/// Parse the query box's contents for a view. An empty box is an empty query,
+/// not an error: it means "everything", which is what the grid shows.
+pub fn parse(input: &str, scope: Scope) -> Result<Query, ParseError> {
+    if input.chars().count() > MAX_INPUT_CHARS {
+        // An empty `token` means "the whole box" - see ParseError.
+        return Err(bad(
+            "",
+            format!(
+                "that is more query than the box holds: {MAX_INPUT_CHARS} characters, so one \
+                 fewer term"
+            ),
+        ));
+    }
+    parse_terms(&tokenize(input)?, scope)
 }
 
 /// The characters that make a query look right and parse wrong: a control,
@@ -462,6 +485,127 @@ fn invisible_or_lookalike(c: char) -> Option<&'static str> {
         return Some("a comparison sign this grammar cannot read");
     }
     None
+}
+
+/// What the box means **while the user is still typing in it** — the input to
+/// the autocomplete, and the reason the suggester is not a second parser.
+///
+/// Only the **last** token can be unfinished, because the box is read left to
+/// right and the caret is at the end: everything before it is already a query.
+/// So this splits the box into "the query that would run if the token were
+/// finished" plus "what is being typed", and the suggester counts candidates
+/// against exactly that query. Plan §5 asks for counts *scoped to the query minus
+/// the token being typed*, and this is the whole mechanism for it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestCtx {
+    /// The box without the unfinished token — the query the candidate counts are
+    /// measured against.
+    pub base: Query,
+    /// The unfinished token, exactly as typed, `-type:vi` including the minus.
+    pub token: String,
+    pub negated: bool,
+    /// The keyword the token has started, if its left side is one
+    /// (`type:vi` → `Some("type")`; `female:big` → `None`, because `female` is
+    /// not a keyword and that token is a tag name).
+    pub keyword: Option<&'static str>,
+    /// What is being completed: the value after the keyword, or the whole token
+    /// when there is no keyword.
+    pub value: String,
+}
+
+/// Keywords whose **value** autocomplete can enumerate: either a closed set the
+/// grammar owns ([`closed_values`]) or a vocabulary the vault can count
+/// (`source:`, `ext:`, `tag:`). Deliberately *not* the numeric keywords, and not
+/// `circle:` or `id:`: completing those would invent a number or an id nobody
+/// typed, which is the same dishonesty invariant 27 refuses about facts.
+pub fn value_completion(key: &str) -> bool {
+    matches!(key, "source" | "tag" | "ext") || !closed_values(key).is_empty()
+}
+
+/// Read the box as "query so far" + "token being typed". `None` means "there is
+/// nothing to suggest", which is the honest answer more often than it sounds:
+///
+/// * the box ends in whitespace, so the last term is finished and a new token has
+///   not started (offering the whole vocabulary there is noise);
+/// * the last token is a closed quoted phrase (`"summer witch"`), which is a
+///   complete free-text term;
+/// * a quote is open (`title "summer`), where what is wanted is a phrase, not a
+///   token;
+/// * the token spells a keyword the **other** view owns (`status:wishlist` in the
+///   media box), where the grammar has already written the error worth showing;
+/// * or the text before the caret does not parse — the box is still wrong, and
+///   completing a broken query would hide the inline error the form is showing.
+pub fn parse_suggestion(input: &str, scope: Scope) -> Option<SuggestCtx> {
+    if input.chars().count() > MAX_INPUT_CHARS || input.is_empty() {
+        return None;
+    }
+    if input.ends_with(char::is_whitespace) {
+        // The last term is finished and the next has not started: the honest
+        // answer is no candidates, not the whole vocabulary.
+        return None;
+    }
+    let mut tokens = tokenize(input).ok()?;
+    let token = tokens.pop()?;
+    // A quoted token is either a complete free-text phrase or part of an open
+    // one (`tokenize` refuses the latter); either way there is no token to
+    // complete, and this pass has no title-candidate source to offer instead.
+    if token.starts_with('"') {
+        return None;
+    }
+    // A keyword the **other** view owns is refused by the parser in this view
+    // (`status:` in the media box is a `ParseError`, not a tag name), so there is
+    // nothing to complete: the honest answer is no candidates, and the inline
+    // error the grammar already wrote is what the form shows (plan §5).
+    if keyword_of(&token, scope).is_none() && wrong_view_keyword(&token, scope) {
+        return None;
+    }
+    let base = parse_terms(&tokens, scope).ok()?;
+    let (negated, rest) = match token.strip_prefix('-') {
+        Some(rest) if !rest.is_empty() => (true, rest),
+        _ => (false, token.as_str()),
+    };
+    // The same left-of-operator rule the parser uses, so a token cannot be a
+    // keyword here and a tag name there.
+    let (keyword, value) = match keyword_of(rest, scope) {
+        Some((key, value)) => (Some(key), value.to_string()),
+        None => (None, rest.to_string()),
+    };
+    Some(SuggestCtx {
+        base,
+        token,
+        negated,
+        keyword,
+        value,
+    })
+}
+
+/// The keyword a token has started, with the value text after it. `type:vi` →
+/// `("type", "vi")`, `size>100` → `("size", "100")`, `female:big` → `None`,
+/// because `female` is not a keyword and that token is one tag name.
+fn keyword_of(rest: &str, scope: Scope) -> Option<(&'static str, &str)> {
+    let stop = rest.find([':', '=', '>', '<'])?;
+    let key = keywords(scope).into_iter().find(|k| *k == &rest[..stop])?;
+    // The operator run after a keyword is `:` and/or one comparison character,
+    // in either order (`size:>100mb`, `size>100mb`, `rating=3`). Consuming the
+    // whole run is what keeps the completion text aligned with where the caret
+    // is, instead of offering `:>100` for a value the grammar reads as `100`.
+    let mut value = &rest[stop..];
+    while let Some(rest) = value.strip_prefix([':', '>', '<', '=']) {
+        value = rest;
+    }
+    Some((key, value))
+}
+
+/// Is this token spelled with a keyword the **other** view owns? Today that is
+/// exactly `status:`, which only the Games pipeline has a column to read, and it
+/// only counts when an operator follows it.
+fn wrong_view_keyword(token: &str, scope: Scope) -> bool {
+    let token = token.strip_prefix('-').unwrap_or(token);
+    let Some(stop) = token.find([':', '=', '>', '<']) else {
+        return false;
+    };
+    let left = &token[..stop];
+    keywords(scope).iter().all(|k| *k != left) && GAMES_ONLY_KEYWORDS.contains(&left)
 }
 
 /// Splits on whitespace while keeping a `"…"` run together, wherever the quote
@@ -3358,5 +3502,128 @@ mod tests {
             i += 1;
         }
         (depth, joins)
+    }
+
+    // ---------- #76 stage S4: the box read **while it is being typed** ---------
+
+    #[test]
+    fn the_view_vocabulary_on_the_wire_is_two_words_and_no_others() {
+        assert_eq!(Scope::parse_wire("media"), Ok(Scope::Media));
+        assert_eq!(Scope::parse_wire("games"), Ok(Scope::Games));
+        let e = Scope::parse_wire("gallery").unwrap_err();
+        assert_eq!(e.token, "gallery");
+        assert!(
+            e.message.contains("media") && e.message.contains("games"),
+            "a refused word has to be told the two that work: {}",
+            e.message
+        );
+    }
+
+    #[test]
+    fn a_token_mid_flight_splits_into_the_query_and_what_is_being_typed() {
+        let s = parse_suggestion("type:vi", Scope::Media).unwrap();
+        assert_eq!(s.keyword, Some("type"));
+        assert_eq!(s.value, "vi");
+        assert_eq!(s.token, "type:vi");
+        assert!(!s.negated);
+        assert!(s.base.is_empty(), "there is nothing before the token");
+
+        // The base is a real query, so the candidate counts can be measured
+        // against it: `source:ehentai bi` suggests tags that exist alongside
+        // the ehentai rows, not tags from the whole library.
+        let s = parse_suggestion("source:ehentai bi", Scope::Media).unwrap();
+        assert_eq!(s.keyword, None, "`bi` has no keyword in front of it");
+        assert_eq!(s.value, "bi");
+        assert_eq!(s.base.terms.len(), 1);
+        assert_eq!(s.base.terms[0].text, "source:ehentai");
+
+        // The minus belongs to the term, and it has to survive into the
+        // completion: picking a candidate must not silently drop the negation.
+        let s = parse_suggestion("-stor", Scope::Media).unwrap();
+        assert!(s.negated);
+        assert_eq!(
+            s.keyword, None,
+            "no operator yet, so nothing names the keyword"
+        );
+        assert_eq!(s.value, "stor");
+        let s = parse_suggestion("-has:t", Scope::Media).unwrap();
+        assert!(s.negated);
+        assert_eq!(s.keyword, Some("has"));
+        assert_eq!(s.value, "t");
+
+        // Both operator spellings are the same keyword, so a token cannot be a
+        // predicate in the parser and a tag name in the suggester.
+        let s = parse_suggestion("size>10", Scope::Media).unwrap();
+        assert_eq!(s.keyword, Some("size"));
+        assert_eq!(s.value, "10");
+        let s = parse_suggestion("size:>10", Scope::Media).unwrap();
+        assert_eq!(s.keyword, Some("size"));
+        assert_eq!(s.value, "10");
+    }
+
+    #[test]
+    fn a_colon_inside_a_tag_name_is_not_a_keyword() {
+        // `female` is not a keyword, so this token is one tag name and gets
+        // tag completions — the same rule that keeps site vocabulary importable
+        // (plan §4).
+        let s = parse_suggestion("female:big", Scope::Media).unwrap();
+        assert_eq!(s.keyword, None);
+        assert_eq!(s.value, "female:big");
+    }
+
+    #[test]
+    fn there_is_nothing_to_suggest_when_there_is_no_partial_token() {
+        assert_eq!(parse_suggestion("", Scope::Media), None, "an empty box");
+        assert_eq!(
+            parse_suggestion("big_breasts ", Scope::Media),
+            None,
+            "the last term is finished and the next has not started"
+        );
+        assert_eq!(
+            parse_suggestion("\"summer witch\"", Scope::Media),
+            None,
+            "a closed quoted phrase is a complete free-text term"
+        );
+        assert_eq!(
+            parse_suggestion("circle:\"Red", Scope::Media),
+            None,
+            "an open quote wants a phrase, and this pass has no phrase candidates"
+        );
+        assert_eq!(
+            parse_suggestion("status:wishlist", Scope::Media),
+            None,
+            "a Games-only word in the media box is an error, not a completion"
+        );
+        assert_eq!(
+            parse_suggestion("type:banana bi", Scope::Media),
+            None,
+            "the base has to parse: completing past an error would hide it"
+        );
+        let s = parse_suggestion("size>banana", Scope::Media).unwrap();
+        assert_eq!(s.keyword, Some("size"));
+        assert_eq!(s.value, "banana", "and no value set can complete that");
+        let bare = parse_suggestion("status", Scope::Media);
+        assert!(
+            bare.is_some(),
+            "a bare `status` is a tag name in this view, so it is completeable"
+        );
+        assert_eq!(bare.unwrap().value, "status");
+    }
+
+    #[test]
+    fn the_suggester_only_offers_values_it_can_be_honest_about() {
+        assert!(value_completion("type"), "the grammar owns that list");
+        assert!(value_completion("stored"));
+        assert!(value_completion("source"), "the vault can count those");
+        assert!(value_completion("ext"));
+        for key in [
+            "size", "length", "width", "height", "ratio", "rating", "added", "updated", "circle",
+            "id",
+        ] {
+            assert!(
+                !value_completion(key),
+                "{key}: would have to invent the number, and an un-measured fact is not a value"
+            );
+        }
     }
 }

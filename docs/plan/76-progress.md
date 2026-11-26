@@ -579,3 +579,156 @@ the boundary or the front end cannot tell "0 matches" from "not measured yet".
 result-scoped, so the suggester does not need its own filtering. The
 `add_item_tag` site argument and the extension-tag writer call sites listed under
 #77 stay queued for their own stage.
+
+---
+
+## S4 — the wire: three commands, one view word, and a suggester that counts through the same SQL (2026-11-26)
+
+**What landed.** No new SQL shape — S3's readers are what runs — and one new column
+write. S4 is the boundary: three Tauri commands, the view's **name** on the wire, a
+split for reading the box while it is being typed, and a `site:` argument on
+`add_item_tag`. Four files: `crates/goon-core/src/query.rs`,
+`crates/goon-core/src/db.rs`, `apps/desktop/src-tauri/src/lib.rs`,
+`apps/desktop/src/lib/api.ts`.
+
+**The commands, and the one place a view can be wrong.** `planned_query(view, text)`
+(`lib.rs:897`) is the only code between a wire argument and a `Plan`, and the three
+commands call nothing else: `search_items(view, query, limit, offset)` →
+`SearchPage` (`:913`), `search_item_ids(view, query)` → every matching id in grid
+order (`:938`), `filter_suggest(view, text, limit)` → `Vec<Suggestion>` (`:954`),
+registered at `:2403-2406`. `limit` defaults to **300**, which is plan §6's
+"the ceiling has to become visible rather than stay silent": the page carries an
+`offset`, and `total` rides along in the same object. One naming hazard for a
+reviewer: `db::Suggestion` (`db.rs:1007`) is an autocomplete row, while
+`db::SuggestionRow` (`db.rs:1750`) is a game *match* suggestion from an older stage.
+Two things, two names; do not merge them.
+
+**The view travels as a word.** `Scope::parse_wire` (`query.rs:71`) accepts exactly
+`media` and `games` and anything else is a `ParseError` whose message names both.
+A boolean, or an `Option` where `None` means "no scope", is how a frontend typo ends
+up quietly searching the other library; refusing by name is invariant 10's rule
+applied to the wire instead of to the database. And an error crosses as **the
+sentence the user reads**: `planned_query` maps `ParseError` to its `message`,
+because stage S5's job is to put that sentence inline under the box as form state
+(invariant 24). The offending token stays inside `ParseError` for a frontend that
+wants to underline it.
+
+**The suggester is split where the rest of the query path is split.** `query.rs`
+reads the half-typed token and touches no database (invariant 28):
+`parse_suggestion` (`:538`) returns `SuggestCtx` (`:500`) — the query *without* that
+token, the negated flag, the keyword, the value — and `value_completion` (`:521`)
+decides what may be completed at all: `type:`, `stored:`, `source:` and `ext:` yes;
+`size: length: width: height: ratio: rating: added: updated: circle: id:` no, because
+the only value available would be an invented one (invariant 27). `tag:` and `circle:`
+get nothing either — the bare-word path already lists the vault's tags, and asking
+for an exact spelling leaves nothing to guess. `db::suggest` (`db.rs:1036`) then
+counts candidates through **the same readers the query would run**
+(`counts_by_site_matching` `:978` for `source:`, `top_tags_matching` `:941` for a bare
+word and for `ext:`), so the number beside a row is the number pressing Enter prints.
+A candidate that would leave the result **empty** is dropped — that is the dead-end
+chip the old rails were known for — while a grammar row keeps `count: None`, meaning
+"no honest number", never zero. The minus rides inside the token (`-has:tags`), so
+clicking a row replaces the term instead of silently dropping the negation.
+
+Two bugs the new tests caught, both worth recording:
+
+* `keyword_of` (`query.rs:585`) first stripped one operator character with an
+  `unwrap_or` fallback that restarted from the original slice, so `size:>100`
+  completed as `:>100` and `type:vi` produced `":vi"`. The operator run is now
+  consumed as a run (`:` and/or `>`/`<`/`=`, in either order), which is also what makes
+  `size>10` and `size:>10` the same keyword: the parser and the suggester cannot
+  disagree about what a token is.
+* `top_tags_matching` grouped by `t.id`, which in the fixture is two chips
+  (`big_breasts (1)` and `female:big_breasts (1)`) that each **deliver two rows** —
+  a bare tag term matches `t.fold = ? OR t.name = ?`, so the two spellings are one
+  family, which is exactly what `tag:"…"` exists to override. It now groups by
+  `tt.key, t.fold`, labels the row with the family's shortest spelling, and orders
+  `c DESC, length(name), name`, a real total order where `c DESC, name` over a grouped
+  fold is not. That is why the line numbers in the S3 entry have drifted
+  (930 → 941, 962 → 978).
+
+**`add_item_tag` learned who spells a tag.** `tag_site_slug` (`lib.rs:1283`) trims,
+lower-cases, and refuses anything outside `ingest::KNOWN_SITES` — a made-up slug would
+sit in `tags.site` where `source:` can never reach it (invariants 10 and 21) — and the
+write goes through `db::tag_get_or_create_site` (`db.rs:1463`) plus `link_item_tag`
+(`:1526`) rather than `add_item_tag`'s site-blind path, which every importer still
+uses. The desktop test is the honest version of that claim, told in both directions:
+`'ehentai'` on the site-spelled row and `''` on the hand-typed one; then
+`source:ehentai tag:"female:big_breasts"` matching **nothing** until the `sources`
+ledger row a clip writes exists. Tag provenance is not item provenance, and a
+recorded spelling must not fabricate a source (invariant 21).
+
+**`api.ts` mirrors it** — `SearchPage` (:270), `Suggestion` (:281), `searchItems`
+(:287), `searchItemIds` (:303), `filterSuggest` (:308), `addItemTag(…, site)` (:409) —
+camelCase fields over snake_case wire arguments (invariant 6). `listItems` and its
+`tag`/`site`/`source` arguments stay, because plan §5 removes them in the **same**
+commit as the rails that call them (S5); there is never a moment where two wire
+shapes are both live.
+
+**Cost, stated honestly rather than measured twice.** The scale probe was **not**
+re-run: S4 changes no plan shape and no SQL the probe times, so its numbers are the
+S3 ones. What S4 does spend per keystroke-set is one facet read — the same
+`counts_by_site_matching` / `top_tags_matching` shape measured at **45·90 ms** at
+100k items in S3 — which is why `filter_suggest` belongs on the debounce tick next to
+the page, and why each candidate pool is a `LIMIT`ed `ORDER BY count DESC` read with
+the prefix filter applied in memory. That last part has a known cut, recorded here
+rather than waiting to be found in the field: a bare word or `ext:` can only offer
+tags inside the top-`limit` window, so a rare extension or a tag ranked 40th is not
+suggested until the prefix narrows. The fix would be a prefix-filtered read through
+`planned_where`, which costs more per keystroke than the window buys.
+
+**Measured** (`tools/cargo-test-s4.log`, `tools/cargo-s4-desktop.log`,
+`tools/cargo-clippy-s4.log`):
+
+* `cargo test --workspace` = **229 passed, 0 failed, 8 ignored** (goon-core **120**
+  (was 110), desktop **103** + 8 ignored (was 101), vault 4, locator 2).
+* **12 new tests**: 5 in `query::tests` (the two-word view vocabulary, the mid-flight
+  token split, a colon inside a tag name is not a keyword, "nothing to suggest", and
+  "only values it can be honest about"); 5 in `db::tests`, against the S3
+  `query_fixture()` so the candidate counts and the page counts come from one vault
+  (grammar first then the vault's tags, a closed keyword is never a made-up number, a
+  site completion counted through the query's own SQL, the minus surviving into the
+  token, `ext:` reading the tag table the predicate reads); 2 in
+  `integration_tests` (the wire's view and grammar refusals; the tag-site provenance
+  identity above).
+* `cargo clippy --workspace --all-targets` = **0 warnings**; `rustfmt --edition 2021
+  --check` exits 0 for `query.rs` and `db.rs`, and for `lib.rs` reports **0 diff blocks
+  in that file** — its 40 blocks are all in the four known non-clean siblings
+  (`cookies.rs`, `http.rs`, `ingest.rs`, `video.rs`), which are left exactly as
+  committed; `npm run build` clean (**135** modules); `svelte-check` **0 errors,
+  0 warnings**.
+* `node tools/char-audit.js` over all **eight** touched files: one hit,
+  `query.rs:456` **U+FF1A** — and that hit is on purpose: the line is the doc comment
+  naming the fullwidth colon the grammar refuses, so it is an example of the bug, not
+  the bug. Two fixes to the audit itself, because the S3 entry's "**CLEAN**" was
+  **vacuous**: `char-audit.js` reads only `process.argv` file arguments, so running it
+  with none prints `CLEAN` without opening anything, and `±` (the zoom buttons), `’`
+  (prose) and `≡` (the predicate-identity sign S3 wrote) were missing from its
+  allow-list, which buried real findings under three known-good lines in
+  `TESTING.md`/`DEVELOPMENT.md`. It now reports 0 lines for six of the seven files and
+  that one deliberate hit — **`U+FF1A` was deliberately not added to the allow-list**,
+  since a fullwidth colon is exactly what the tool exists to find.
+* Self-inflicted damage, caught before the commit: `rustfmt` follows `mod`
+  declarations, so formatting `lib.rs` had also rewritten `cookies.rs`, `http.rs`,
+  `ingest.rs` and `video.rs` — ~470 lines of pure reflow in files this stage never
+  touches. All four are reverted to HEAD, and the trap is written down in
+  `docs/TESTING.md` §1 so the next stage checks `git status --short` after formatting.
+
+**Docs updated in this commit.** `docs/DEVELOPMENT.md` §3 gains "**The query box on
+the wire**": the three commands and `planned_query`, the two-word view vocabulary,
+`ParseError.message` as form state, how `db::suggest` counts through the query's own
+readers and what it refuses to complete, and the tag-name-vs-item-source rule.
+`docs/TESTING.md` gains item **43** (the twelve tests), loses a duplicated paragraph
+item 41 picked up in S3, and §1 gains the rustfmt warning plus the note that
+`char-audit.js` needs its file arguments. `tools/char-audit.js` itself gains three
+allow-listed codepoints (`± ’ ≡`), documented by the comment next to them.
+
+**For S5 (the media view).** Everything the UI needs is callable: one `searchItems`
+per debounce tick (the page always affordable, the total only on the tick), the
+suggestion rows with their counts, `searchItemIds` for select-all, and `needs_facts`
+beside `total` for the "not measured yet" row. S5 also carries the deletions that make
+this one wire shape instead of two: `list_items`, `source_stats`, the four facet rails,
+and `listItems`' `tag`/`site`/`source` arguments, plus `tools/filter-ui-probe.js`.
+Two facts the UI has to say out loud, both already true in the data: tags are binary
+and case-sensitive while the title `LIKE` is not, and `ext:gif ext:mp4` is
+unsatisfiable by construction (one `extension` tag per item).

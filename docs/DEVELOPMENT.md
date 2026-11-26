@@ -416,6 +416,50 @@ tools/
   `-stored:disk` and `-has:tags` are the same predicates those badges compute, so
   nothing drifts while both halves are alive.
 
+- **The query box on the wire** (stage S4) is three commands and one new argument:
+  `search_items(view, query, limit, offset)` → `SearchPage`,
+  `search_item_ids(view, query)` → `Vec<String>`, and
+  `filter_suggest(view, text, limit)` → `Vec<Suggestion>`, all in `lib.rs` behind
+  `planned_query(view, text)`, which is deliberately the **only** place a command
+  may turn a view word and box text into a plan. `list_items` and its
+  `tag`/`site`/`source` arguments still exist for the rails, and S5 deletes the
+  callers and the command in the same commit (plan §5: one wire shape, no legacy
+  branch).
+
+  The view travels as a **word**, parsed by `query::Scope::parse_wire`: exactly
+  `media` and `games` are legal and anything else is refused *naming both*, so a
+  frontend typo fails loudly instead of quietly defaulting to one library. A
+  `ParseError` crosses as its `message` string, because stage S5 shows it inline
+  under the box as form state (invariant 24) — the offending token stays inside
+  `ParseError` for a frontend that wants to underline it.
+
+  Autocomplete is split the way the rest of the query path is: `query.rs` reads the
+  half-typed token (`parse_suggestion` → `SuggestCtx`: the query without that token,
+  the negated flag, the keyword, the value — no DB handle, invariant 28) and
+  `db::suggest` counts the candidates **through the same readers the query itself
+  runs** (`counts_by_site_matching` for `source:`, `top_tags_matching` for a bare
+  word and for `ext:`). So the number beside a row is the number pressing Enter
+  prints. A candidate that would leave the result empty is dropped — that is the
+  dead-end chip the old rails were known for — while a grammar row keeps
+  `count: null`, meaning "no honest number", never zero. `tag:`, `circle:` and every
+  numeric keyword get **no** value completion at all: inventing a number or an id is
+  invariant 27's lie. The one known cut is `ext:`, which reads the top-tag window
+  and keeps the extension rows, so a rare extension may not surface until the
+  prefix narrows.
+
+  `add_item_tag` gained a `site` argument — the site that **spells this tag's name**
+  (schema v10 `tags.site`). `tag_site_slug` normalises it and refuses anything not in
+  `ingest::KNOWN_SITES`, because a made-up slug would become a `tags.site` row that
+  `source:` can never reach (invariants 10 and 21); the write goes through
+  `db::tag_get_or_create_site`. Keep the two provenances distinct: `tags.site` says
+  who spells the **name**, the `sources` table says where the **item** came from, and
+  `source:ehentai tag:"female:big_breasts"` only matches when both are true — the
+  desktop test asserts a recorded tag site never fabricates an item source.
+
+  `api.ts` mirrors all of it (`SearchPage`, `Suggestion`,
+  `searchItems`/`searchItemIds`/`filterSuggest`, `addItemTag(…, site)`), camelCase
+  fields over snake_case wire arguments (invariant 6).
+
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
   `if v < N` steps up to `SCHEMA_VERSION` (v10). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →

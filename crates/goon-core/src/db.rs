@@ -2,7 +2,7 @@
 //! DB (whole-vault nuke stays trivial); content-hash keyed for dedup.
 
 use crate::model::{Item, ItemKind, Status};
-use crate::query::{Plan, Scope, Value};
+use crate::query::{closed_values, keywords, Plan, Scope, SuggestCtx, Value};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -929,6 +929,15 @@ pub fn search_item_ids(
 /// rail used to count the whole library and then show a filtered grid, which is
 /// how a chip could produce an empty page. `items` is deliberately left unaliased,
 /// because every planned fragment is written against that name.
+///
+/// Rows are grouped by the **folded** name, because that is what a bare tag term
+/// matches: `t.fold = ? OR t.name = ?`. So e-hentai's `female:big_breasts` and
+/// another site's `big_breasts` are one row with one count — if they were two
+/// rows, a chip for `big_breasts` would promise the count of one spelling and
+/// deliver both. The displayed name is the family's shortest spelling (the site
+/// prefixes are longest, and a bare word is what the box will hold), and
+/// `ORDER BY c DESC, length(name), name` is a real total order, unlike
+/// `c DESC, name` over a grouped fold.
 pub fn top_tags_matching(
     conn: &Connection,
     scope: Scope,
@@ -936,13 +945,18 @@ pub fn top_tags_matching(
     limit: i64,
 ) -> rusqlite::Result<Vec<TagCount>> {
     let sql = format!(
-        "SELECT t.id, t.name, tt.key, count(*) AS c
+        "SELECT MIN(t.id) AS id,
+                COALESCE(MIN(NULLIF(SUBSTR(t.name, INSTR(t.name, ':') + 1), '')), MIN(t.name)) AS name,
+                MIN(tt.key) AS type_key,
+                count(DISTINCT it.item_id) AS c
          FROM item_tags AS it
          JOIN tags AS t ON t.id = it.tag_id
          JOIN tag_types AS tt ON tt.id = t.type_id
          JOIN items ON items.id = it.item_id
          {}
-         GROUP BY t.id ORDER BY c DESC, t.name LIMIT ?",
+         GROUP BY tt.key, t.fold
+         ORDER BY c DESC, length(name), name
+         LIMIT ?",
         planned_where(scope, plan)
     );
     let mut stmt = conn.prepare_cached(&sql)?;
@@ -983,6 +997,120 @@ pub fn counts_by_site_matching(
         })
     })?;
     rows.collect()
+}
+
+/// One autocomplete row. `token` is the whole term to insert, `-type:video`
+/// including the minus the user already typed, so clicking it replaces the token
+/// instead of appending to it.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Suggestion {
+    pub token: String,
+    /// `keyword` (a word of the grammar), `value` (a keyword's legal value),
+    /// `tag` (a tag in this vault), `site` (a site this vault has seen).
+    pub kind: &'static str,
+    /// Items this candidate matches **on top of the query already typed** — plan
+    /// §5's "counts scoped to the query minus the token being typed". `None` means
+    /// the candidate is grammar, not a fact about this vault, and there is no
+    /// honest number to show for it.
+    pub count: Option<i64>,
+}
+
+/// The candidate list under the query box. One call, bounded reads, no loop over
+/// candidates: each pool is a `LIMIT`ed `ORDER BY count DESC` read and the prefix
+/// filter runs in memory over at most `limit` rows.
+///
+/// A candidate that would leave the result **empty** is dropped, because that is
+/// the dead-end chip the old rails were known for; a candidate with no count
+/// (`None`) is grammar and stays, since "this vault has nothing with that fact
+/// yet" is no reason to hide the word `stored:`.
+///
+/// The counts come from the same SQL the query itself would run
+/// ([`counts_by_site_matching`] for `source:`, [`top_tags_matching`] for `ext:` and
+/// for a bare word), so the number beside a row is the number pressing Enter
+/// would print. `tag:` is not completed at all: the bare-word path already lists
+/// every tag, and asking for the exact spelling has nothing to guess. The one
+/// known cut is `ext:` — it reads the top tags and keeps the extension ones, so a
+/// vault holding 20 000 content tags and one rare extension may not surface it
+/// until the prefix narrows; worth a `type_id` filter if field use complains.
+pub fn suggest(
+    conn: &Connection,
+    scope: Scope,
+    ctx: &SuggestCtx,
+    limit: i64,
+) -> rusqlite::Result<Vec<Suggestion>> {
+    let minus = if ctx.negated { "-" } else { "" };
+    // The pool is measured against the query *without* the token being typed, so
+    // `source:ehentai bi` still offers `big_breasts`.
+    let base = ctx.base.plan();
+    let typed = ctx.value.to_lowercase();
+    let completes = |name: &str| name.to_lowercase().starts_with(&typed);
+    let mut rows: Vec<Suggestion> = Vec::new();
+
+    if let Some(key) = ctx.keyword {
+        // A keyword's closed values: the grammar owns these, so they are offered
+        // even in a vault where they currently match nothing.
+        for value in closed_values(key) {
+            if completes(value) {
+                rows.push(Suggestion {
+                    token: format!("{minus}{key}:{value}"),
+                    kind: "value",
+                    count: None,
+                });
+            }
+        }
+        // A keyword whose vocabulary is the vault's.
+        match key {
+            "source" => {
+                for site in counts_by_site_matching(conn, scope, &base)? {
+                    if completes(&site.site) && site.count > 0 {
+                        rows.push(Suggestion {
+                            token: format!("{minus}source:{}", site.site),
+                            kind: "site",
+                            count: Some(site.count),
+                        });
+                    }
+                }
+            }
+            "ext" => {
+                for tag in top_tags_matching(conn, scope, &base, limit)? {
+                    if tag.type_key != "extension" || !completes(&tag.name) || tag.count == 0 {
+                        continue;
+                    }
+                    rows.push(Suggestion {
+                        token: format!("{minus}ext:{}", tag.name),
+                        kind: "tag",
+                        count: Some(tag.count),
+                    });
+                }
+            }
+            // `size:`, `added:`, `circle:` … have no enumerable value set, and
+            // inventing one is not on the table (invariant 27).
+            _ => {}
+        }
+        return Ok(rows);
+    }
+
+    // No keyword yet: the grammar's own words, then the vault's tags.
+    for key in keywords(scope) {
+        if completes(key) {
+            rows.push(Suggestion {
+                token: format!("{minus}{key}:"),
+                kind: "keyword",
+                count: None,
+            });
+        }
+    }
+    for tag in top_tags_matching(conn, scope, &base, limit)? {
+        if completes(&tag.name) && tag.count > 0 {
+            rows.push(Suggestion {
+                token: format!("{minus}{}", tag.name),
+                kind: "tag",
+                count: Some(tag.count),
+            });
+        }
+    }
+    Ok(rows)
 }
 
 /// Sidebar badges for the source-state filters: "local only" (no online link —
@@ -3590,11 +3718,15 @@ mod tests {
     fn the_tag_cloud_and_the_site_counts_follow_the_query() {
         let conn = query_fixture();
         let all = top_tags_matching(&conn, Scope::Media, &Plan::default(), 10).unwrap();
+        // One row per **folded** tag, because that is what a bare tag term
+        // matches: `q_big`'s `female:big_breasts` and `q_small`'s `big_breasts`
+        // are one family, so the rail says 2 and the grid really shows 2. The
+        // site's longer spelling is not a second chip promising 1 and delivering 2.
         assert_eq!(
             all.iter()
                 .map(|t| (t.name.as_str(), t.count))
                 .collect::<Vec<_>>(),
-            [("big_breasts", 1), ("female:big_breasts", 1)]
+            [("big_breasts", 2)]
         );
         // Narrow the result and the rail narrows with it: a tag that only exists
         // on excluded rows is not a suggestion, it is a dead end.
@@ -3660,5 +3792,118 @@ mod tests {
             "{where_sql}"
         );
         assert!(where_sql.ends_with(')'), "{where_sql}");
+    }
+
+    // ---------- #76 stage S4: the candidate list, counted against the query ----
+
+    /// The candidates for a half-typed box, as (token, kind, count).
+    fn suggestions(
+        conn: &Connection,
+        text: &str,
+        scope: Scope,
+    ) -> Vec<(String, &'static str, Option<i64>)> {
+        let ctx = query::parse_suggestion(text, scope)
+            .unwrap_or_else(|| panic!("{text:?} must have a token to complete"));
+        suggest(conn, scope, &ctx, 20)
+            .unwrap()
+            .into_iter()
+            .map(|s| (s.token, s.kind, s.count))
+            .collect()
+    }
+
+    #[test]
+    fn a_half_typed_word_offers_the_grammar_first_and_the_vault_second() {
+        let conn = query_fixture();
+        let rows = suggestions(&conn, "stor", Scope::Media);
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            ["stored:"],
+            "the keyword comes first, and it is offered with its colon"
+        );
+        assert_eq!(rows[0].1, "keyword");
+        assert_eq!(
+            rows[0].2, None,
+            "a word of the grammar is not a fact about this vault, so it gets no number"
+        );
+        // The tags of this vault come through with a count. One row per folded
+        // name: e-hentai's `female:big_breasts` and a gelbooru-style
+        // `big_breasts` are one tag family to a bare word, which is exactly what
+        // `tag:"…"` exists to override.
+        let rows = suggestions(&conn, "big", Scope::Media);
+        assert_eq!(
+            rows.iter().map(|r| (r.0.as_str(), r.2)).collect::<Vec<_>>(),
+            [("big_breasts", Some(2))]
+        );
+    }
+
+    #[test]
+    fn the_suggestion_for_a_closed_keyword_is_grammar_and_never_a_made_up_number() {
+        let conn = query_fixture();
+        assert_eq!(
+            suggestions(&conn, "type:", Scope::Media),
+            [
+                ("type:video".to_string(), "value", None),
+                ("type:image".to_string(), "value", None),
+                ("type:gif".to_string(), "value", None),
+            ],
+            "exactly the grammar's list, in its order"
+        );
+        // `size:` has no enumerable values. Bare, the keyword itself is the right
+        // suggestion; once the operator is typed, nothing may follow it. Offering
+        // `size:1` would be inventing a fact, the same lie invariant 27 refuses.
+        assert_eq!(
+            suggestions(&conn, "size", Scope::Media),
+            [("size:".to_string(), "keyword", None)]
+        );
+        assert!(
+            suggestions(&conn, "size>10", Scope::Media).is_empty(),
+            "a half-typed number stays a half-typed number"
+        );
+        let games = suggestions(&conn, "status:", Scope::Games);
+        assert!(games.len() >= 5, "the Games pipeline's own states");
+        assert!(games.iter().all(|r| r.0.starts_with("status:")));
+    }
+
+    #[test]
+    fn a_site_completion_counts_through_the_same_sql_the_query_would_run() {
+        let conn = query_fixture();
+        let rows = suggestions(&conn, "source:e", Scope::Media);
+        assert_eq!(rows, [("source:ehentai".to_string(), "site", Some(2))]);
+        // Narrow the box and the candidate narrows with it: after the folder
+        // predicate, ehentai is not an answer any more, and offering it anyway is
+        // the dead-end chip the old rails were known for.
+        assert!(
+            suggestions(&conn, "stored:local-only source:e", Scope::Media).is_empty(),
+            "no ehentai row is local-only"
+        );
+    }
+
+    #[test]
+    fn the_minus_being_typed_survives_into_the_completion() {
+        let conn = query_fixture();
+        assert_eq!(
+            suggestions(&conn, "-has:t", Scope::Media)
+                .into_iter()
+                .map(|r| r.0)
+                .collect::<Vec<_>>(),
+            ["-has:thumb", "-has:tags"],
+            "both values that start with `t`, and the minus stays on all of them"
+        );
+    }
+
+    #[test]
+    fn an_extension_completion_reads_the_tag_the_grammar_reads() {
+        let conn = query_fixture();
+        set_item_extension_tag(&conn, "q_big", "https://eh.example/fixture/1.gif").unwrap();
+        assert_eq!(
+            suggestions(&conn, "ext:g", Scope::Media),
+            [("ext:gif".to_string(), "tag", Some(1))]
+        );
+        // The content tags are not extension values, and they must not leak in:
+        // `ext:female:big_breasts` is a predicate that can never be true.
+        assert!(
+            suggestions(&conn, "ext:big", Scope::Media).is_empty(),
+            "big_breasts is a content tag, not a file name"
+        );
     }
 }

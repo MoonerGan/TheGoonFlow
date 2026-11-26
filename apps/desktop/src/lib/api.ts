@@ -255,6 +255,59 @@ export const listItems = (
     site: site ?? null,
     source: source ?? null,
   });
+
+// ---------- the query box (#76): the wire for one predicate ----------
+/** `view` is which vocabulary the box speaks: `media` (galleries + posts) or
+ *  `games`. The server ANDs that scope into the SQL, so a query can never open
+ *  the other view — a wrong word is an error, not a silent default. */
+export type QueryView = "media" | "games";
+
+/** One grid page **plus** the size of the whole result it came from. `total` is
+ *  not the page length: 300 rows out of 64 000 matches has to say 64 000
+ *  (rulings C). `needsFacts` means the query read a fact this vault may never
+ *  have measured, so `total === 0` is "not measured yet", not an answer
+ *  (invariant 27). */
+export type SearchPage = {
+  items: ItemSummary[];
+  total: number;
+  needsFacts: boolean;
+};
+
+/** One autocomplete row. `token` is the whole term to insert — `-type:video`
+ *  including the minus already typed — so clicking it replaces the token instead
+ *  of appending to it. `count` is the number of items the candidate matches **on
+ *  top of the query already typed**, or `null` for a candidate that is grammar
+ *  rather than a fact about this vault. */
+export type Suggestion = {
+  token: string;
+  kind: "keyword" | "value" | "tag" | "site";
+  count: number | null;
+};
+
+export const searchItems = (
+  view: QueryView,
+  query?: string,
+  limit = 300,
+  offset = 0,
+) =>
+  invoke<SearchPage>("search_items", {
+    view,
+    query: query ?? null,
+    limit,
+    offset,
+  });
+
+/** Every id the query matches, in grid order, no page limit: what "select all"
+ *  means now that the grid is a query, so the bulk actions can reach the whole
+ *  match set (rulings C). */
+export const searchItemIds = (view: QueryView, query?: string) =>
+  invoke<string[]>("search_item_ids", { view, query: query ?? null });
+
+/** The typed autocomplete for the half-typed box. An empty list is a normal
+ *  answer: no partial token, or a box that does not parse yet. */
+export const filterSuggest = (view: QueryView, text: string, limit = 12) =>
+  invoke<Suggestion[]>("filter_suggest", { view, text, limit });
+
 export const siteStats = (kind?: string) =>
   invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
 
@@ -350,8 +403,16 @@ export const storeSourceImage = (itemId: string, url: string) =>
   invoke<StorePictureReport>("store_source_image", { itemId, url });
 export const topTags = (limit = 40, kind?: "game" | "media") =>
   invoke<TagCount[]>("top_tags", { limit, kind: kind ?? null });
-export const addItemTag = (id: string, name: string, kind?: "content" | "site" | "status") =>
-  invoke<void>("add_item_tag", { id, name, kind: kind ?? null });
+/** `site` records **who spells this tag** (schema v10): the site slug that uses
+ *  that exact name, so `tags.site` is real provenance rather than a guess
+ *  (invariant 21). Omit it for a tag you typed yourself, whose provenance is
+ *  nobody's. A slug GoonFlow does not know is refused by the command. */
+export const addItemTag = (
+  id: string,
+  name: string,
+  kind?: "content" | "site" | "status",
+  site?: string,
+) => invoke<void>("add_item_tag", { id, name, kind: kind ?? null, site: site ?? null });
 export const removeItemTag = (id: string, tagId: number) =>
   invoke<void>("remove_item_tag", { id, tagId });
 

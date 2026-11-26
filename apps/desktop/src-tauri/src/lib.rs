@@ -887,6 +887,85 @@ fn list_items(
     goon_core::db::list_items(&opened.conn, &q).map_err(err)
 }
 
+/// Parse the box once, for the three query commands. A `ParseError` becomes its
+/// one-sentence message as a command error: Tauri delivers that as the rejected
+/// promise the form has already caught, and stage S5 shows it **inline under the
+/// box** as state, not as a toast — the query is still sitting there wrong a
+/// minute later (invariant 24, plan §5). The offending token stays inside
+/// `ParseError` for a frontend that wants to underline it; this wire shape is the
+/// sentence, because that is what the user reads.
+fn planned_query(
+    view: &str,
+    text: Option<String>,
+) -> Result<(goon_core::query::Scope, goon_core::query::Plan), String> {
+    let scope = goon_core::query::Scope::parse_wire(view).map_err(|e| e.message)?;
+    let query =
+        goon_core::query::parse(text.as_deref().unwrap_or(""), scope).map_err(|e| e.message)?;
+    Ok((scope, query.plan()))
+}
+
+/// The grid, filtered by the query box: one page **and** the size of the whole
+/// result it came from (rulings C). The view is an argument because the two
+/// views are two vocabularies and two kind sets, and the scope is AND-ed into
+/// the SQL — a query can never open the other view (D14, and `planned_where` in
+/// `db.rs` enforces it).
+#[tauri::command]
+fn search_items(
+    state: tauri::State<'_, AppState>,
+    view: String,
+    query: Option<String>,
+    limit: Option<i64>,
+    offset: Option<i64>,
+) -> Result<goon_core::db::SearchPage, String> {
+    let (scope, plan) = planned_query(&view, query)?;
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::search_items(
+        &opened.conn,
+        scope,
+        &plan,
+        limit.unwrap_or(300),
+        offset.unwrap_or(0),
+    )
+    .map_err(err)
+}
+
+/// Every id the query matches, in grid order, no `LIMIT`: what "select all" means
+/// once the grid is a query instead of a 300-row page, so the bulk actions
+/// (*Store selected*, *Re-fetch metadata*, *Delete selected*) can act on the whole
+/// match set (rulings C). Bounded by the predicate, not by a page.
+#[tauri::command]
+fn search_item_ids(
+    state: tauri::State<'_, AppState>,
+    view: String,
+    query: Option<String>,
+) -> Result<Vec<String>, String> {
+    let (scope, plan) = planned_query(&view, query)?;
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::search_item_ids(&opened.conn, scope, &plan).map_err(err)
+}
+
+/// The typed autocomplete: candidates for the half-typed last token, each with
+/// the count it would produce **on top of the query already typed** (plan §5).
+/// No candidates at all is a normal answer, not an error: see
+/// `query::parse_suggestion` for when and why.
+#[tauri::command]
+fn filter_suggest(
+    state: tauri::State<'_, AppState>,
+    view: String,
+    text: String,
+    limit: Option<i64>,
+) -> Result<Vec<goon_core::db::Suggestion>, String> {
+    let scope = goon_core::query::Scope::parse_wire(&view).map_err(|e| e.message)?;
+    let Some(ctx) = goon_core::query::parse_suggestion(&text, scope) else {
+        return Ok(Vec::new());
+    };
+    let inner = state.inner.lock().unwrap();
+    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    goon_core::db::suggest(&opened.conn, scope, &ctx, limit.unwrap_or(12)).map_err(err)
+}
+
 #[tauri::command]
 fn source_stats(
     state: tauri::State<'_, AppState>,
@@ -1068,10 +1147,9 @@ async fn store_source_image(
     if url.is_empty() {
         return Err("url is empty".into());
     }
-    let job = state
-        .jobs
-        .start("image", &url)
-        .ok_or("a picture fetch is still running \u{2014} the activity strip shows where it got to")?;
+    let job = state.jobs.start("image", &url).ok_or(
+        "a picture fetch is still running \u{2014} the activity strip shows where it got to",
+    )?;
     let report = ingest::store_picture(&state, item_id, url).await;
     match &report {
         Ok(r) => job.finish(&format!(
@@ -1196,12 +1274,35 @@ fn top_tags(
     goon_core::db::top_tags(&opened.conn, limit.unwrap_or(40), kind.as_deref()).map_err(err)
 }
 
+/// Which site spells this tag, as a `tags.site` row. Any site GoonFlow can talk
+/// to is allowed (the same list the Sources panel and `known_sites` show, `local`
+/// included); anything else is refused rather than stored, because a made-up site
+/// string becomes a `tags.site` row that `source:` can never match (invariant 10,
+/// invariant 21). An empty or absent value keeps today's meaning: a tag whose
+/// provenance nobody recorded.
+fn tag_site_slug(site: Option<&str>) -> Result<Option<String>, String> {
+    let Some(raw) = site else {
+        return Ok(None);
+    };
+    let slug = raw.trim().to_ascii_lowercase();
+    if slug.is_empty() {
+        return Ok(None);
+    }
+    if ingest::KNOWN_SITES.iter().any(|(s, _)| *s == slug) {
+        return Ok(Some(slug));
+    }
+    Err(format!(
+        "`{slug}` is not a site GoonFlow knows, so it cannot be recorded as the site that spells this tag"
+    ))
+}
+
 #[tauri::command]
 fn add_item_tag(
     state: tauri::State<'_, AppState>,
     id: String,
     name: String,
     kind: Option<String>,
+    site: Option<String>,
 ) -> Result<(), String> {
     let type_id = match kind.as_deref() {
         Some("site") => goon_core::db::TYPE_SITE_FLAG,
@@ -1212,9 +1313,24 @@ fn add_item_tag(
     if name.is_empty() {
         return Err("tag cannot be empty".into());
     }
+    let site = tag_site_slug(site.as_deref())?;
     let mut inner = state.inner.lock().unwrap();
     let conn = &inner.opened.as_mut().ok_or("vault is locked")?.conn;
-    goon_core::db::add_item_tag(conn, &id, &name, type_id).map_err(err)?;
+    // Two arms, one rule: with a site the tag row is keyed by it, so `tags.site`
+    // records who spells the name (schema v10); without one, `db::add_item_tag`
+    // stays the site-blind path every importer already uses. The tag row id either
+    // arm returns has nowhere to go — the grid already holds the item row, and this
+    // command's wire shape has always been `()`.
+    match site {
+        Some(site) => {
+            let tag_id =
+                goon_core::db::tag_get_or_create_site(conn, &site, &name, type_id).map_err(err)?;
+            goon_core::db::link_item_tag(conn, &id, tag_id).map_err(err)?;
+        }
+        None => {
+            goon_core::db::add_item_tag(conn, &id, &name, type_id).map_err(err)?;
+        }
+    };
     Ok(())
 }
 
@@ -2285,6 +2401,9 @@ pub fn run() {
             kind_stats,
             site_stats,
             list_items,
+            search_items,
+            search_item_ids,
+            filter_suggest,
             source_stats,
             get_thumbs,
             media_for_item,
@@ -2564,5 +2683,142 @@ mod integration_tests {
 
         drop(conn);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// #76 S4: the wire helper that turns `view:` + box text into a plan. This is
+    /// the one place a command can get the view wrong, so it is tested as itself:
+    /// an unknown view word is refused by name, a bad query keeps the grammar's
+    /// own sentence, and an empty box is the whole library rather than an error.
+    #[test]
+    fn the_query_wire_refuses_a_wrong_view_before_it_reads_the_vault() {
+        let (scope, plan) = planned_query("games", Some("status:wishlist".into())).unwrap();
+        assert_eq!(scope, goon_core::query::Scope::Games);
+        assert!(plan.sql.contains("items.status"), "{plan:#?}");
+        let (scope, plan) = planned_query("media", None).unwrap();
+        assert_eq!(scope, goon_core::query::Scope::Media);
+        assert!(plan.sql.is_empty(), "no box, no predicate");
+
+        let e = planned_query("gallery", None).unwrap_err();
+        assert!(e.contains("media") && e.contains("games"), "{e}");
+        // A Games-only word in the media box stays the grammar's own sentence, and
+        // that string is what stage S5 puts under the box as form state rather than
+        // as a toast (invariant 24).
+        let e = planned_query("media", Some("status:wishlist".into())).unwrap_err();
+        assert!(e.contains("status"), "{e}");
+    }
+
+    /// #76 S4: `add_item_tag`'s new `site:` argument. `tag_site_slug` is the
+    /// validation the command runs, and the two core calls below are exactly its
+    /// two arms — which is why the test sits here rather than in `goon-core`.
+    #[test]
+    fn a_tag_can_record_the_site_that_spells_its_name() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        goon_core::db::init_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO items (id, kind, title, status, created_at, updated_at)
+             VALUES ('w1','gallery','Fixture wire','seen','1760000000','1760000000')",
+            [],
+        )
+        .unwrap();
+
+        assert_eq!(
+            tag_site_slug(None).unwrap(),
+            None,
+            "an omitted site stays unprovenanced, as invariant 21 requires"
+        );
+        assert_eq!(
+            tag_site_slug(Some("  Ehentai ")).unwrap().as_deref(),
+            Some("ehentai"),
+            "the wire value is normalised to the site slug of invariant 10"
+        );
+        let e = tag_site_slug(Some("E-Hentai")).unwrap_err();
+        assert!(e.contains("not a site GoonFlow knows"), "{e}");
+        assert!(
+            e.contains("e-hentai"),
+            "the refusal quotes the normalised slug: {e}"
+        );
+        assert!(
+            tag_site_slug(Some("")).unwrap().is_none(),
+            "an empty site is today\u{2019}s meaning: a tag nobody sourced"
+        );
+
+        // The site arm: one tag row, keyed by the site that spells the name.
+        let site_tag = goon_core::db::tag_get_or_create_site(
+            &conn,
+            "ehentai",
+            "female:big_breasts",
+            goon_core::db::TYPE_CONTENT,
+        )
+        .unwrap();
+        goon_core::db::link_item_tag(&conn, "w1", site_tag).unwrap();
+        // The no-site arm: the importer path, unchanged.
+        goon_core::db::add_item_tag(&conn, "w1", "typed by hand", goon_core::db::TYPE_CONTENT)
+            .unwrap();
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT name, site FROM tags
+                 WHERE name IN ('female:big_breasts', 'typed by hand')",
+            )
+            .unwrap();
+        let mut rows: Vec<(String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        drop(stmt);
+        rows.sort();
+        assert_eq!(
+            rows,
+            [
+                ("female:big_breasts".to_string(), "ehentai".to_string()),
+                ("typed by hand".to_string(), String::new()),
+            ],
+            "provenance is recorded where it is known, and nowhere else"
+        );
+
+        // The spelling alone: the tag is on the item, and `tag:"…"` is the exact
+        // arm of the grammar, so it finds it whatever site spells it.
+        let plan = goon_core::query::parse(
+            r#"tag:"female:big_breasts""#,
+            goon_core::query::Scope::Media,
+        )
+        .unwrap()
+        .plan();
+        assert_eq!(
+            goon_core::db::search_item_ids(&conn, goon_core::query::Scope::Media, &plan).unwrap(),
+            ["w1"]
+        );
+
+        // And the half that keeps the two provenances honest: `tags.site` records
+        // who **spells the name**, not where the item came from. `source:` reads
+        // the `sources` ledger, and this item has no row there yet, so the pair
+        // matches nothing — a recorded tag site must not fabricate an item source
+        // (invariant 21, and the reason the column has a site vocabulary at all).
+        let plan = goon_core::query::parse(
+            r#"source:ehentai tag:"female:big_breasts""#,
+            goon_core::query::Scope::Media,
+        )
+        .unwrap()
+        .plan();
+        assert_eq!(
+            goon_core::db::search_item_ids(&conn, goon_core::query::Scope::Media, &plan).unwrap(),
+            Vec::<String>::new(),
+            "the tag's site is not the item's provenance"
+        );
+
+        // Clip the gallery from e-hentai and the same query finds it: the tag's
+        // recorded site and the item's ledger are now two records of one fact,
+        // which is what makes `source:ehentai tag:"…"` a useful pair to type.
+        conn.execute(
+            "INSERT INTO sources (item_id, site, url, source_id) \
+             VALUES ('w1','ehentai','https://e-hentai.org/g/9999999/0123456789abcdef/','9999999')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(
+            goon_core::db::search_item_ids(&conn, goon_core::query::Scope::Media, &plan).unwrap(),
+            ["w1"]
+        );
     }
 }
