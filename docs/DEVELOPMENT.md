@@ -857,6 +857,22 @@ tools/
     format ever changes — ISO dates, milliseconds, anything — the order, the cursor
     and the date predicates change in the **same** commit, together with that test.
 
+32. **Test data uses identifiers that are obviously fake, never a link that could be
+    real** (#76 review). A fixture written as an e-hentai gallery URL with a
+    six-digit id cannot be told apart from a link that came out of somebody’s
+    library, and in a public repo that stops being recoverable once it is pushed: a
+    force-push moves a ref, it does not un-publish a fact. So a fixture URL carries
+    placeholder-shaped identifiers by construction — `…/g/9999999/0123456789abcdef/`,
+    `…/g/1234/abcd/`, `example.org`, `x.to`, or a template (`{id}`, `<gid>`) — and the
+    same rule covers ids, file names and hashes (`9999999`, 32 zeros, never a value
+    copied from a real clip). `tools/fixture-url-audit.js` enforces the URL half on
+    the lines a range adds — a change owns its own diff, not the repo’s history —
+    prints its coverage, and exits non-zero on a finding. Production host constants
+    and `{id}` templates pass on shape; a flagged line that is legitimate carries a
+    `fixture-url-ok: why` note that the tool echoes, so a suppression stays visible.
+    Fixtures inherited from `main` that predate the rule are a separate cleanup, not
+    something a feature branch rewrites under someone else’s commits.
+
 ## 5. Testing
 
 ```powershell
@@ -1128,7 +1144,10 @@ Set-Location apps\desktop
   `npm run build` warning-free (svelte a11y warnings count).
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
-  `target/`, `node_modules/`, build logs under `tools/*.log`.
+  `target/`, `node_modules/`, build logs under `tools/*.log`. Shape counts too: a
+  fixture URL or id must be self-evidently fake (invariant 32), and
+  `node tools\fixture-url-audit.js` checks that on the lines a branch adds, printing
+  how many commits and added lines it read.
 
 ## 8. Portable release build
 

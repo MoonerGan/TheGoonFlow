@@ -910,3 +910,37 @@ was 123, desktop **105** + 8 ignored was 104, vault 4, locator 2) in
 `tools/cargo-test-s5-count.log`; `cargo clippy --workspace --all-targets` 0 findings
 (`tools/cargo-clippy-s5-count.log`); `rustfmt --check` clean on the two Rust files touched,
 with the four hand-formatted siblings restored.
+
+---
+
+## Branch rewrite — fixture URLs that could not be proved synthetic (2026-11-27)
+
+**What was found.** The review’s leak scan flagged a gallery URL in stage S4’s test
+data: an e-hentai gallery link with a six-digit id in `src-tauri/src/lib.rs`
+(`1ca918f`, `sources` fixture). It was typed as a fixture in a stage that only ever
+opened in-memory SQLite, and that id appears nowhere on `main` — but "typed as a
+fixture" is not proof, and a well-formed gallery link is exactly what the audit has to
+refuse, because it is indistinguishable from a link out of a real library. The rule is
+that a fixture must be **self-evidently** fake.
+
+A second one, mine rather than the reviewer’s, is the same shape: a gelbooru CDN link
+in `crates/goon-core/src/db.rs` (`d3f59c4`). Its filename and post id are the
+repo’s long-standing synthetic tokens — the same filename is on `main` in the 4cdn
+ingest fixtures — but the path shape makes it a plausible clip link, so it went too.
+
+**What was done.** `git rebase -i d140602` with `edit` on `d3f59c4` and `1ca918f`, one
+line changed in each, then `git push --force-with-lease`. Old tip `b0a6cfc`; rewritten
+range `5a4402c`…`341d556`, which is the parent of this entry. `git diff b0a6cfc
+341d556` is exactly two lines, and `git grep` over every tree in `origin/main..HEAD`
+(12 trees) finds no trace of either string. `main` was not touched and nothing merged
+was rewritten. The replacements are `…/g/9999999/0123456789abcdef/` and
+`…/images/00/00000000000000000000000000000000.jpg?9999999`; no assertion referenced
+either value, so the suites move unchanged (235 passed / 0 failed / 8 ignored).
+
+**The guard.** `tools/fixture-url-audit.js` (TESTING item 46, DEVELOPMENT invariant 32)
+audits the added lines of a branch range and prints its coverage. It exits 1 on the
+history it was written for — 2 violations, naming both commits — and 0 on the rewritten
+branch, so the check is known to be able to fail. Honest limit, recorded because it is
+the interesting part: force-pushing removes the ref, not the object. The old tip may
+stay reachable on the host until garbage-collected, so the string is treated as
+disclosed and reported to the board, not as retracted.

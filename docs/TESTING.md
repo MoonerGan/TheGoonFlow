@@ -824,8 +824,10 @@ the board's *In review* column is the current list.
          runs both forms over a batch stamped in one second and shows the row-value read
          dropping `q_small` — and the probe cannot show that on its own, because its 100k
          fixture stamps every row with a different second, so all three page reads agree
-         there and the tie only exists in a fixture built like this test. Made correct by ordering both halves `DESC`, it wins nothing
-         measurable (page 214 of `big_breasts`: 89/94 ms by row-value, 90/91 ms by the shipping cursor). `db::AFTER_CURSOR`
+         there and the tie only exists in a fixture built like this test. Made correct by
+         ordering both halves `DESC`, it wins nothing measurable (page 214 of
+         `big_breasts`: 89/94 ms by row-value, 90/91 ms by the shipping cursor).
+         `db::AFTER_CURSOR` stays.
          stays.
        - **The count is the part a keystroke must not pay, and now it can be skipped.**
          `db::page_items` is the page without the paired total, and `search_items` takes
@@ -833,10 +835,9 @@ the board's *In review* column is the current list.
 
          | query | page alone | count alone | page + total |
          | --- | --- | --- | --- |
-         | `size>100mb type:image` (17 018 matches) | 3/3 ms | 151/152 ms | 155/155 ms | |
-         | `width<400 type:image -has:thumb` (646) | 80/80 ms | 149/150 ms | 227/229 ms | |
-         | `big_breasts` (64 092) | 196/197 ms | 86/86 ms | 282/283 ms | |
-
+         | `size>100mb type:image` (17 018 matches) | 3/3 ms | 151/152 ms | 155/155 ms |
+         | `width<400 type:image -has:thumb` (646) | 80/80 ms | 149/150 ms | 227/229 ms |
+         | `big_breasts` (64 092) | 196/197 ms | 86/86 ms | 282/283 ms |
          `a_page_without_the_count_says_it_has_no_number` pins that the page is identical
          either way and that an uncounted page carries no number, and
          `a_page_without_a_count_crosses_as_null_and_never_as_zero` (desktop) pins the
@@ -865,6 +866,35 @@ the board's *In review* column is the current list.
          `'999999999'` above `'1000000000'`, a number ranks it below), so the test can
          actually fail rather than restate a comment.
 
+    46. **Fixture hygiene: no test data may name a link that could be real** (#76
+       review, 2026-11-27; DEVELOPMENT invariant 32).
+       `node tools\fixture-url-audit.js` walks the added lines of every commit in
+       `origin/main..HEAD`, takes every URL that carries a path or a query, matches it
+       against the site vocabulary this app speaks, and fails when its identifiers are
+       not placeholder-shaped. It prints its coverage
+       (`N commit(s), M added line(s), K site URL(s) checked, J violation(s)`) and
+       exits non-zero, so a bare `CLEAN` cannot be quoted without its extent
+       (invariant 29). The proof that it can fail was run against the history that
+       motivated it: over the pre-rewrite branch it reports
+       `11 commit(s), 10 110 added line(s), 3 site URL(s) checked, 2 violation(s)`
+       with exit 1, naming a six-digit e-hentai gallery link in
+       `apps/desktop/src-tauri/src/lib.rs` (`1ca918f`) and a gelbooru CDN link in
+       `crates/goon-core/src/db.rs` (`d3f59c4`). Over the rewritten branch it prints
+       `0 violation(s)`. The two strings themselves are not written into any doc or
+       tool, because writing them back would re-add them to the history.
+       - The fixtures now read `…/g/9999999/0123456789abcdef/` and
+         `…/images/00/00000000000000000000000000000000.jpg?9999999`. Neither value was
+         ever asserted — the S1 test only cares that the URL ends in `.jpg`, the S4
+         test only that the `sources` row exists — so behaviour is unchanged:
+         `cargo test --workspace` 235 passed / 0 failed / 8 ignored on the rewritten tip
+         (`tools/cargo-test-76-rewrite.log`), clippy 0 findings after
+         `cargo clean -p goon-core -p goonflow-desktop`
+         (`tools/cargo-clippy-76-rewrite.log`).
+       - What the audit cannot do is make a pushed object unrecoverable. The old
+         commits are unreachable from the branch, but the host may still reach them
+         (its own reflog, cached views), so the finding is reported to the board and
+         treated as disclosed, not undone.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI
@@ -877,6 +907,11 @@ the board's *In review* column is the current list.
   `goonflow-vault/`, `*.db` / `*.db-wal` / `*.db-shm`, `*-journal`, `*.log`, `tools/*.log`
   and `tools/last-build.lock`. Check with `git check-ignore -v <path>` rather than trusting
   this sentence, and never print cookie or passphrase values into logs or issue comments.
+- Fake is a shape, not an intention. A fixture URL or id must be obviously
+  placeholder-shaped (DEVELOPMENT invariant 32); `node tools\fixture-url-audit.js`
+  checks the added lines of a branch range and prints what it read. When a leak is
+  found after a push, the fix is a history rewrite on the branch plus a report to the
+  board, never a follow-up commit that leaves the string in history.
 - `gh` needs `C:\Program Files\Git\cmd` on PATH; `npx` only works through
   `cmd /c` (the `.ps1` shim will not load); `cargo` only after `tools\dev-env.ps1`.
 - A finished increment means: tests green → commit → push → comment on the issue
