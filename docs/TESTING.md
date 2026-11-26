@@ -384,9 +384,9 @@ the board's *In review* column is the current list.
    37. **A linked video file can be stored in the vault** (#64, 2026-11-25: the
       report was `http 403 Forbidden` on a rule34 `.mp4` link that plays in a
       browser). Press *Store copy in vault* on an item whose source is a direct
-      file link: it must store and report its size`or, if the host really
+      file link: it must store and report its size, or, if the host really
       refuses, the message must name the host that answered, the status, and where
-      a redirect took the request`never a bare `http 403 Forbidden`. To check the
+      a redirect took the request — never a bare `http 403 Forbidden`. To check the
       wording without a real download, point the source at a local stub that
       answers `200` with `text/html` (rule34's real answer to a wrong referer is
       exactly that, behind a `302` to `hotlink.php`): the store must refuse,
@@ -394,6 +394,16 @@ the board's *In review* column is the current list.
       holding the CAPTCHA. The replay lives in `http::live_probe` (ignored, live):
       `store_video replay, referer https://rule34 -> 403` while the URL's own origin
       and `https://rule34.xxx` both give `200 video/mp4 59 083 373 B`.
+     38. **A picture is sized against the right ceiling** (#72, 2026-11-25 report:
+        ordinary booru gifs of 19 185 473 and 18 910 422 bytes were refused outright,
+        leaving the item with no bytes *and* no tile). Clip a booru post whose file is
+        a big gif: it must store, and the tile must exist. The regression is asserted
+        in `sniffed_bytes_not_the_url_decide_what_is_stored`: the same 19 MB gif is
+        accepted as the artwork (`media::MAX_MEDIA_BYTES`, 96 MB) and still refused as
+        **cover art** (`MAX_COVER_BYTES`, 16 MB). A refusal must name the size, the
+        limit and what to do instead (`is 18 MB, over this app's 16 MB limit for cover
+        art`, `… save the file and add it with + Images`), never a raw byte count.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

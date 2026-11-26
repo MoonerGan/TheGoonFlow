@@ -272,6 +272,19 @@ pub fn make_thumbnail_from_rgba(rgba: &[u8], width: u32, height: u32) -> Option<
 
 // ---------- vault-stored video (#16, strictly opt-in) ----------
 
+/// Ceiling for an **image body** pulled into the vault: booru originals, direct
+/// file links, e-hentai page art, a local file the user pointed at (#72,
+/// 2026-11-25). Measured in that round: a 19 185 473 B rule34 gif and an
+/// 18 910 422 B hypnohub gif were refused outright because the only ceiling in
+/// reach was the 16 MiB **cover-art** budget, so an ordinary animated file left
+/// the library with no bytes *and* no tile.
+///
+/// This is deliberately the same number as `INLINE_MAX` in
+/// `apps/desktop/src-tauri/src/lib.rs`: storing more than the delivery path can
+/// hand to the webview would create a row the viewer cannot show. When #64 adds
+/// range delivery, both numbers move together.
+pub const MAX_MEDIA_BYTES: usize = 96 * 1024 * 1024;
+
 /// Extension → video mime; None for non-video extensions. Only for file names we
 /// have no bytes for — anything fetched goes through [`detect_video_mime`].
 pub fn video_mime(ext: &str) -> Option<&'static str> {

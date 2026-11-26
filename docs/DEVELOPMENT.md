@@ -535,6 +535,21 @@ tools/
 `http {}`); and a `200` whose `Content-Type` is HTML is a web page, not a
     file, so it is refused instead of being stored as a video row.
 
+26. **Two size ceilings, and the message always says which one it applied
+    (#72, measured 2026-11-25).** There are two different budgets and they were
+    conflated: `MAX_COVER_BYTES` (16 MiB) is the budget for **game cover art**
+    scraped off a post page, and `media::MAX_MEDIA_BYTES` (96 MiB, deliberately
+    equal to `INLINE_MAX` in `apps/desktop/src-tauri/src/lib.rs`) is the budget for
+    **the artwork itself** - a booru original, a direct file link, a gallery page,
+    a file the user pointed at. Clipping a rule34/hypnohub gif of 19 185 473 bytes
+    hit the cover budget and was refused, so the item kept no bytes *and* no tile.
+    Anything that stores media bytes takes the ceiling as an argument, chosen by
+    what the bytes **are**, and the refusal states the size, the limit and the way
+    out (`+ Images` has no such ceiling) in MB, never a bare byte count. A ceiling
+    may never silently truncate. If #64's range delivery changes what the delivery
+    path can carry, `INLINE_MAX` and `MAX_MEDIA_BYTES` move together — storing more
+    than the viewer can be shown is not allowed.
+
 ## 5. Testing
 
 ```powershell

@@ -504,26 +504,42 @@ async fn get_bytes(
     Ok(bytes)
 }
 
-/// Ceiling for cover art pulled into the vault. An oversized body is refused
-/// with a note — never silently truncated, never stored as a thumbnail.
+/// Ceiling for **game cover art** pulled into the vault. An oversized body is
+/// refused with a note — never silently truncated, never stored as a thumbnail.
+/// This is *not* the ceiling for the artwork itself: that is
+/// `media::MAX_MEDIA_BYTES`, and conflating the two is #72 (a 19 MB booru gif
+/// was refused by a budget sized for a box image).
 const MAX_COVER_BYTES: usize = 16 * 1024 * 1024;
+
+/// Human "N MB" for a byte count, in the words the user reads.
+fn human_mib(bytes: usize) -> String {
+    format!("{}", (bytes as f64 / (1024.0 * 1024.0)).round() as u64)
+}
 
 /// Decide what to keep from fetched bytes by **sniffing them**, never by the URL
 /// suffix (#46/#50: f95zone serves `image/avif` from a URL ending `.jpg`, and a
 /// blocked hotlink request can answer with an HTML page at status 200). Sets
 /// `meta.note` when the bytes are not art we can keep. Returns the image mime.
-fn store_bytes_in(meta: &mut Meta, bytes: Vec<u8>) -> Option<&'static str> {
+///
+/// `max` is chosen by the caller because it names **what the bytes are**: cover
+/// art from a post page gets [`MAX_COVER_BYTES`]; the artwork a clip was asked
+/// for (a booru original, a direct file link, a gallery page, a file the user
+/// pointed at) gets `media::MAX_MEDIA_BYTES` (#72). A refusal always says the
+/// size, the limit and what to do instead — never just a byte count.
+fn store_bytes_in(meta: &mut Meta, bytes: Vec<u8>, max: usize) -> Option<&'static str> {
     match media::sniff_media(&bytes) {
-        media::Sniffed::Image(mime) if bytes.len() <= MAX_COVER_BYTES => {
+        media::Sniffed::Image(mime) if bytes.len() <= max => {
             meta.thumb_bytes = Some(bytes.clone());
             meta.store_bytes = Some(bytes);
             Some(mime)
         }
         media::Sniffed::Image(mime) => {
             meta.note = Some(format!(
-                "the image came back as {mime} but is {} bytes — too large to store; \
-                 the link is kept",
-                bytes.len()
+                "the image came back as {mime} and is {} MB, over this app's {} MB limit \
+                 for stored pictures — the link is kept. Save the file and add it with \
+                 + Images to keep a bigger one; nothing was truncated.",
+                human_mib(bytes.len()),
+                human_mib(max),
             ));
             None
         }
@@ -694,7 +710,9 @@ async fn post_from_json(
     };
     // #50: image vs video is decided by the bytes we got, not by the file URL's
     // extension (and a CDN that dislikes us answers HTML at 200 — that is not art).
-    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+    // #72: a post's own file is the artwork, not cover art, so it gets the media
+    // ceiling rather than the box-art one.
+    if store_bytes_in(&mut m, bytes, media::MAX_MEDIA_BYTES).is_none() && m.note.is_none() {
         m.note = Some(if is_video {
             "video post — kept as link, not stored in vault".into()
         } else {
@@ -738,8 +756,9 @@ async fn e621_post(client: &reqwest::Client, id: Option<&str>) -> Result<Meta, S
         tags,
         ..Default::default()
     };
-    // #50: bytes decide, not the URL extension
-    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+    // #50: bytes decide, not the URL extension. #72: a post's own file is the
+    // artwork, so it is measured against the media ceiling, not the cover one.
+    if store_bytes_in(&mut m, bytes, media::MAX_MEDIA_BYTES).is_none() && m.note.is_none() {
         m.note = Some(if is_video {
             "video post — kept as link, not stored in vault".into()
         } else {
@@ -1138,7 +1157,7 @@ async fn eh_gallery(
             Ok((bytes, show)) => {
                 // `store_bytes_in` writes its own reason when the bytes are not a
                 // keepable picture, so only the success path adds a note here.
-                if let Some(mime) = store_bytes_in(&mut m, bytes) {
+                if let Some(mime) = store_bytes_in(&mut m, bytes, media::MAX_MEDIA_BYTES) {
                     let page = show
                         .page
                         .map(|p| format!("page {p}"))
@@ -1571,7 +1590,11 @@ fn keep_f95_cover(m: &mut Meta, bytes: Vec<u8>, found: usize) -> Result<(), Stri
         media::Sniffed::Unknown => return Err("was not a recognizable image".into()),
     };
     if bytes.len() > MAX_COVER_BYTES {
-        return Err(format!("is {} bytes — too big for a cover", bytes.len()));
+        return Err(format!(
+            "is {} MB, over this app's {} MB limit for cover art",
+            human_mib(bytes.len()),
+            human_mib(MAX_COVER_BYTES)
+        ));
     }
     m.thumb_bytes = Some(bytes.clone());
     m.store_bytes = Some(bytes);
@@ -1615,20 +1638,22 @@ pub struct StorePictureReport {
 
 /// May these bytes become a stored picture? Decided by **sniffing**, never by the
 /// URL suffix (#46: f95zone serves `image/avif` from a URL ending `.jpg`, and a
-/// blocked hotlink answers with an HTML page at status 200), under the same
-/// ceiling a cover gets. Split out of [`store_picture`] so the rule is testable
-/// without a network.
+/// blocked hotlink answers with an HTML page at status 200). #72: the size limit
+/// is the **media** ceiling, not the cover ceiling — the #53 button stores the
+/// artwork the user picked, not a box image. Split out of [`store_picture`]
+/// so the rule is testable without a network.
 fn storable_picture(bytes: &[u8]) -> Result<&'static str, String> {
     let mime = match media::sniff_media(bytes) {
         media::Sniffed::Image(mime) => mime,
         media::Sniffed::Video(mime) => return Err(format!("that link is {mime}, not a picture")),
         media::Sniffed::Unknown => return Err("was not a recognizable image".into()),
     };
-    if bytes.len() > MAX_COVER_BYTES {
+    if bytes.len() > media::MAX_MEDIA_BYTES {
         return Err(format!(
-            "is {} bytes, over the {} MB picture ceiling",
-            bytes.len(),
-            MAX_COVER_BYTES / (1024 * 1024)
+            "is {} MB, over this app's {} MB limit for stored pictures — save the \
+             file and add it with + Images, which has no such ceiling",
+            human_mib(bytes.len()),
+            human_mib(media::MAX_MEDIA_BYTES)
         ));
     }
     Ok(mime)
@@ -1810,7 +1835,7 @@ async fn direct_media(
     // and never handed to the thumbnailer, and the note says what happened.
     let size = bytes.len();
     let mut meta = Meta::default();
-    let Some(mime) = store_bytes_in(&mut meta, bytes) else {
+    let Some(mime) = store_bytes_in(&mut meta, bytes, media::MAX_MEDIA_BYTES) else {
         if meta.note.is_none() {
             meta.note = Some("direct file link — the host's bytes were not storable art".into());
         }
@@ -1990,7 +2015,8 @@ pub fn local_file(url: &str) -> Result<Meta, String> {
     };
     // #50: even for a file the user pointed at, the type we store is the type the
     // bytes have — a `.png` that is really an AVI stays a link, not a broken row.
-    if store_bytes_in(&mut m, bytes).is_none() && m.note.is_none() {
+    // A file the user pointed at with their own hand is not "cover art" either.
+    if store_bytes_in(&mut m, bytes, media::MAX_MEDIA_BYTES).is_none() && m.note.is_none() {
         m.note = Some("the file's bytes were not a recognizable image — kept as a link".into());
     }
     Ok(m)
@@ -3431,7 +3457,10 @@ mod tests {
         avif.extend_from_slice(b"ftypavif");
         avif.extend_from_slice(&[7u8; 40]);
         let mut m = Meta::default();
-        assert_eq!(store_bytes_in(&mut m, avif.clone()), Some("image/avif"));
+        assert_eq!(
+            store_bytes_in(&mut m, avif.clone(), media::MAX_MEDIA_BYTES),
+            Some("image/avif")
+        );
         assert_eq!(m.store_bytes.as_deref(), Some(avif.as_slice()));
         assert!(m.thumb_bytes.is_some());
         assert!(m.note.is_none());
@@ -3441,7 +3470,8 @@ mod tests {
         assert_eq!(
             store_bytes_in(
                 &mut blocked,
-                b"<html><body>Access denied</body></html>".to_vec()
+                b"<html><body>Access denied</body></html>".to_vec(),
+                media::MAX_MEDIA_BYTES,
             ),
             None
         );
@@ -3453,7 +3483,7 @@ mod tests {
         mp4.extend_from_slice(b"ftypisom");
         mp4.extend_from_slice(&[9u8; 24]);
         let mut mov = Meta::default();
-        assert_eq!(store_bytes_in(&mut mov, mp4), None);
+        assert_eq!(store_bytes_in(&mut mov, mp4, media::MAX_MEDIA_BYTES), None);
         assert!(mov.note.as_deref().unwrap().contains("video/mp4"));
 
         // Two kinds of "no thumbnail", and the note must tell them apart (#52).
@@ -3461,7 +3491,7 @@ mod tests {
         // a failed decode, not an unsupported format: the wording may not claim
         // the build has no AVIF decoder, because dav1d is linked in.
         let mut avif_meta = Meta::default();
-        store_bytes_in(&mut avif_meta, avif.clone());
+        store_bytes_in(&mut avif_meta, avif.clone(), media::MAX_MEDIA_BYTES);
         assert!(media::make_thumbnail(avif_meta.thumb_bytes.as_ref().unwrap()).is_none());
         let note = undecodable_note(&avif_meta, false).expect("must stay visible");
         assert!(note.contains("image/avif"), "{note}");
@@ -3474,7 +3504,10 @@ mod tests {
         heif.extend_from_slice(b"ftypheic");
         heif.extend_from_slice(&[7u8; 24]);
         let mut heif_meta = Meta::default();
-        assert_eq!(store_bytes_in(&mut heif_meta, heif), Some("image/heif"));
+        assert_eq!(
+            store_bytes_in(&mut heif_meta, heif, media::MAX_MEDIA_BYTES),
+            Some("image/heif")
+        );
         assert!(!media::thumbnailable("image/heif"));
         let note = undecodable_note(&heif_meta, false).expect("must stay visible");
         assert!(note.contains("cannot decode"), "{note}");
@@ -3563,10 +3596,31 @@ mod tests {
         let why = storable_picture(&mp4).expect_err("a video link is not a picture");
         assert!(why.contains("video/mp4"), "{why}");
 
+        // #72: a picked picture is measured against the media ceiling, and the
+        // refusal names the size and the limit in MB, not a raw byte count.
         let mut big = b"\x89PNG\r\n\x1a\n".to_vec();
-        big.resize(MAX_COVER_BYTES + 1, b'x');
-        let why = storable_picture(&big).expect_err("the ceiling stays the cover ceiling");
-        assert!(why.contains("picture ceiling"), "{why}");
+        big.resize(media::MAX_MEDIA_BYTES + 1, b'x');
+        let why = storable_picture(&big).expect_err("the media ceiling applies here");
+        assert!(why.contains("MB"), "{why}");
+        assert!(why.contains("+ Images"), "{why}");
+
+        // ...and a booru gif of the size that started #72 (19 185 473 bytes)
+        // is now storable, where the 16 MiB cover ceiling refused it.
+        let mut gif = b"GIF89a".to_vec();
+        gif.resize(19_185_473, b'x');
+        let mut gm = Meta::default();
+        assert_eq!(
+            store_bytes_in(&mut gm, gif.clone(), media::MAX_MEDIA_BYTES),
+            Some("image/gif"),
+            "a 19 MB booru gif must be storable: that was the bug"
+        );
+        // The same bytes are still refused as **cover art**, which is what the
+        // 16 MiB budget is actually for.
+        let mut cm = Meta::default();
+        assert_eq!(store_bytes_in(&mut cm, gif, MAX_COVER_BYTES), None);
+        let note = cm.note.unwrap();
+        assert!(note.contains("18 MB") && note.contains("16 MB"), "{note}");
+        assert!(note.contains("+ Images"), "{note}");
     }
 
     /// #53: an item with no source row still gets a named polite lane - the host
