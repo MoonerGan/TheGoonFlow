@@ -446,8 +446,24 @@ async function main() {
           dumps.push({ size: size.label, label, opened, notes: [opened.err] });
           continue;
         }
-        // what the user actually looks at: the stage a moment after the frame
-        // lands, once the preview-to-full swap and any metadata have settled
+        // What the user actually looks at: the stage a moment after the frame
+        // lands. For a stored video this is where the honesty of the readout is
+        // decided - the pixels of a clip come from `loadedmetadata`, and the
+        // metadata of a 78 MB data: URL is not available instantly (measured:
+        // 59 MB stored -> data: URL ~78 MB, metadata live only after ~4-6 s in
+        // a 1380x860 window, instantly in the bigger one). So poll for it and
+        // print how long it took: a "?" readout while waiting is honest, an
+        // asserted failure at an arbitrary 1.5 s is not.
+        let metaMs = 0;
+        const metaPoll = `(async () => { const v = document.querySelector('.viewer-stage video'); return v ? { w: v.videoWidth, ready: v.readyState } : { w: -1, ready: -1 }; })()`;
+        for (let i = 0; i < 40; i += 1) {
+          const v = await ev(metaPoll);
+          if (v.w > 0 || v.ready >= 1) break;
+          await new Promise((r) => setTimeout(r, 500));
+          metaMs += 500;
+        }
+        const meta = await ev(metaPoll);
+        console.log(`  metadata: video ${meta.w > 0 ? meta.w + 'px known' : 'still unknown'} readyState=${meta.ready} after ${metaMs} ms on stage`);
         await new Promise((r) => setTimeout(r, 1500));
         const settled = await ev(withMeasure('measure()'));
         // the stage's own sentence, for the case where there is no picture at all
