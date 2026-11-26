@@ -3,6 +3,7 @@
 pub mod db;
 pub mod media;
 pub mod model;
+pub mod query;
 
 /// Storage schema version, tracked in `meta.schema_version`.
 pub const SCHEMA_VERSION: i64 = 10;

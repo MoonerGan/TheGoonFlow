@@ -449,6 +449,58 @@ the board's *In review* column is the current list.
       it takes to read the library once (measured **185 ms** for 1 000 rows at
       200 KB, ~1 GB/s), so it runs as a job with progress, never inside unlock.
 
+   40. **The query box is understood before it is ever run** (#76 stage S2). Each
+      worked example in `docs/plan/76-plan.md` §4 parses to the AST the plan
+      promises, and the same set **prepares and binds as real SQL against the
+      real v10 schema**, so stage S3 has nothing left to discover. Pinned by the
+      `goon-core::query` tests, measured 2026-11-26 with `cargo test --workspace`
+      = **194 passed, 0 failed, 8 ignored** (goon-core **87**, desktop **101** + 8
+      ignored, vault 4, locator 2):
+      - one test per worked example, all **14** (`example_01…example_14`), plus
+        `every_placeholder_has_exactly_one_parameter` over **22** queries (the `?`
+        count equals the parameter count, and the parenthesis depth returns to
+        **0**) and `every_example_is_sql_the_schema_can_run` (the same 22
+        prepared, bound and stepped against `init_schema`'s v10 tables in
+        memory). The depth check earned its keep immediately: `type:video`'s
+        extension arm was one parenthesis short, which SQLite would have refused
+        to prepare and no AST test would have caught.
+      - the colon stays overloaded on purpose: `female:big_breasts`, `foo:bar` and
+        `other:variant_set` are literal tags, while `ext:banana` is a **predicate**
+        whatever the value (`ext_is_reserved_whatever_the_value_is` — reservation
+        must not depend on what a vault happens to contain), and
+        `tag:"ext:something"` / `tag:"type:video"` / `tag:size` are the escape
+        hatch back to a literal name that contains a keyword.
+      - `a_date_is_compared_as_a_number_never_as_text` pins the trap that would
+        otherwise live forever: SQLite reports `'999999999' > '1000000000'` as
+        **1** and `CAST('999999999' AS INTEGER) > CAST('1000000000' AS INTEGER)`
+        as **0**, and every `added:`/`updated:` plan emits
+        `CAST(items.created_at AS INTEGER)` with only `Value::Int` bound. A bare
+        `added:2026-11-01` is the **UTC day** `[1793491200, 1793577600)`, not one
+        second; `added:>=2026-11-01` binds the day's start; `added:>2026-11-01`
+        binds the next day's start; `2026-02-29`, `2026-04-31` and
+        `2026-11-01T25:60` are refused rather than quietly normalized.
+      - facts never measure a tile: `a_fact_never_measures_a_thumbnail` demands
+        `m.kind IN ('full','video')` in every `size>`/`width>`/`height>`/`ratio:`
+        fragment, and only `has:thumb` may look at the tile — the lie the code
+        map's review note 1 warned about.
+      - an error is a value, never a crash or a guess: `size>x` answers with
+        `size>100mb`, `length>1:70` explains that minutes and seconds are 0-59,
+        a lone `-` says it negates something, `"summer witch` says the quote
+        never closes, `tag>big_breasts` says the keyword matches by name, and
+        `status:wishlist` is refused in the **media** scope with a message naming
+        Games — D14 enforced in the grammar, not only in the rails.
+      - one vocabulary, not two: `ingest::VIDEO_EXTS` **is**
+        `goon_core::query::VIDEO_EXTS`
+        (`the_video_extension_list_is_the_one_the_grammar_reads`), so `type:video`
+        cannot miss a file the importer called a video.
+
+      What it costs, measured 2026-11-26 with a throwaway harness over 20 000
+      rounds (the per-keystroke path stage S5 will use): parse+plan is **0.0032 ms**
+      for one term, **0.0096 ms** for three, **0.0199 ms** for seven; typing the
+      longest worked example parses every one of its **77** prefixes for **0.62 ms**
+      in total. The parse is noise next to the SQL it feeds, so the suggester can
+      re-plan on every debounce tick without a cache.
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI

@@ -136,7 +136,11 @@ fn registrable_domain(host: &str) -> String {
 // ---------- identify ----------
 
 const IMAGE_EXTS: &[&str] = &["png", "jpg", "jpeg", "webp", "gif", "bmp", "avif"];
-const VIDEO_EXTS: &[&str] = &["mp4", "webm", "mkv", "mov", "avi"];
+/// One list, not two: #76's `type:video` predicate reads the same vocabulary
+/// from `goon_core::query::VIDEO_EXTS`, and a private copy here would drift from
+/// the grammar the query box promises. Pinned by
+/// `the_video_extension_list_is_the_one_the_grammar_reads`.
+const VIDEO_EXTS: &[&str] = goon_core::query::VIDEO_EXTS;
 
 pub fn media_ext(path: &str) -> Option<&'static str> {
     let last = path.rsplit('/').next()?;
@@ -2985,6 +2989,22 @@ pub async fn find_matches(state: &crate::Core, job: &JobHandle) -> Result<MatchR
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #76: the query grammar's `type:video` and this importer's idea of a video
+    /// have to be the same list, or `type:video` misses what the app imported.
+    #[test]
+    fn the_video_extension_list_is_the_one_the_grammar_reads() {
+        assert_eq!(VIDEO_EXTS, goon_core::query::VIDEO_EXTS);
+        for ext in ["mp4", "webm", "mkv", "mov", "avi"] {
+            assert_eq!(
+                media_ext(&format!("https://cdn.example/a/b/clip.{ext}?s=1")),
+                Some("video"),
+                "{ext} must count as video"
+            );
+        }
+        assert_eq!(media_ext("https://cdn.example/a/b/art.PNG"), Some("image"));
+        assert_eq!(media_ext("https://example.com/g/1234/"), None);
+    }
 
     #[test]
     fn file_urls_resolve_as_media() {

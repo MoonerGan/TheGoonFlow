@@ -311,6 +311,25 @@ tools/
   ones and stops at 12 rows, so one shared title cannot produce N·(N-1)/2 noise.
   If you really do have more than a dozen games under one title, the rest are
   paired by hand from the item editor.
+- **The query box's grammar** is `goon-core/src/query.rs` (#76 stage S2): a pure
+  parser (`parse(text, Scope::Media|Games)` → `Query` of `Term`s, each keeping the
+  exact text it came from, which is what the chip row shows) plus a planner
+  (`Query::plan()` → `Plan { sql, params }` — one `WHERE` body of AND-ed
+  fragments with `?` marks and the values for them, never a string-built query).
+  Keywords are a **closed, code-owned set** (`KEYWORDS`), reserved whatever the
+  value is, because that is the anti-import guarantee: a tag whose name really
+  starts with a keyword is reached with `tag:"ext:something"`. Closed value sets
+  are `type:` (video/image/gif), `has:` (thumb/tags), `stored:` (vault/disk/link)
+  and `status:` (the five `model::Status` stages); `source:` and `ext:` take any
+  slug, since their vocabulary is the vault's (invariant 10). Three things the
+  SQL has to get right: timestamps are TEXT epoch seconds so date predicates
+  compare `CAST(created_at AS INTEGER)` against an epoch the **parser** computed
+  (`'999999999' > '1000000000'` is true as text); a bare `added:2026-11-01` is the
+  UTC day, not one second; and every fact predicate reads `media.kind IN
+  ('full','video')`, never a `thumb` row, so a 360 px tile is never what
+  `width>1200` measured (invariant 27). `ingest::VIDEO_EXTS` is this module's
+  `VIDEO_EXTS` — one list, pinned by a test, or `type:video` would miss what the
+  importer accepted.
 - **Migrations**: `init_schema` seeds at v1 then runs ordered, idempotent
   `if v < N` steps up to `SCHEMA_VERSION` (v10). v3 renames hosts-labeled sites
   from early field reports (`i` → `4chan`, `wimg` → `rule34`, `booru` →
@@ -601,6 +620,19 @@ tools/
     carry the
     facts it already had — a row may never become un-probed. And the UI says
     *not measured* (`?`), never a pixel size, for the same reason (#65).
+
+28. **The query string is session state, never persisted (#76).** What the user
+    types into the filter box lives in the view's state for the length of the
+    session and nowhere else: `goon-core::query` holds no connection and writes
+    nothing, the `Plan` is rebuilt per request, and `endVaultSession` drops the
+    view with the vault. It must not gain a home — not in `meta`, not in a
+    settings file, not as a "last search" or a default filter — because a query
+    is what the user was looking for while the vault was decrypted, and plan §5
+    is explicit that nothing decrypted survives a lock. Preset chips are not
+    saved state either: they insert grammar text (`-has:tags`, `stored:disk`)
+    into the box, so what is active stays visible in the query. A real
+    saved-search feature is a separate card with its own storage story, not a
+    one-line addition here.
 
 29. **A check that cannot fail is worse than no check** (found 2026-11-26 while
     reviewing #76). `tools/char-audit.js` read only its file arguments, so

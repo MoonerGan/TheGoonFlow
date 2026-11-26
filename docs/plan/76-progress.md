@@ -174,3 +174,98 @@ unexpected characters) and a byte inventory against `HEAD` (`§x6 —x26→34 �
 ↔x2 ·x3` — nothing lost, 8 em dashes added by the new comments). Temporary
 timing code was removed from the source; the numbers live here and in DEVELOPMENT
 §3 / TESTING item 39.
+
+---
+
+## S2 — the grammar: `goon-core::query` (2026-11-26)
+
+Written against the review's three requirements for this stage.
+
+**What landed.** `crates/goon-core/src/query.rs`, new: tokenizer → AST → SQL
+plan, with no database handle anywhere in the module.
+
+* `parse(text, Scope::Media | Scope::Games) -> Result<Query, ParseError>`. A
+  `Term` keeps the exact text it was typed as, because that is what stage S5's
+  chip row renders and deletes; `ParseError { message, token }` is a value the
+  form shows inline (invariant 24), never a toast and never a guess.
+* `Query::plan() -> Plan { sql, params }` — one `WHERE` body of AND-ed fragments
+  with `?` marks and the parameters produced in the same pass, so a fragment can
+  never drift from its binding (the failure mode of the old `?1 IS NULL OR …`
+  shape, `db.rs`'s list query). S3 joins it with the view's `kind` predicate and
+  binds `Plan::bind()`.
+* **Requirement 1 — `ext:` is always reserved.** Keywords are a closed,
+  code-owned set and reservation never consults a table, so `ext:banana` is a
+  predicate exactly like `ext:gif` (`ext_is_reserved_whatever_the_value_is`).
+  The escape hatch is pinned in both directions: `tag:"ext:something"`,
+  `tag:"type:video"` and `tag:size` reach a literal name that contains (or is) a
+  keyword. Autocomplete note for S5: when a keyword form matches nothing, the
+  suggester may add "no items with `ext:x`; did you mean the tag literally named
+  `ext:x`?" — that is what `Node::ExactTag` exists for.
+* **Requirement 2 — dates are integer comparisons.** The parser converts the
+  typed value itself (`2026-11-01`, `2026-11-01T14:30`, `…:14:30:15`, or a bare
+  epoch) and the plan compares `CAST(items.created_at AS INTEGER)` /
+  `CAST(items.updated_at AS INTEGER)` with only `Value::Int` bound — never a
+  date string. Both spellings parse (`added:` and `added:>=`), and a bare
+  `added:2026-11-01` is the **half-open day** `[1793491200, 1793577600)`, not an
+  equality against a second-resolution stamp. `>`, `<`, `>=`, `<=` are mapped
+  onto that interval so "after that day" means the next day, not 00:00:01 of it.
+  `days_from_civil` is written inline (25 lines) rather than adding chrono to
+  goon-core, and the day boundary is **UTC** — the only clock `now_epoch()`
+  writes — which DEVELOPMENT §3 states instead of promising the user's timezone.
+  The pinned trap: `('999999999' > '1000000000')` is **1**, and the same pair
+  under `CAST` is **0** (`a_date_is_compared_as_a_number_never_as_text`).
+* Fact predicates never read a `thumb` row (code map review note 1): every
+  `size>` / `width>` / `height>` / `ratio:` / `stored:vault` arm says
+  `m.kind IN ('full','video')`, and only `has:thumb` may look at the tile.
+  `ratio` guards `width IS NOT NULL AND height > 0` before dividing, because an
+  unmeasured fact must neither match nor divide (invariant 27).
+* Negation is always SQL — `NOT (items.id IN (…))`, `NOT EXISTS (…)` — so the
+  count, the grid and *Select all* act on the same whole-library set (rulings C).
+* A quoted phrase's LIKE wildcards are escaped (`50%_off` → `%50\%\_off%` with
+  `ESCAPE '\'`): titles in this library are full of `_`, and an unescaped LIKE
+  would read it as a one-character wildcard and match the wrong items.
+* `ingest::VIDEO_EXTS` **is** `goon_core::query::VIDEO_EXTS` now, one list, with
+  `the_video_extension_list_is_the_one_the_grammar_reads` pinning it, so
+  `type:video` cannot miss a file the importer called a video.
+
+**Requirement 3 — #77 stays visible.** `db::set_item_extension_tag` still has no
+production call site; that is what the two stages below owe it. The writers, by
+name:
+
+| stage | call site | what it writes |
+|---|---|---|
+| S4 | `ingest::apply_meta` (`ingest.rs:2359`) — the clip and re-enrich write loop | extension tag from the source url |
+| S4 | `ingest::local_file` (`ingest.rs:1996`) and the direct-media path (`ingest.rs:1806`) | tag from the file / direct-media url |
+| S4 | `importer::import_image_files` (`importer.rs:401`) — *+ Images* | tag per file (the `full` row's facts already come from S1's writer) |
+| S7 | `importer::import_video_files` (`importer.rs:499`) — *+ Video* | tag, plus duration and dimensions from the OS probe |
+| S7 | `importer::import_game_folder` (`:189`), `import_game_exe` (`:221`), `import_game_zip` (`:242`) — folder import | tag from the `file:///` source |
+| S7 | bookmark enrichment (`bookmarks.rs:308`, which runs `apply_meta`) | inherits the clip row |
+
+I will repeat that list in the S4 and S7 entries when the call sites actually
+exist — that is the point at which #77 moves.
+
+**Measured** (`tools/cargo-test-s2.log`, `tools/cargo-clippy-s2.log`):
+
+* `cargo test --workspace` = **194 passed, 0 failed, 8 ignored** (goon-core
+  **87**, desktop **101** + 8 ignored, vault 4, locator 2) — 47 new grammar tests
+  plus the one drift pin in `ingest.rs`.
+* `cargo clippy --workspace --all-targets` = **0 warnings**; `rustfmt` clean on
+  the touched files; `node tools/char-audit.js` **CLEAN**.
+* parse + plan over 20 000 rounds: **0.0032 ms** for one term, **0.0088 ms** two,
+  **0.0096 ms** three, **0.0162 ms** five, **0.0199 ms** seven. Typing the longest
+  worked example parses every one of its **77** prefixes in **0.62 ms** total, so
+  S5's suggester can re-plan on every debounce tick with no cache.
+* The **22**-query example set prepares, binds and steps against the real v10
+  schema in memory (`every_example_is_sql_the_schema_can_run`).
+
+**One bug this stage caught before a DB ever ran.** `type:video`'s extension arm
+was one parenthesis short — an AST test would have passed it and SQLite would
+have refused to prepare it. The paren-depth half of
+`every_placeholder_has_exactly_one_parameter` is what found it, and it stays as
+an invariant for every fragment S3 adds.
+
+**Not in this stage.** Nothing runs yet: `plan()` has no production caller until
+S3's `db::search_items`, and there is no command, wire type or UI — the stage
+order in plan §7. The query text is session state (new DEVELOPMENT §4 invariant
+28): `query.rs` has no connection and no write path, so nothing about a search
+can reach `meta`, disk, or a locked vault.
