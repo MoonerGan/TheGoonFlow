@@ -871,7 +871,42 @@ tools/
     and `{id}` templates pass on shape; a flagged line that is legitimate carries a
     `fixture-url-ok: why` note that the tool echoes, so a suppression stays visible.
     Fixtures inherited from `main` that predate the rule are a separate cleanup, not
-    something a feature branch rewrites under someone else’s commits.
+    something a feature branch rewrites under someone else’s commits — the board owns
+    that forward-only pass, and a branch's job is the lines it adds.
+
+33. **A tag term’s SQL shape is chosen per token from what the vault says it holds, and a
+    negated token never gets the shape that drives the plan** (#76 plan §9, decision 13,
+    closed by measurement rather than preference). `items.id IN (SELECT …)` from the tag
+    side is right for a token a handful of items carry (0 ms at 6 postings) and wrong for
+    one 60 164 items carry (148 ms, because the id list is gathered and sorted before
+    `LIMIT` can apply); the row-side `EXISTS` probe is the mirror image (101 ms for a token
+    six items carry, 15 ms for one 60 164 carry). So `Query::plan_with` asks
+    `db::VaultStats` two cheap questions — items carrying the
+    token, counted `DISTINCT` and the way the predicate matches it, and the library’s row
+    count — and picks per token at `query::PROBE_MIN_RATIO`, a quarter of the library,
+    inside the measured crossing (20 % of the library: semi-join 44 ms, probe 73 ms; 30 %:
+    66 against 55). Four rules ride on it:
+
+    * **unknown means the semi-join.** A caller with no connection (`Query::plan()`) keeps
+      the shape every earlier stage measured; the estimate failing must cost a slower
+      query and never the search itself.
+    * **a negated tag term is always the probe**, whatever its own count says, because its
+      complement is the bulk of the library (measured: 34 ms as an anti-join against 1 ms
+      as a `NOT EXISTS` probe, and 30 ms against 0 ms inside an AND). This is what
+      keeps the rarest *positive* term the thing the planner keys on.
+    * **the shapes are only interchangeable if they answer identically**, which is what
+      `db::tests::both_tag_shapes_answer_the_same_rows` pins, and the probe repeats the
+      check id-for-id at 100 000 items.
+    * **the decision is printed, not implied**: `Plan::shapes` carries a `ShapeNote` per
+      tag term (`big_breasts: 60 164 of 80 000 items -> row probe`), and the scale probe
+      and the S5 query diagnostic print it, so "the plan changed" is readable in a log
+      instead of inferred from a timing that moved.
+
+    `PRAGMA analyze` is deliberately **not** in this app: with statistics absent, stale
+    (taken before the postings existed) or fresh, SQLite chose the same plan at the same
+    speed at all eight cardinalities, while `ANALYZE` itself cost 366-405 ms per run —
+    those numbers are a floor, since the probe runs plaintext SQLite and a real vault reads
+    every page through the codec. The 2 ms question that does move the plan is what runs.
 
 ## 5. Testing
 

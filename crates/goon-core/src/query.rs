@@ -296,14 +296,58 @@ impl Query {
         self.terms.is_empty()
     }
 
-    /// The SQL plan for this query (see [`Plan`]).
+    /// The SQL plan for this query, with every tag term in the shape this vault has
+    /// always been measured in (the semi-join). See [`Query::plan_with`] for the shape a
+    /// large vault wants instead.
     pub fn plan(&self) -> Plan {
+        self.plan_with(&())
+    }
+
+    /// The plan, with each tag term's shape chosen from what the vault says it holds
+    /// ([`Postings`], plan §9 decision 13). A token a quarter or more of the library is
+    /// asked as a row-side probe; a rarer token keeps the semi-join; a **negated** token is
+    /// always the probe, so it can never be the step that drives the plan.
+    ///
+    /// The estimate costs one statement per tag term plus one for the library: 2 ms for the
+    /// 80 000-item count, 0 ms for a 6-posting token, 9-30 ms for a token 42-60 k items
+    /// carry. That is what buys the difference: `big_breasts` (60 164 items) is 148 ms as a
+    /// semi-join and 15 ms as a probe, while a token six items carry is 0 ms as a semi-join
+    /// and 101 ms as a probe. Neither choice changes which rows match, only which index
+    /// SQLite walks, and `filter_scale_probe` checks the pages are id-for-id equal.
+    pub fn plan_with(&self, stats: &dyn Postings) -> Plan {
         let mut fragments: Vec<String> = Vec::with_capacity(self.terms.len());
         let mut params: Vec<Value> = Vec::new();
         let mut unmeasured: Vec<FactKey> = Vec::new();
+        let mut shapes: Vec<ShapeNote> = Vec::new();
+        // The denominator is only worth asking for when a term could use it: it scans the
+        // view (10 ms at 60 000 rows), and a query with no tag term picks no shapes.
+        let asks = self
+            .terms
+            .iter()
+            .any(|t| matches!(t.node, Node::Tag { .. } | Node::ExactTag { .. }));
+        let library_rows = if asks { stats.library_rows() } else { None };
         for term in &self.terms {
             fact_keys(&term.node, &mut unmeasured);
-            let one = fragment(&term.node, term.negated, &mut params);
+            let (token, exact) = match &term.node {
+                Node::Tag { name } => (name.clone(), false),
+                Node::ExactTag { name } => (name.clone(), true),
+                _ => (String::new(), false),
+            };
+            let postings = if token.is_empty() {
+                None
+            } else {
+                stats.postings(&token, exact)
+            };
+            let shape = tag_shape(postings, library_rows, term.negated);
+            if !token.is_empty() {
+                shapes.push(ShapeNote {
+                    token: term.text.clone(),
+                    postings,
+                    library_rows,
+                    shape,
+                });
+            }
+            let one = fragment(&term.node, term.negated, &mut params, shape);
             fragments.push(if term.negated && !self_negates(&term.node) {
                 if one.starts_with("EXISTS (") {
                     // A bare existence probe reads better (and plans better) as
@@ -322,6 +366,7 @@ impl Query {
             sql: fragments.join(" AND "),
             params,
             unmeasured,
+            shapes,
         }
     }
 }
@@ -1315,6 +1360,12 @@ pub struct Plan {
     /// [`FactKey`]. Empty means every predicate is answerable from data the vault
     /// already holds.
     pub unmeasured: Vec<FactKey>,
+    /// How each tag term in this plan was shaped and on what numbers, in the order the
+    /// terms were typed (see [`ShapeNote`]). Empty when the plan has no tag term in it,
+    /// and it is **diagnosis only**: nothing that runs a query reads it, but the scale
+    /// probe and the UI's query diagnostic print it, which is how "the plan changed" stops
+    /// being a guess (decision 13, condition 4).
+    pub shapes: Vec<ShapeNote>,
 }
 
 impl Plan {
@@ -1429,10 +1480,135 @@ fn fact_keys(node: &Node, out: &mut Vec<FactKey>) {
 
 /// The `tags` rows that answer a bare token: the folded name (so `big_breasts`
 /// answers for e-hentai's `female:big_breasts` and gelbooru's `big_breasts` at
-/// once) or the literal spelling. Tag-first, not a per-row EXISTS: `item_tags`
-/// is walked from the tag side through `item_tags_tag_idx` (plan §6).
+/// once) or the literal spelling. Tag-first: `item_tags` is walked from the tag
+/// side through `item_tags_tag_idx` (plan §6) — which is the right shape for a token
+/// a handful of items carry, and the wrong one for a token a fifth of the library
+/// carries, where the gathered id list is sorted in a temporary B-tree before `LIMIT`
+/// can apply. [`Query::plan_with`] picks between this and [`TAG_PROBE`] per token.
 const TAG_SEMI: &str = "items.id IN (SELECT it.item_id FROM item_tags AS it \
                         JOIN tags AS t ON t.id = it.tag_id WHERE ";
+
+/// The same token asked the other way round: walk `items` through `items_updated_idx` and
+/// ask one indexed question per row (`SEARCH it USING COVERING INDEX item_tags_tag_idx
+/// (tag_id=? AND item_id=?)`), so no list of matching ids is ever built and the only sort
+/// left is the id tie-break inside one stamp — `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`,
+/// where the semi-join sorts every match. Measured against [`TAG_SEMI`] at eight
+/// cardinalities (`filter_scale_probe`, TESTING item 47): one posting is 0 ms as a
+/// semi-join and 101 ms as a probe, a token 16 018 of 80 000 items carry is 44 ms against
+/// 73 ms, and at 24 004 items it is 66 ms against 55 — so the two cross over inside a
+/// real library, and [`Query::plan_with`] chooses per token from a measurement rather
+/// than a preference (plan §9, decision 13).
+const TAG_PROBE: &str = "EXISTS (SELECT 1 FROM item_tags AS it \
+                          JOIN tags AS t ON t.id = it.tag_id \
+                          WHERE it.item_id = items.id AND ";
+
+/// Which of the two shapes one tag term gets. Both answer the **same** question — the rule
+/// only decides how SQLite reaches the rows, never which rows match, which is what
+/// `db::tests::both_tag_shapes_answer_the_same_rows` pins down.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TagShape {
+    /// [`TAG_SEMI`]: start at the tag and gather its postings. Right when few items carry
+    /// the token, which is most tokens in a real library.
+    Semi,
+    /// [`TAG_PROBE`]: start at `items` in grid order and ask per row. Right when the token
+    /// is dense enough that gathering its postings and sorting them for `LIMIT` costs more
+    /// than the walk, and **always** right for a negated token, because the complement of a
+    /// tag is dense by definition (`-big_breasts`: 1 ms against 32 ms).
+    Probe,
+}
+
+impl TagShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TagShape::Semi => "semi-join",
+            TagShape::Probe => "row probe",
+        }
+    }
+}
+
+/// The decision as made, so a log or a UI probe can say which shape ran and on what
+/// numbers instead of leaving a reader to infer it from a changed timing (decision 13,
+/// condition 4). The estimate is `None` when the vault was not asked — and then the shape
+/// is the one every earlier stage measured.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShapeNote {
+    /// The token as typed, `-anal` including the minus.
+    pub token: String,
+    pub postings: Option<i64>,
+    pub library_rows: Option<i64>,
+    pub shape: TagShape,
+}
+
+impl std::fmt::Display for ShapeNote {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (self.postings, self.library_rows) {
+            (Some(p), Some(v)) => write!(
+                f,
+                "{}: {} of {v} items -> {}",
+                self.token,
+                p,
+                self.shape.as_str()
+            ),
+            _ => write!(
+                f,
+                "{}: not estimated -> {}",
+                self.token,
+                self.shape.as_str()
+            ),
+        }
+    }
+}
+
+/// What [`Query::plan_with`] may ask the vault before choosing a token's shape. Both
+/// numbers are cheap (measured at 80 000 items: 2 ms for the library's row count, 0 ms for
+/// a 6-posting token, 9-30 ms for a token 42-60 k items carry) and either may be unknown;
+/// unknown means [`TagShape::Semi`], the shape every earlier stage measured, so a caller
+/// that cannot ask keeps the behaviour it has always had.
+pub trait Postings {
+    /// How many items carry this token, counted the way the predicate will match it —
+    /// `fold` **or** name for a bare token, name only for `tag:"…"` — so the number and
+    /// the predicate cannot disagree about what the token means.
+    fn postings(&self, token: &str, exact: bool) -> Option<i64>;
+    /// How many items the vault holds: the population the postings are counted over.
+    fn library_rows(&self) -> Option<i64>;
+}
+
+/// A caller with no numbers: every tag term keeps the semi-join.
+impl Postings for () {
+    fn postings(&self, _token: &str, _exact: bool) -> Option<i64> {
+        None
+    }
+    fn library_rows(&self) -> Option<i64> {
+        None
+    }
+}
+
+/// The crossover, as a fraction of the library: a token carried by at least this share of
+/// the items is asked as a [`TAG_PROBE`]. The measurements bracket the crossing between
+/// 20 % (16 018 items of 80 000: semi-join 44 ms, probe 73 ms) and 30 % (24 004 items: 66
+/// against 55 ms), and a quarter sits inside that bracket. The coarseness is deliberate —
+/// guessing wrong costs tens of milliseconds and cannot change which rows match, and the
+/// bracket is as tight as this fixture can make it: its ladder steps are postings, and the
+/// items they land on are whatever the generator happened to hang them on.
+const PROBE_MIN_RATIO: (i64, i64) = (1, 4);
+
+/// The rule, in one place so the probe and the app quote the same arithmetic. A negated
+/// token is always a probe: whatever the tag's own cardinality, its complement is the bulk
+/// of the library, so gathering postings is the expensive way to say "not these" — and
+/// that is measured, not assumed (`-big_breasts` alone: 1 ms as a probe against 34 ms as
+/// an anti-join, and `rare AND -dense`: 0 ms against 29 ms). A negated token therefore
+/// never gets the shape that lets it drive the plan (decision 13, condition 1).
+fn tag_shape(postings: Option<i64>, library_rows: Option<i64>, negated: bool) -> TagShape {
+    if negated {
+        return TagShape::Probe;
+    }
+    match (postings, library_rows) {
+        (Some(p), Some(v)) if v > 0 && p * PROBE_MIN_RATIO.1 >= v * PROBE_MIN_RATIO.0 => {
+            TagShape::Probe
+        }
+        _ => TagShape::Semi,
+    }
+}
 
 /// `tags` of the `extension` type: what the file calls itself (76-rulings A),
 /// written by the writers stage S4/S7 wires up, not imported from any site.
@@ -1481,7 +1657,14 @@ fn like_pattern(phrase: &str) -> String {
 ///   because `NOT (bytes > ?)` is true for a fact nobody ever measured.
 ///   [`self_negates`] is the single place that rule is stated, and it is why
 ///   `-type:gif` on an un-probed vault answers "nothing" rather than "everything".
-fn fragment(node: &Node, negated: bool, params: &mut Vec<Value>) -> String {
+///
+/// `shape` is the tag term's predicate shape ([`TagShape`], decision 13). It matters to
+/// the two tag nodes and to nothing else: every other term either reads a column of the
+/// row or already reaches `items` through a correlated `EXISTS`. That includes the two
+/// places [`EXTENSION_SEMI`] is used — `ext:` is the same shape problem and would take the
+/// same rule, but decision 13 measured **tag** terms, so this stage does not pretend
+/// otherwise (plan §9).
+fn fragment(node: &Node, negated: bool, params: &mut Vec<Value>, shape: TagShape) -> String {
     // A negated *fact* keeps the columns and flips the comparison; a negated
     // anything else keeps the operator and is wrapped in NOT by the caller.
     let fact_op = |cmp: Cmp| -> &'static str {
@@ -1496,11 +1679,25 @@ fn fragment(node: &Node, negated: bool, params: &mut Vec<Value>) -> String {
             let (a, b) = (name.clone(), name.clone());
             params.push(Value::Text(a));
             params.push(Value::Text(b));
-            format!("{TAG_SEMI}t.fold = ? OR t.name = ?)")
+            // The match is parenthesised, and not for tidiness: the probe's lead ends in
+            // `it.item_id = items.id AND `, so a bare `x OR y` here would parse as
+            // `(correlated AND fold-match) OR (name-match)` and the EXISTS would answer
+            // true for every row in the library.
+            let lead = if shape == TagShape::Probe {
+                TAG_PROBE
+            } else {
+                TAG_SEMI
+            };
+            format!("{lead}(t.fold = ? OR t.name = ?))")
         }
         Node::ExactTag { name } => {
             params.push(Value::Text(name.clone()));
-            format!("{TAG_SEMI}t.name = ?)")
+            let lead = if shape == TagShape::Probe {
+                TAG_PROBE
+            } else {
+                TAG_SEMI
+            };
+            format!("{lead}(t.name = ?))")
         }
         Node::Title { phrase } => {
             let pattern = like_pattern(phrase);
@@ -1755,6 +1952,37 @@ mod tests {
         media(query).terms.into_iter().map(|t| t.node).collect()
     }
 
+    // ---- decision 13: the shape a tag term is written in ----------------------
+
+    /// The crossover `filter_scale_probe` brackets between 20 % of the library (16 018 of
+    /// 80 000 items: semi-join 44 ms, probe 73 ms) and 30 % (24 004 items: 66 ms against 55
+    /// ms), with a quarter drawn inside that bracket. Kept as integer arithmetic, because
+    /// `p * 4 >= v` on counts in the millions cannot round its way across the line the way a
+    /// float division can, and because an empty library has no share of anything.
+    #[test]
+    fn the_shape_rule_is_the_measured_crossover_and_negation_overrides_it() {
+        assert_eq!(
+            tag_shape(Some(15_000), Some(60_000), false),
+            TagShape::Probe
+        );
+        assert_eq!(tag_shape(Some(14_999), Some(60_000), false), TagShape::Semi);
+        assert_eq!(
+            tag_shape(Some(79_407), Some(60_000), false),
+            TagShape::Probe
+        );
+        assert_eq!(tag_shape(Some(6), Some(60_000), false), TagShape::Semi);
+        // No numbers, no change of shape: that is the shape every earlier stage measured,
+        // so a caller without a connection keeps the behaviour it always had.
+        assert_eq!(tag_shape(None, Some(60_000), false), TagShape::Semi);
+        assert_eq!(tag_shape(Some(6), None, false), TagShape::Semi);
+        assert_eq!(tag_shape(Some(0), Some(0), false), TagShape::Semi);
+        // A negated token never takes the driving shape, whatever its own count says: the
+        // complement of even a 6-posting tag is nearly the whole library (measured: 32 ms
+        // anti-join against 1 ms probe, and 29 ms against 0 ms inside an AND).
+        assert_eq!(tag_shape(Some(6), Some(60_000), true), TagShape::Probe);
+        assert_eq!(tag_shape(None, None, true), TagShape::Probe);
+    }
+
     // ---- the fourteen worked examples, plan §4 --------------------------------
 
     #[test]
@@ -1766,11 +1994,14 @@ mod tests {
             }]
         );
         // The fold-or-name pair is what finds gelbooru's row and e-hentai's
-        // `female:big_breasts` with one token, and the walk starts at the tag,
-        // through `item_tags_tag_idx`, not per item (plan §6).
+        // `female:big_breasts` with one token. The walk starts at the tag here — this plan
+        // is built without a vault, so it keeps the shape every earlier stage measured;
+        // with counts in hand a dense token is written per item instead, which is decision
+        // 13 and `Query::plan_with`.
         let sql = media("big_breasts").plan().sql;
         assert!(sql.contains("t.fold = ? OR t.name = ?"), "{sql}");
         assert!(sql.contains("FROM item_tags AS it"), "{sql}");
+        assert!(sql.contains("items.id IN (SELECT"), "{sql}");
     }
 
     #[test]
@@ -1827,10 +2058,14 @@ mod tests {
         );
         assert!(terms[1].negated);
         assert_eq!(terms[1].text, "-anal", "the chip keeps the minus");
+        // A negated tag is written as a row-side probe, not an anti-join: measured at
+        // 100 000 items, `-big_breasts` is 1 ms as `NOT EXISTS` and 32 ms as
+        // `NOT (items.id IN (…))`, and inside an AND it is 0 ms against 29 ms
+        // (`filter_scale_probe`, decision 13).
         assert!(media("big_breasts -anal")
             .plan()
             .sql
-            .contains("NOT (items.id IN"));
+            .contains("NOT EXISTS (SELECT 1 FROM item_tags"));
     }
 
     #[test]
@@ -3247,15 +3482,12 @@ mod tests {
         // Rulings C: filtering, counts and Select all apply to the whole result,
         // so every negation has to be exact SQL over the library.
         let cases = [
-            (
-                "-big_breasts",
-                "NOT (items.id IN (SELECT it.item_id FROM item_tags",
-            ),
+            ("-big_breasts", "NOT EXISTS (SELECT 1 FROM item_tags"),
             (
                 "-source:ehentai",
                 "NOT (items.id IN (SELECT s.item_id FROM sources",
             ),
-            ("-tag:\"ext:x\"", "NOT (items.id IN"),
+            ("-tag:\"ext:x\"", "NOT EXISTS (SELECT 1 FROM item_tags"),
             ("-has:tags", "NOT EXISTS (SELECT 1 FROM item_tags"),
             ("-stored:disk", "NOT EXISTS (SELECT 1 FROM sources"),
             (
@@ -3476,7 +3708,9 @@ mod tests {
         let sql = plan.sql;
         let video = sql.find("m.kind = 'video'").expect("video arm");
         let source = sql.find("s.site = ?").expect("source arm");
-        let anal = sql.find("NOT (items.id IN").expect("negated tag arm");
+        let anal = sql
+            .find("NOT EXISTS (SELECT 1 FROM item_tags")
+            .expect("negated tag arm");
         assert!(video < source && source < anal, "{sql}");
         // Two joins at the top level; the ANDs inside a fragment are deeper and
         // belong to that fragment.

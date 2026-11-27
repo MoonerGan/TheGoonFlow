@@ -944,3 +944,104 @@ branch, so the check is known to be able to fail. Honest limit, recorded because
 the interesting part: force-pushing removes the ref, not the object. The old tip may
 stay reachable on the host until garbage-collected, so the string is treated as
 disclosed and reported to the board, not as retracted.
+
+---
+
+## S3 follow-up — decision 13 closed: the predicate shape is chosen per tag token (2026-11-27)
+
+**What was open.** S3 measured that `items.id IN (SELECT …)` from the tag side is the cheap
+shape for a token a handful of items carry (0 ms at 6 postings) and the expensive one for a
+token many carry (196 ms at 64 092 matches, because the id list is gathered and sorted in a
+temporary B-tree before `LIMIT` can stop), while the row-side `EXISTS` probe is the mirror
+image. S3 shipped the semi-join for everything, so the dense tag — the common case in this
+library — was the slow case. Decision 13 asked which shape to pick, on what evidence, and
+where the line sits.
+
+**`PRAGMA analyze` was tried first and rejected.** One ladder tag at eight cardinalities
+(1 to 40 000 postings), each rung measured with statistics absent, stale (taken **before**
+the postings existed, which is what a vault looks like right after an import) and fresh. The
+planner chose the **same** plan at the **same** speed in all three states at every rung — 1
+posting 0 ms as a semi-join against 101 ms as a probe; 20 000 postings 44-46 against 76-78;
+40 000 90 against 41-42 — while `ANALYZE` itself cost **366-405 ms per run** and left
+`sqlite_stat1` at the same 15 rows. Those timings are floors: the probe reads plaintext
+SQLite, so on a SQLCipher vault every page `ANALYZE` walks pays the codec on top, for a plan
+the planner did not change even once.
+
+**What ships instead.** `Query::plan_with(&dyn Postings)` asks two cheap questions per tag
+term — items carrying the token, and the library's row count — and chooses the shape per
+token at `query::PROBE_MIN_RATIO` (`db::VaultStats` answers them, memoised per plan;
+`Query::plan()` is `plan_with(&())`, so a caller with no connection keeps the old shape and
+a failed estimate costs a slower query rather than the search). The count is
+`COUNT(DISTINCT it.item_id)` taken the way the predicate matches the token: raw postings
+report 79 407 where **60 164 items** carry `big_breasts`, a 32 % over-count that would go
+straight into the threshold. Counting **inside the view** instead — the exactly-right
+question — costs 80-93 ms, the price of the page the estimate exists to make cheap, so it
+does not run; the affordable form is 2 ms for the denominator, 0 ms for a rare token and
+9-30 ms for a token 42-60 k items carry, so it scales with the postings, which is the shape
+of cost that makes the question worth asking.
+
+**Where the line is.** The crossover ladder brackets it between **20 %** of the library
+(16 018 of 80 000 items: semi-join 44 ms, probe 73 ms) and **30 %** (24 004 items: 66 ms
+against 55 ms). The constant is a quarter, kept as integer arithmetic (`p * 4 >= v`): a
+wrong guess near the line costs tens of milliseconds and cannot change which rows match, and
+the bracket is as tight as a fixture whose ladder steps are postings can make it.
+
+**Negation is not symmetrical.** A negated tag term always takes the row-side probe,
+whatever its own count says: `-big_breasts` is 34 ms as an anti-join against **1 ms** as
+`NOT EXISTS`, and 30 ms against 0 ms inside an AND. That is what keeps the rarest
+*positive* term the thing the planner keys on, and it is why typing order stopped mattering:
+`fixture_tag_09835 big_breasts` and `big_breasts fixture_tag_09835` both come back at 0 ms,
+against 30 ms and 62 ms when both terms are semi-joins.
+
+**The shipping path, measured** — `query::parse` → `Query::plan_with` → `db::page_items`,
+100 000 items, 80 000 library rows, a 300-row page, 21 reps, p50/p95, plaintext SQLite,
+`tools/filter-scale-20261127k.log`:
+
+| query | as the code shapes it | forced into the semi-join |
+| --- | --- | --- |
+| `big_breasts` | **15 ms** | 148 ms |
+| `big_breasts anal` | **17 ms** | 149 ms |
+| `big_breasts -anal` | **17 ms** | 164 ms |
+| `-big_breasts` | 1 ms | 1 ms |
+| `fixture_tag_09835 big_breasts` | **0 ms** | 30 ms |
+| `big_breasts fixture_tag_09835` | **0 ms** | 62 ms |
+
+Every row prints the plan's own note (`big_breasts: 60164 of 80000 items -> row probe`), the
+whole `EXPLAIN QUERY PLAN`, and `same rows as the semi-join page: yes` — the claim the whole
+rule rests on, checked rather than asserted. The note is `Plan::shapes`; S5's query
+diagnostic prints it in the UI, so "the plan changed" is something a log says rather than
+something a timing hints at.
+
+**Pins.** `query::tests::the_shape_rule_is_the_measured_crossover_and_negation_overrides_it`
+(the arithmetic, unknown statistics, an empty library);
+`db::tests::both_tag_shapes_answer_the_same_rows` (same ids, same order, same paired total
+from either shape); `db::tests::the_shape_rule_reads_the_counts_and_negation_overrides_them`
+(the dense token probed, the rare one still a semi-join, a negated token never an anti-join,
+and the note text itself). `ext:` is deliberately still a semi-join: decision 13 measured
+tag terms, and guessing for a predicate that was never measured is how a "performance"
+change ends up slower.
+
+**Fixture hygiene, finished off.** `the_placeholder_fixture_urls_are_still_the_shapes_they_
+stand_in_for` (`src-tauri/src/lib.rs`) feeds both rewritten fixture URLs through
+`ingest::classify` and asserts the gallery one still parses as an e-hentai **gallery** with
+gid `9999999` and the other as **DirectMedia** on the booru CDN with post id `9999999` — the
+cheap way to obey the fake-fixture rule badly is to swap in a string that no longer parses.
+The ownership ruling that came with the review is now written down (TESTING item 46,
+DEVELOPMENT invariant 32): a branch fixes the fixture lines it added, `main`'s pre-existing
+content URLs are the board's forward-only cleanup in one commit, and a leaked string gets a
+history rewrite only when the board orders one.
+
+**Docs.** DEVELOPMENT **invariant 33**; TESTING item **47** (new) and item **46**
+(extended); plan §6's performance line and §9 decision 13, closed with the table above.
+
+**Gates.** `cargo test --workspace` **239 passed / 0 failed / 8 ignored**
+(`tools/cargo-test-76-d13.log`); `cargo clippy --workspace --all-targets` after
+`cargo clean -p goon-core -p goonflow-desktop` (log proves the re-check) 0 findings
+(`tools/cargo-clippy-76-d13.log`); `rustfmt` on the four Rust files touched, with the four
+hand-formatted siblings restored; `node tools\char-audit.js` CLEAN over the seven files
+touched; `node tools\fixture-url-audit.js --range origin/main...HEAD` 0 violations.
+
+**Carried into S5.** The query diagnostic in the UI prints `Plan::shapes`, so a user
+reporting "the grid is slow" also reports which shape ran; the count question the rule asks
+is the same one the *suggest* pool already pays (148 ms → 15 ms for a base query holding a
+dense tag), which is what keeps the query box responsive while typing.

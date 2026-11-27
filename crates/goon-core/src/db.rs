@@ -832,6 +832,105 @@ fn planned_params(plan: &Plan, tail: &[i64]) -> Vec<Value> {
     out
 }
 
+/// The two numbers the shape rule needs ([`query::Postings`]), read from a live
+/// connection (plan §9, decision 13).
+///
+/// One statement per tag term plus one for the library, each memoised, because the choice
+/// is made while the plan is built and a query with three tag terms must not pay for the
+/// same denominator three times. Measured at 80 000 items: 2 ms for the denominator, 0 ms
+/// for a 6-posting token, 9-30 ms for a token 42-60 k items carry — the count scales with
+/// the postings, which is the shape of cost that makes the question worth asking, because
+/// the tokens it is expensive for are exactly the tokens the answer saves. The saving, on
+/// the page itself: `big_breasts` (60 164 items) 148 ms as a semi-join, 15 ms as a probe.
+///
+/// Both answers are `Option`, and `None` puts the term back in the semi-join: a statement
+/// that cannot run — a vault mid-migration, a column a later version moves — has to cost a
+/// slower query and never the search itself. That is also why the estimate is not a
+/// `PRAGMA analyze`: the same three states were measured (`filter_scale_probe`, decision
+/// 13), and with statistics absent, stale or fresh the planner chose the **same** plan at
+/// the same speed at all eight cardinalities, while `ANALYZE` itself cost 366-405 ms per
+/// run — two orders of magnitude more than the question that actually moves the plan.
+pub struct VaultStats<'a> {
+    conn: &'a Connection,
+    rows: std::cell::Cell<Option<i64>>,
+    postings: std::cell::RefCell<BTreeMap<String, i64>>,
+}
+
+impl<'a> VaultStats<'a> {
+    pub fn new(conn: &'a Connection) -> Self {
+        Self {
+            conn,
+            rows: std::cell::Cell::new(None),
+            postings: std::cell::RefCell::new(BTreeMap::new()),
+        }
+    }
+
+    /// The denominator: the library's row count, because that is the population the
+    /// postings are counted over, and a fraction whose halves come from different
+    /// populations is not a fraction. Counting it **per view** was measured at 10 ms against
+    /// 2 ms, and the ratio it produces is only sharper by the tags that skip a view —
+    /// measured to matter at one rung (a token on 16 018 items is 20 % of the library and
+    /// 27 % of the media view), which is inside the coarseness the threshold already has.
+    fn library_count(&self) -> Option<i64> {
+        if let Some(n) = self.rows.get() {
+            return Some(n);
+        }
+        let n = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM items", [], |r| r.get::<_, i64>(0))
+            .ok();
+        self.rows.set(n);
+        n
+    }
+
+    /// Items that carry this token, counted the way the predicate will match it: `fold`
+    /// **or** name for a bare token, name only for `tag:"…"`. `exact` is what keeps the
+    /// number and the predicate asking the same question, which is the only way a threshold
+    /// measured against one can be trusted to choose the other.
+    ///
+    /// `DISTINCT`, because that is what the predicate matches: one item carrying both the
+    /// gelbooru spelling and e-hentai's `female:`-prefixed one is **one** row of the result,
+    /// and raw postings reported 79 407 where 60 164 items carry the token in the probe's
+    /// fixture — a 32 % over-count straight into the threshold. Counting **within the view**
+    /// instead (the exactly-right question) measured 80-93 ms, the same price as the page it
+    /// is meant to make cheap, so it does not run; the whole-library count is 9-30 ms and
+    /// scales with the token's postings, which is what keeps a rare token free.
+    fn posting_count(&self, token: &str, exact: bool) -> Option<i64> {
+        let key = if exact {
+            format!("name {token}")
+        } else {
+            token.to_string()
+        };
+        if let Some(n) = self.postings.borrow().get(&key) {
+            return Some(*n);
+        }
+        let sql = if exact {
+            "SELECT COUNT(DISTINCT it.item_id) FROM item_tags AS it \
+             JOIN tags AS t ON t.id = it.tag_id WHERE (t.name = ?1)"
+        } else {
+            "SELECT COUNT(DISTINCT it.item_id) FROM item_tags AS it \
+             JOIN tags AS t ON t.id = it.tag_id WHERE (t.fold = ?1 OR t.name = ?1)"
+        };
+        let n = self
+            .conn
+            .query_row(sql, [token], |r| r.get::<_, i64>(0))
+            .ok();
+        if let Some(n) = n {
+            self.postings.borrow_mut().insert(key, n);
+        }
+        n
+    }
+}
+
+impl crate::query::Postings for VaultStats<'_> {
+    fn postings(&self, token: &str, exact: bool) -> Option<i64> {
+        self.posting_count(token, exact)
+    }
+    fn library_rows(&self) -> Option<i64> {
+        self.library_count()
+    }
+}
+
 /// One grid page, plus the size of the result it came from.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1139,8 +1238,10 @@ pub fn suggest(
 ) -> rusqlite::Result<Vec<Suggestion>> {
     let minus = if ctx.negated { "-" } else { "" };
     // The pool is measured against the query *without* the token being typed, so
-    // `source:ehentai bi` still offers `big_breasts`.
-    let base = ctx.base.plan();
+    // `source:ehentai bi` still offers `big_breasts`. Shaped like every other query, for
+    // the same reason: this statement runs on every keystroke, and a base query holding a
+    // tag a quarter of the library carries is 148 ms in the semi-join and 15 ms as a probe.
+    let base = ctx.base.plan_with(&VaultStats::new(conn));
     let typed = ctx.value.to_lowercase();
     let completes = |name: &str| name.to_lowercase().starts_with(&typed);
     let mut rows: Vec<Suggestion> = Vec::new();
@@ -4067,6 +4168,118 @@ mod tests {
                 .len(),
             page.items.len(),
             "`page_items` is that same read with the count never built at all"
+        );
+    }
+
+    /// Decision 13, measured at 100 000 items (`filter_scale_probe`, TESTING item 47):
+    /// a tag a quarter of the library carries is 148 ms as a semi-join and 15 ms as a
+    /// row-side probe, while a token six items carry is 0 ms as a semi-join and 101 ms as a
+    /// probe. So the shape is chosen per token from the vault’s own counts — which only
+    /// buys anything if the two shapes answer the same question. This is that pin, at
+    /// fixture scale: same ids, same order, same count, whichever shape the rule picked.
+    #[test]
+    fn both_tag_shapes_answer_the_same_rows() {
+        let conn = query_fixture();
+        // 2 of the 5 media rows carry the tag family, so the rule picks the probe here;
+        // a tag on one row (20 %) stays a semi-join. Both cases are in one fixture so the
+        // threshold, not the data, is what differs between them.
+        add_item_tag(&conn, "q_video", "fixture_rare_tag", TYPE_CONTENT).unwrap();
+        let stats = VaultStats::new(&conn);
+
+        for text in [
+            "big_breasts",
+            "fixture_rare_tag",
+            "-big_breasts",
+            "big_breasts -fixture_rare_tag",
+            "fixture_rare_tag big_breasts",
+        ] {
+            let parsed = query::parse(text, Scope::Media)
+                .unwrap_or_else(|e| panic!("{text:?}: {}", e.message));
+            let shaped = parsed.plan_with(&stats);
+            let plain = parsed.plan();
+            let ids = |plan: &Plan| search_item_ids(&conn, Scope::Media, plan).unwrap();
+            assert_eq!(
+                ids(&shaped),
+                ids(&plain),
+                "{text:?}: {shaped:#?}\nvs\n{plain:#?}"
+            );
+            assert_eq!(
+                count_matches(&conn, Scope::Media, &shaped).unwrap(),
+                count_matches(&conn, Scope::Media, &plain).unwrap(),
+                "{text:?}: the paired total has to agree with the page"
+            );
+        }
+    }
+
+    /// The rule itself, on the same fixture: dense token → probe, rare token → the
+    /// semi-join every earlier stage measured, and a **negated** token → the probe
+    /// whatever the counts say, because its complement is the bulk of the library and a
+    /// negated term must never become the step that drives the plan (decision 13,
+    /// condition 1). Measured cost of getting this wrong at 100 000 items: 32 ms for the
+    /// anti-join against 1 ms for the probe, and 29 ms against 0 ms inside an AND.
+    #[test]
+    fn the_shape_rule_reads_the_counts_and_negation_overrides_them() {
+        let conn = query_fixture();
+        add_item_tag(&conn, "q_video", "fixture_rare_tag", TYPE_CONTENT).unwrap();
+        let stats = VaultStats::new(&conn);
+
+        let dense = query::parse("big_breasts", Scope::Media)
+            .unwrap()
+            .plan_with(&stats);
+        assert!(
+            dense.sql.starts_with("EXISTS (SELECT 1 FROM item_tags")
+                && !dense.sql.contains("items.id IN (SELECT"),
+            "2 of 5 rows is a third or more, so this is the probe shape: {dense:#?}"
+        );
+
+        let rare = query::parse("fixture_rare_tag", Scope::Media)
+            .unwrap()
+            .plan_with(&stats);
+        assert!(
+            rare.sql.contains("items.id IN (SELECT"),
+            "1 of 5 rows is under the crossover, so the semi-join stays: {rare:#?}"
+        );
+
+        // Even with the counts in hand — and even with none at all — a negated tag is a
+        // probe. The `NOT EXISTS` spelling is also what the caller's negation rule already
+        // prefers, so nothing has to know about the shape to wrap it correctly.
+        for plan in [
+            query::parse("-fixture_rare_tag", Scope::Media)
+                .unwrap()
+                .plan_with(&stats),
+            query::parse("-fixture_rare_tag", Scope::Media)
+                .unwrap()
+                .plan(),
+        ] {
+            assert!(
+                plan.sql.starts_with("NOT EXISTS (SELECT 1 FROM item_tags")
+                    && !plan.sql.contains("NOT (items.id IN (SELECT"),
+                "a rare tag's negation is still dense, and never an anti-join: {plan:#?}"
+            );
+        }
+
+        // The note is what the probe and the S5 query diagnostic print (condition 4), so it
+        // has to carry the numbers the decision was made on, and say so when there were none.
+        let noted = query::parse("big_breasts fixture_rare_tag", Scope::Media)
+            .unwrap()
+            .plan_with(&stats);
+        let printed: Vec<String> = noted.shapes.iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            printed,
+            [
+                "big_breasts: 2 of 6 items -> row probe",
+                "fixture_rare_tag: 1 of 6 items -> semi-join",
+            ],
+            "the plan says which shape ran and on what estimate"
+        );
+        assert!(
+            query::parse("big_breasts", Scope::Media)
+                .unwrap()
+                .plan()
+                .shapes[0]
+                .to_string()
+                .contains("not estimated"),
+            "a plan built without a vault says it guessed"
         );
     }
 

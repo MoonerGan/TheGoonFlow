@@ -894,14 +894,28 @@ fn list_items(
 /// minute later (invariant 24, plan §5). The offending token stays inside
 /// `ParseError` for a frontend that wants to underline it; this wire shape is the
 /// sentence, because that is what the user reads.
-fn planned_query(
+///
+/// The parse and the plan are kept apart on purpose: the plan is where a tag term's
+/// shape is chosen, and that asks the vault two questions, so it cannot happen before
+/// the vault is locked and opened. Use [`planned`] to get the plan for a query.
+fn parsed_query(
     view: &str,
     text: Option<String>,
-) -> Result<(goon_core::query::Scope, goon_core::query::Plan), String> {
+) -> Result<(goon_core::query::Scope, goon_core::query::Query), String> {
     let scope = goon_core::query::Scope::parse_wire(view).map_err(|e| e.message)?;
     let query =
         goon_core::query::parse(text.as_deref().unwrap_or(""), scope).map_err(|e| e.message)?;
-    Ok((scope, query.plan()))
+    Ok((scope, query))
+}
+
+/// The plan for a query, with each tag term's shape chosen from what this vault holds
+/// (decision 13). Cheap: 2 ms for the library's row count, 0 ms for a token six items
+/// carry and 9-30 ms for one 42-60 k items carry, against the 148 ms a dense tag pays when
+/// it is asked in the wrong shape. The scope is deliberately not an argument: the numbers
+/// the rule reads are whole-library numbers, and the scope is already baked into the plan's
+/// SQL by `db::planned_where`.
+fn planned(conn: &rusqlite::Connection, query: &goon_core::query::Query) -> goon_core::query::Plan {
+    query.plan_with(&goon_core::db::VaultStats::new(conn))
 }
 
 /// The grid, filtered by the query box: one page **and** the size of the whole
@@ -934,9 +948,10 @@ fn search_items(
     after: Option<goon_core::db::PageCursor>,
     with_count: Option<bool>,
 ) -> Result<goon_core::db::SearchPage, String> {
-    let (scope, plan) = planned_query(&view, query)?;
+    let (scope, parsed) = parsed_query(&view, query)?;
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let plan = planned(&opened.conn, &parsed);
     goon_core::db::search_items(
         &opened.conn,
         scope,
@@ -958,9 +973,10 @@ fn search_item_ids(
     view: String,
     query: Option<String>,
 ) -> Result<Vec<String>, String> {
-    let (scope, plan) = planned_query(&view, query)?;
+    let (scope, parsed) = parsed_query(&view, query)?;
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
+    let plan = planned(&opened.conn, &parsed);
     goon_core::db::search_item_ids(&opened.conn, scope, &plan).map_err(err)
 }
 
@@ -2707,21 +2723,26 @@ mod integration_tests {
     /// the one place a command can get the view wrong, so it is tested as itself:
     /// an unknown view word is refused by name, a bad query keeps the grammar's
     /// own sentence, and an empty box is the whole library rather than an error.
+    ///
+    /// These plan without a vault (`plan()`), because there is no vault here: the shape
+    /// rule (decision 13) needs to ask the database two questions, and a test that is
+    /// about the **view word** must not depend on what a fixture happens to contain. The
+    /// shape itself is pinned in `goon-core`, where a connection exists.
     #[test]
     fn the_query_wire_refuses_a_wrong_view_before_it_reads_the_vault() {
-        let (scope, plan) = planned_query("games", Some("status:wishlist".into())).unwrap();
+        let (scope, parsed) = parsed_query("games", Some("status:wishlist".into())).unwrap();
         assert_eq!(scope, goon_core::query::Scope::Games);
-        assert!(plan.sql.contains("items.status"), "{plan:#?}");
-        let (scope, plan) = planned_query("media", None).unwrap();
+        assert!(parsed.plan().sql.contains("items.status"), "{parsed:#?}");
+        let (scope, parsed) = parsed_query("media", None).unwrap();
         assert_eq!(scope, goon_core::query::Scope::Media);
-        assert!(plan.sql.is_empty(), "no box, no predicate");
+        assert!(parsed.plan().sql.is_empty(), "no box, no predicate");
 
-        let e = planned_query("gallery", None).unwrap_err();
+        let e = parsed_query("gallery", None).unwrap_err();
         assert!(e.contains("media") && e.contains("games"), "{e}");
         // A Games-only word in the media box stays the grammar's own sentence, and
         // that string is what stage S5 puts under the box as form state rather than
         // as a toast (invariant 24).
-        let e = planned_query("media", Some("status:wishlist".into())).unwrap_err();
+        let e = parsed_query("media", Some("status:wishlist".into())).unwrap_err();
         assert!(e.contains("status"), "{e}");
     }
 
@@ -2783,20 +2804,16 @@ mod integration_tests {
         // Quoted, deliberately: a bare word is a **tag** term in this grammar and
         // would match nothing here, while a quoted phrase is the title LIKE. Getting
         // that backwards is the usual way this test would fail for the wrong reason.
-        let (_, plan) = planned_query("media", Some("\"fixture wire\"".into())).unwrap();
+        // Planned through `planned`, so this walk also proves the shape helper runs
+        // against a real connection and a title query pays nothing for it.
+        let (scope, parsed) = parsed_query("media", Some("\"fixture wire\"".into())).unwrap();
+        let plan = planned(&conn, &parsed);
 
         let mut walked: Vec<String> = Vec::new();
         let mut cursor: Option<goon_core::db::PageCursor> = None;
         for page in 0..4 {
-            let got = goon_core::db::search_items(
-                &conn,
-                goon_core::query::Scope::Media,
-                &plan,
-                2,
-                cursor.as_ref(),
-                true,
-            )
-            .unwrap();
+            let got =
+                goon_core::db::search_items(&conn, scope, &plan, 2, cursor.as_ref(), true).unwrap();
             assert_eq!(
                 got.total.unwrap(),
                 5,
@@ -2932,6 +2949,46 @@ mod integration_tests {
         assert_eq!(
             goon_core::db::search_item_ids(&conn, goon_core::query::Scope::Media, &plan).unwrap(),
             ["w1"]
+        );
+    }
+
+    /// The fixture-hygiene rule (2026-11-27) says a fixture may not name a link that could
+    /// be real, and the obvious way to obey it badly is to swap in a string that no longer
+    /// parses — a fixture that stopped testing the thing it stands in for. So the two
+    /// placeholder shapes this branch's fixtures use are pinned here against the app's own
+    /// classifier: the gallery still classifies as an e-hentai **gallery** with its gid, and
+    /// the image still classifies as a **file** on the booru CDN, because those are the two
+    /// facts the fixtures around them depend on.
+    #[test]
+    fn the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for() {
+        let gallery = crate::ingest::classify("https://e-hentai.org/g/9999999/0123456789abcdef/")
+            .expect("the gallery fixture still classifies");
+        assert_eq!(gallery.site, "ehentai");
+        assert_eq!(gallery.kind, goon_core::model::ItemKind::Gallery);
+        assert_eq!(
+            gallery.remote_id.as_deref(),
+            Some("9999999"),
+            "the gid is the ledger's key, so a placeholder that lost it would not be a gallery row"
+        );
+        assert!(
+            matches!(gallery.mode, crate::ingest::Mode::Ehentai),
+            "{gallery:?}"
+        );
+
+        let file = crate::ingest::classify(
+            "https://img3.gelbooru.com/images/00/00000000000000000000000000000000.jpg?9999999",
+        )
+        .expect("the CDN file fixture still classifies");
+        assert_eq!(file.site, "gelbooru");
+        assert_eq!(file.kind, goon_core::model::ItemKind::Post);
+        assert_eq!(
+            file.remote_id.as_deref(),
+            Some("9999999"),
+            "the booru file cache writes the post id into the query, and that id is what the row records"
+        );
+        assert!(
+            matches!(file.mode, crate::ingest::Mode::DirectMedia),
+            "a link that names a file is fetched as a file, not sent to the api (#50): {file:?}"
         );
     }
 }

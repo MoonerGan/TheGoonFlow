@@ -895,6 +895,61 @@ the board's *In review* column is the current list.
          (its own reflog, cached views), so the finding is reported to the board and
          treated as disclosed, not undone.
 
+       - The placeholder shapes are pinned against the app’s own classifier, because
+         the cheap way to obey this rule badly is to swap in a string that no longer
+         parses: `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
+         (`apps/desktop/src-tauri/src/lib.rs`) asserts `ingest::classify` still reads the
+         gallery fixture as an e-hentai **gallery** carrying gid `9999999`, and the image
+         fixture as **DirectMedia** on the booru CDN with post id `9999999`.
+
+       - Ownership (the user’s ruling, 2026-11-27): a branch fixes the fixture lines
+         **it** added, and asks `origin/main`’s tree whether a string is branch-owned or
+         `main`-inherited; `main`’s pre-existing content URLs are the board’s
+         forward-only cleanup in one commit with **no history rewrite**, and where that
+         commit meets a branch over a fixture string, the branch takes `main`’s version.
+
+    47. **A tag term’s predicate shape is chosen from the vault’s counts, and the
+       choice is printed** (#76 plan §9 decision 13, closed 2026-11-27; DEVELOPMENT
+       invariant 33). `filter_scale_probe`’s `decision 13` section answers the four
+       conditions the review set: 100 000 items, 80 000 library rows, a 300-row page,
+       21 reps, p50/p95, plaintext SQLite, logged in `tools/filter-scale-20261127k.log`.
+
+       - *Statistics.* One ladder tag at eight cardinalities, each rung measured with
+         statistics absent, stale (taken **before** the postings existed, which is what
+         a vault is right after an import) and fresh. The planner chose the **same** plan
+         at the same speed in all three states at every rung — 1 posting: 0 ms as a
+         semi-join against 100-102 ms as a probe; 20 000 postings: 44-46 against 76-78;
+         40 000: 90 against 41-42 — while `ANALYZE` itself cost 366-405 ms per run and
+         left `sqlite_stat1` at the same 15 rows. The `PRAGMA analyze` variant is rejected,
+         and those numbers are a floor rather than an estimate for the encrypted vault:
+         the probe reads plaintext SQLite, so a real vault pays the codec on every page
+         `ANALYZE` walks, for a plan the planner did not change even once.
+       - *The AND.* A hand-built ladder takes one set of tokens through every shape pair
+         (`semi+semi`, `semi+probe`, `probe+semi`, `probe+probe`, and for a negated term
+         `anti-semi` against `anti-probe`), in both typing orders, and every row of a
+         group has to return the same ids in the same order or the log prints
+         `!! DISAGREEMENT` instead of a timing.
+       - *The rule, through the shipping code.* `query::parse` → `Query::plan_with` →
+         `db::page_items`, printing the plan’s own note
+         (`big_breasts: 60164 of 80000 items -> row probe`), the whole
+         `EXPLAIN QUERY PLAN`, and the same page timed as the semi-join: dense tag 15 ms
+         against 148, dense AND dense 17 against 149, dense AND `-dense` 17 against 164,
+         `-dense` alone 1 ms either way, rare AND dense 0 against 30 with the dense term
+         typed first and 0 against 62 with it typed second. Every row prints `same rows
+         as the semi-join page: yes`, which is the claim the rule rests on.
+       - *What the estimate costs.* The library’s row count 2 ms; a 6-posting token 0 ms;
+         a token 42-60 k items carry 9-30 ms. The count is `COUNT(DISTINCT it.item_id)`,
+         because raw postings report 79 407 where 60 164 items actually carry the token —
+         a 32 % over-count fed straight into the threshold. The exactly-right question
+         (count inside the view the query runs on) costs 80-93 ms, which is the price of
+         the page the estimate exists to make cheap, so it does not run.
+       - Pinned by `query::tests::the_shape_rule_is_the_measured_crossover_and_negation_
+         overrides_it` (the arithmetic, including unknown statistics and an empty
+         library) and by `db::tests::both_tag_shapes_answer_the_same_rows` plus
+         `db::tests::the_shape_rule_reads_the_counts_and_negation_overrides_them` (same
+         ids, same paired total, the dense token probed, the rare one still a semi-join,
+         and a negated token never an anti-join whatever its count says).
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI
@@ -909,9 +964,13 @@ the board's *In review* column is the current list.
   this sentence, and never print cookie or passphrase values into logs or issue comments.
 - Fake is a shape, not an intention. A fixture URL or id must be obviously
   placeholder-shaped (DEVELOPMENT invariant 32); `node tools\fixture-url-audit.js`
-  checks the added lines of a branch range and prints what it read. When a leak is
-  found after a push, the fix is a history rewrite on the branch plus a report to the
-  board, never a follow-up commit that leaves the string in history.
+  checks the added lines of a branch range and prints what it read. Ownership is part
+  of the rule: a branch fixes the fixture lines **it** added, and pre-existing content
+  URLs on `main` are the board's forward-only cleanup, not something a feature branch
+  edits under someone else's commits. Whether a leaked string gets a history rewrite is
+  the board's call, not the finder's (the user's ruling, 2026-11-27: an account-tied
+  content URL is not worth rewriting history for); when it is ordered, it is a branch
+  rewrite plus a report, never a follow-up commit that leaves the string behind.
 - `gh` needs `C:\Program Files\Git\cmd` on PATH; `npx` only works through
   `cmd /c` (the `.ps1` shim will not load); `cargo` only after `tools\dev-env.ps1`.
 - A finished increment means: tests green → commit → push → comment on the issue

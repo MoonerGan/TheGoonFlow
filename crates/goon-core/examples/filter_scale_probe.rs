@@ -151,6 +151,12 @@ fn main() -> Result<(), String> {
     // returns.
     cardinality_crossover(&conn).map_err(|e| format!("cardinality crossover: {e}"))?;
 
+    // Decision 13: which predicate shape the planner should get, measured in the three
+    // states of planner knowledge a real vault can be in, with the AND and the negation
+    // measured rather than reasoned about. Last because it is the only section that
+    // touches `sqlite_stat1`, and it leaves the database the way the app makes it.
+    shape_choice(&conn).map_err(|e| format!("shape choice: {e}"))?;
+
     drop(conn);
     let _ = std::fs::remove_dir_all(&dir);
     Ok(())
@@ -954,7 +960,12 @@ fn tag_predicate_shape(conn: &Connection) -> rusqlite::Result<()> {
 /// The last row of each measurement is the price of deciding at all: the posting-count
 /// query the planner would have to run before it picks a shape. A decision that costs
 /// 40 ms per keystroke is not a decision, it is a second query.
-const CARDINALITY_LADDER: [i64; 6] = [1, 20, 200, 2_000, 10_000, 40_000];
+/// The tag cardinalities the crossover is measured at. `20_000` and `30_000` are in the
+/// list because they are a third and a half of the fixture's 60 000 media rows: the log
+/// then shows which shape wins at the fractions the shipping rule (`query::PROBE_MIN_RATIO`)
+/// could plausibly draw its line at, instead of leaving a gap wide enough to hide the
+/// crossing inside.
+const CARDINALITY_LADDER: [i64; 8] = [1, 20, 200, 2_000, 10_000, 20_000, 30_000, 40_000];
 
 fn add_alias_tags(conn: &Connection) -> rusqlite::Result<Vec<(String, i64)>> {
     let mut made = Vec::new();
@@ -1084,6 +1095,684 @@ fn cardinality_crossover(conn: &Connection) -> rusqlite::Result<()> {
     drop_alias_tags(conn)?;
     println!("\nalias tags dropped; schema back to what the app creates");
     Ok(())
+}
+
+/// Decision 13, measured under the four conditions the review set.
+///
+/// * **Statistics.** There is no `PRAGMA analyze` anywhere in this repo, so production's
+///   planner has never seen the library it plans for. This probe has run `ANALYZE` at
+///   fixture build since its first run, which means every number in the earlier logs
+///   describes a planner the app never has. Three worlds are measured: no statistics,
+///   statistics that predate the postings (what a vault looks like right after a bulk
+///   import), and statistics taken after them.
+/// * **The mixed AND.** `dense AND rare` in both typing orders, and `dense AND dense`,
+///   because "anchor on the rare term" is a claim about what the planner does, not about
+///   what the code intends.
+/// * **Negated tag terms.** A negated dense tag has to stay a row-side probe; as an
+///   anti-join it is the catastrophic shape, and that is measured, not assumed.
+/// * **Print the shape.** Every timing line carries the planner's own driving step and
+///   whether it sorts the whole match set, so a regression is visible in the log instead
+///   of inferred from a changed number.
+fn shape_choice(conn: &Connection) -> rusqlite::Result<()> {
+    println!("\n=== decision 13: statistics, the AND, and negated tags ===");
+    println!(
+        "  semi = `db::page_items` with the term written as the tag-first semi-join, which is what \
+         every earlier section of this file measured; probe = the same term written as `EXISTS`, \
+         hand-built here. The section after the ladder runs the shipping path instead, where the \
+         code picks the shape itself. Page of {PAGE}, p50/p95 over {REPS} reps, row count beside \
+         every timing."
+    );
+
+    // ---- the statistics the app never takes ---------------------------------------
+    println!("\n--- one tag, three states of the planner's knowledge (the ladder) ---");
+    for n in CARDINALITY_LADDER {
+        let fold = format!("fixture_alias_{n}");
+        alias_down(conn, &fold)?;
+        // Stale first: statistics exist but do not know these postings exist, which is
+        // exactly the state of a vault after an import that never re-ran ANALYZE.
+        conn.execute("ANALYZE", [])?;
+        let before = stats_age(conn)?;
+        alias_up(conn, &fold, n)?;
+        let stale = shape_row(conn, &fold);
+        let probe_stale = probe_row(conn, &fold, false);
+        let analyzed = timed(|| conn.execute("ANALYZE", []).expect("analyze runs"));
+        let fresh = stats_age(conn)?;
+        let line_fresh = shape_row(conn, &fold);
+        let probe_fresh = probe_row(conn, &fold, false);
+        conn.execute("DROP TABLE IF EXISTS sqlite_stat1", [])?;
+        let line_none = shape_row(conn, &fold);
+        let probe_none = probe_row(conn, &fold, false);
+        println!(
+            "\n{fold:?}: {n} postings | sqlite_stat1 rows {before} before, {fresh} after \
+             | ANALYZE costs {} ms p50 / {} ms p95",
+            analyzed.0, analyzed.1
+        );
+        println!("  stats stale   {stale}");
+        println!("  stats stale   {probe_stale}");
+        println!("  stats fresh   {line_fresh}");
+        println!("  stats fresh   {probe_fresh}");
+        println!("  no stats      {line_none}");
+        println!("  no stats      {probe_none}");
+    }
+    alias_reset(conn)?;
+
+    // ---- the dense tags the fixture already has, in production's world ------------
+    println!("\n--- the dense tags already in the fixture: no statistics, then fresh ---");
+    conn.execute("DROP TABLE IF EXISTS sqlite_stat1", [])?;
+    for fold in ["big_breasts", "female:big_breasts", "anal"] {
+        let none = shape_row(conn, fold);
+        let none_probe = probe_row(conn, fold, false);
+        let none_neg = probe_row(conn, fold, true);
+        conn.execute("ANALYZE", [])?;
+        let fresh = shape_row(conn, fold);
+        let fresh_probe = probe_row(conn, fold, false);
+        conn.execute("DROP TABLE IF EXISTS sqlite_stat1", [])?;
+        println!("\n{fold:?}");
+        println!("  no stats      {none}");
+        println!("  no stats      {none_probe}");
+        println!("  no stats      {none_neg}");
+        println!("  stats fresh   {fresh}");
+        println!("  stats fresh   {fresh_probe}");
+    }
+
+    // ---- the AND: both typing orders, dense AND dense, and the negations ----------
+    println!(
+        "\n--- the AND under the rule decision 13 proposes: positive tag terms semi-join, \
+         negated tag terms stay row-side probes (no statistics, production's world) ---"
+    );
+    conn.execute("DROP TABLE IF EXISTS sqlite_stat1", [])?;
+    let rare = sparse_folds(conn)?
+        .into_iter()
+        .next()
+        .expect("the fixture seeds 20 000 tags, so a tag with 3-200 postings exists");
+    println!("  (the sparse term below is {rare:?})");
+    and_ladder(conn, &rare)?;
+
+    // ---- the rule as production runs it -------------------------------------------
+    //
+    // Everything above builds its SQL by hand, because production did not have the other
+    // shape yet. This is the part that does: `query::parse` → `Query::plan_with` →
+    // `db::page_items`, with the plan's own note beside the timing, and the same page
+    // compared id-for-id against the all-semi-join answer. If the rule changed a row, this
+    // log says so.
+    println!(
+        "\n--- the rule in the shipping code: `plan_with` + `db::page_items`, no hand-built SQL ---"
+    );
+    let shipped: Vec<(&str, String)> = vec![
+        ("one dense tag", "big_breasts".to_string()),
+        ("one rare tag", rare.clone()),
+        ("exact form tag:\"…\"", format!("tag:\"{rare}\"")),
+        ("rare AND dense", format!("{rare} big_breasts")),
+        ("dense AND rare", format!("big_breasts {rare}")),
+        ("dense AND dense", "big_breasts anal".to_string()),
+        ("dense AND -dense", "big_breasts -anal".to_string()),
+        ("rare AND -dense", format!("{rare} -big_breasts")),
+        ("-dense alone", "-big_breasts".to_string()),
+    ];
+    for (label, text) in &shipped {
+        shipped_row(conn, label, text);
+    }
+
+    // ---- what a hand-rolled estimator would cost ----------------------------------
+    println!("\n--- the cost of knowing: count one token's postings before choosing ---");
+    for fold in ["big_breasts", "anal", rare.as_str()] {
+        let (d50, d95, postings) = decision_cost(conn, fold);
+        println!("  {fold:<22} {postings:>7} postings, counted in {d50} ms p50 / {d95} ms p95");
+    }
+    // The rule compares a token's postings to the view's rows, and those two numbers are
+    // only comparable if the postings are counted **inside the same view**: the fixture
+    // hangs tags on game rows too, so a postings count that ignores `kind` reports 20 000
+    // for a token only 16 018 media rows carry, and the threshold is then reading a
+    // different population at the top and the bottom of the fraction. Both counts are
+    // timed, because the honest one is only worth using if it is affordable.
+    println!("\n  the same counts, taken inside the view the query runs on:");
+    for fold in ["big_breasts", "anal", rare.as_str()] {
+        let sql = "SELECT COUNT(*) FROM items \
+                   WHERE items.kind IN ('gallery','post') \
+                   AND EXISTS (SELECT 1 FROM item_tags AS it JOIN tags AS t ON t.id = it.tag_id \
+                                WHERE it.item_id = items.id AND (t.fold = ?1 OR t.name = ?1))";
+        let one = || -> i64 {
+            let mut stmt = conn.prepare_cached(sql).expect("view count prepares");
+            stmt.query_row([fold], |r| r.get::<_, i64>(0))
+                .expect("view count runs")
+        };
+        let n = one();
+        let t = timed(one);
+        println!(
+            "  {fold:<22} {n:>7} view rows carry it, counted in {} ms p50 / {} ms p95",
+            t.0, t.1
+        );
+    }
+    // The cheaper way to compare like with like: count **distinct items** carrying the
+    // token over the whole library, against the library's own row count, both through an
+    // index the engine can walk without touching the `items` table per candidate. If this
+    // stays in the same order of magnitude as the raw postings count, it is what the rule
+    // should use; if it does not, the raw count and a whole-library denominator do.
+    println!("\n  distinct items carrying it, over the whole library (the affordable fix):");
+    for fold in ["big_breasts", "anal", rare.as_str()] {
+        let sql = "SELECT COUNT(DISTINCT it.item_id) FROM item_tags AS it \
+                   JOIN tags AS t ON t.id = it.tag_id WHERE (t.fold = ?1 OR t.name = ?1)";
+        let one = || -> i64 {
+            let mut stmt = conn.prepare_cached(sql).expect("distinct count prepares");
+            stmt.query_row([fold], |r| r.get::<_, i64>(0))
+                .expect("distinct count runs")
+        };
+        let n = one();
+        let t = timed(one);
+        println!(
+            "  {fold:<22} {n:>7} items carry it, counted in {} ms p50 / {} ms p95",
+            t.0, t.1
+        );
+    }
+    let all_items = || -> i64 {
+        let mut stmt = conn
+            .prepare_cached("SELECT COUNT(*) FROM items")
+            .expect("library count prepares");
+        stmt.query_row([], |r| r.get::<_, i64>(0))
+            .expect("library count runs")
+    };
+    let items = all_items();
+    let items_t = timed(all_items);
+    println!(
+        "\n  the library's row count, unscoped (the comparable denominator): {items} rows, \
+         {} ms p50 / {} ms p95",
+        items_t.0, items_t.1
+    );
+    // The rule needs a denominator too — "how big is this view" — and that count is not
+    // free either, so it is measured before the rule is written down as cheap.
+    let plain_sql = "SELECT COUNT(*) FROM items WHERE items.kind IN ('gallery','post')";
+    let index_sql = "SELECT COUNT(*) FROM items WHERE items.kind IS NOT NULL \
+                     AND items.kind IN ('gallery','post')";
+    let est_sql = "SELECT (SELECT COUNT(*) FROM item_tags AS it JOIN tags AS t \
+                   ON t.id = it.tag_id WHERE t.fold = ?1 OR t.name = ?1), \
+                   (SELECT COUNT(*) FROM items WHERE items.kind IN ('gallery','post'))";
+    let one_count = |sql: &str| -> i64 {
+        let mut stmt = conn.prepare_cached(sql).expect("count prepares");
+        stmt.query_row([], |r| r.get::<_, i64>(0))
+            .expect("count runs")
+    };
+    let rows_plain = one_count(plain_sql);
+    let t_plain = timed(|| one_count(plain_sql));
+    let rows_index = one_count(index_sql);
+    let t_index = timed(|| one_count(index_sql));
+    // The one statement a real estimator would run: this token's postings **and** the
+    // denominator, so the decision is one round trip rather than two.
+    let estimate = || -> (i64, i64) {
+        let mut stmt = conn.prepare_cached(est_sql).expect("estimator prepares");
+        stmt.query_row(["big_breasts"], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+        })
+        .expect("estimator runs")
+    };
+    let (est_postings, est_rows) = estimate();
+    let t_est = timed(estimate);
+    println!(
+        "  view row count, as written:    {rows_plain} rows, {} ms p50 / {} ms p95",
+        t_plain.0, t_plain.1
+    );
+    println!(
+        "  view row count, kind not null: {rows_index} rows, {} ms p50 / {} ms p95",
+        t_index.0, t_index.1
+    );
+    println!(
+        "  postings + denominator, one statement: {est_postings} of {est_rows} | \
+         {} ms p50 / {} ms p95",
+        t_est.0, t_est.1
+    );
+    println!(
+        "\nleft as the app leaves it: sqlite_stat1 = {}",
+        stats_age(conn)?
+    );
+    Ok(())
+}
+
+/// Creates one ladder tag with `n` postings and does **not** run `ANALYZE`, so the
+/// statistics stay exactly as old as the postings are new.
+fn alias_up(conn: &Connection, fold: &str, n: i64) -> rusqlite::Result<()> {
+    let (ns, norm) = db::tag_ns_fold(fold);
+    conn.execute(
+        "INSERT INTO tags (name, type_id, site, ns, fold) VALUES (?1, 3, 'fixture', ?2, ?3)",
+        rusqlite::params![fold, ns, norm],
+    )?;
+    conn.execute(
+        "INSERT INTO item_tags (tag_id, item_id) \
+         SELECT (SELECT id FROM tags WHERE fold = ?1), it.item_id \
+         FROM item_tags AS it JOIN tags AS t ON t.id = it.tag_id \
+         WHERE t.fold = 'big_breasts' GROUP BY it.item_id LIMIT ?2",
+        rusqlite::params![fold, n],
+    )?;
+    Ok(())
+}
+
+fn alias_down(conn: &Connection, fold: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM item_tags WHERE tag_id IN (SELECT id FROM tags WHERE fold = ?1)",
+        [fold],
+    )?;
+    conn.execute("DELETE FROM tags WHERE fold = ?1", [fold])?;
+    Ok(())
+}
+
+fn alias_reset(conn: &Connection) -> rusqlite::Result<()> {
+    for n in CARDINALITY_LADDER {
+        alias_down(conn, &format!("fixture_alias_{n}"))?;
+    }
+    Ok(())
+}
+
+/// What the planner knows: the number of `sqlite_stat1` rows, or `absent`.
+fn stats_age(conn: &Connection) -> rusqlite::Result<String> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name = 'sqlite_stat1')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok("absent".to_string());
+    }
+    conn.query_row("SELECT COUNT(*) FROM sqlite_stat1", [], |r| {
+        r.get::<_, i64>(0).map(|n| n.to_string())
+    })
+}
+
+/// The planner's own words for how it reaches `items`, plus whether the query has to sort
+/// the whole match set. Printed beside every timing, because "which shape ran" is the thing
+/// a later regression has to be visible in.
+///
+/// Callers pass the **id-only** form of the statement, and that is not a shortcut: the
+/// shipping page also carries a correlated thumbnail `EXISTS` with an ORDER BY of its own,
+/// whose `USE TEMP B-TREE` shows up in the plan list with no cheap way to tell it apart
+/// from the outer query's sort (a subquery's rows hang off row 0, the same parent as the
+/// outer steps). Since the thumbnail is identical in both shapes, explaining it away is the
+/// honest reading, not a lost measurement.
+fn driving_step(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> String {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain prepares");
+    let rows = stmt
+        .query_map(params, |r| r.get::<_, String>(3))
+        .expect("explain runs");
+    let mut reach = String::new();
+    let mut sort: Option<String> = None;
+    for row in rows.flatten() {
+        let line = row.trim();
+        if reach.is_empty() && line.contains("items") {
+            reach = line.to_string();
+        }
+        if line.contains("TEMP B-TREE") {
+            sort = Some(line.to_string());
+        }
+    }
+    // The sort step is printed verbatim rather than as a yes/no, because the two shapes
+    // differ in *which* sort they run and that is the whole cost: the semi-join's is
+    // `USE TEMP B-TREE FOR ORDER BY` over every matching id, the probe's is
+    // `… FOR LAST TERM OF ORDER BY`, the id tie-break inside one stamp.
+    format!(
+        "{}{}",
+        if reach.is_empty() {
+            "nothing in the plan names items".to_string()
+        } else {
+            reach
+        },
+        match sort {
+            Some(line) => format!(" ; {line}"),
+            None => " ; no sort step".to_string(),
+        }
+    )
+}
+
+/// The page as the shipping code builds it — `db::page_items`, not a copy of its SQL —
+/// for one tag term.
+fn shape_row(conn: &Connection, fold: &str) -> String {
+    let plan = query::parse(fold, Scope::Media)
+        .unwrap_or_else(|e| panic!("{fold:?} must parse: {}", e.message))
+        .plan();
+    let sql = format!(
+        "SELECT items.id FROM items{}{ORDER} LIMIT ?",
+        db::planned_where(Scope::Media, &plan)
+    );
+    let limit = PAGE;
+    let params: Vec<&dyn rusqlite::ToSql> = plan
+        .bind()
+        .into_iter()
+        .chain(std::iter::once(&limit as &dyn rusqlite::ToSql))
+        .collect();
+    let drive = driving_step(conn, &sql, &params);
+    let rows = db::page_items(conn, Scope::Media, &plan, PAGE, None)
+        .expect("page runs")
+        .len();
+    let t = timed(|| {
+        db::page_items(conn, Scope::Media, &plan, PAGE, None)
+            .expect("page runs")
+            .len()
+    });
+    format!(
+        "shipping page {rows} rows, {} ms p50 / {} ms p95 | {drive}",
+        t.0, t.1
+    )
+}
+
+/// The id-only form of a hand-built predicate statement, for `EXPLAIN QUERY PLAN`: the
+/// thumbnail `EXISTS` in [`db::PAGE_COLUMNS`] is identical in every shape, and its own
+/// `USE TEMP B-TREE` would be read as the page's sort. See [`driving_step`].
+fn probe_explain(predicate: &str) -> String {
+    format!(
+        "SELECT items.id FROM items WHERE items.kind IN ('gallery','post') \
+         AND ({predicate}){ORDER} LIMIT ?"
+    )
+}
+
+/// The same term as a row-side probe, and the negated form of it.
+fn probe_row(conn: &Connection, fold: &str, negated: bool) -> String {
+    let predicate = if negated {
+        format!("NOT {ROW_FIRST}")
+    } else {
+        ROW_FIRST.to_string()
+    };
+    let params = tag_params(fold, None);
+    let bound: Vec<&dyn rusqlite::ToSql> =
+        params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+    let drive = driving_step(conn, &probe_explain(&predicate), &bound);
+    let rows = tag_page(conn, &predicate, fold, None).len();
+    let t = timed(|| tag_page(conn, &predicate, fold, None).len());
+    format!(
+        "{} probe {rows} rows, {} ms p50 / {} ms p95 | {drive}",
+        if negated { "negated row" } else { "row-side" },
+        t.0,
+        t.1
+    )
+}
+
+/// The two shapes a tag term can take in SQL, measured term by term.
+///
+/// * [`Shape::Semi`] is what production writes today: `items.id IN (SELECT …)`, which
+///   starts at the tag and gathers every posting.
+/// * [`Shape::Probe`] is the candidate: `EXISTS (… it.item_id = items.id …)`, which walks
+///   `items` in the grid's own order and can stop when the page is full.
+/// * A negated tag term is measured both ways ([`Shape::AntiProbe`] and
+///   [`Shape::AntiSemi`]), because the rule under test says a negated token takes the
+///   first, and that claim needs a number beside it rather than a warning.
+#[derive(Clone, Copy)]
+enum Shape {
+    Semi,
+    Probe,
+    AntiProbe,
+    AntiSemi,
+}
+
+impl Shape {
+    fn label(self) -> &'static str {
+        match self {
+            Shape::Semi => "semi",
+            Shape::Probe => "probe",
+            Shape::AntiProbe => "anti-probe",
+            Shape::AntiSemi => "anti-semi",
+        }
+    }
+}
+
+/// One AND, printed with the shapes it used, the matched total, and the planner's own
+/// driving step. Typing order is exactly as given, so a difference between two rows is
+/// the shape's doing and not the planner re-ordering the terms.
+fn and_row(conn: &Connection, label: &str, terms: &[(&str, Shape)]) -> Vec<String> {
+    let mut parts: Vec<String> = Vec::new();
+    let mut params: Vec<query::Value> = Vec::new();
+    let mut shapes: Vec<&str> = Vec::new();
+    for (fold, shape) in terms {
+        let frag = match shape {
+            Shape::Semi => TAG_FIRST.to_string(),
+            Shape::Probe => ROW_FIRST.to_string(),
+            Shape::AntiProbe => format!("NOT {ROW_FIRST}"),
+            Shape::AntiSemi => format!("NOT {TAG_FIRST}"),
+        };
+        params.push(query::Value::Text((*fold).to_string()));
+        params.push(query::Value::Text((*fold).to_string()));
+        parts.push(format!("({frag})"));
+        shapes.push(shape.label());
+    }
+    let body = parts.join(" AND ");
+    let count_sql =
+        format!("SELECT COUNT(*) FROM items WHERE items.kind IN ('gallery','post') AND ({body})");
+    let total: i64 = {
+        let mut stmt = conn.prepare_cached(&count_sql).expect("count prepares");
+        stmt.query_row(rusqlite::params_from_iter(params.iter()), |r| r.get(0))
+            .expect("count runs")
+    };
+    let drive = {
+        let limit = PAGE;
+        let mut bound: Vec<&dyn rusqlite::ToSql> =
+            params.iter().map(|v| v as &dyn rusqlite::ToSql).collect();
+        bound.push(&limit as &dyn rusqlite::ToSql);
+        driving_step(conn, &probe_explain(&body), &bound)
+    };
+    let ids = and_page(conn, &body, &params);
+    let t = timed(|| and_page(conn, &body, &params).len());
+    println!(
+        "    {:<40} {:<26} {:>7} matches | page {} rows, {} ms p50 / {} ms p95 | {drive}",
+        label,
+        shapes.join("+"),
+        total,
+        ids.len(),
+        t.0,
+        t.1
+    );
+    ids
+}
+
+/// A token and the shape to ask it in. Named because the ladder below nests three of these
+/// tuples inside two more, and clippy is right that the bare type stops being readable.
+type Trial<'a> = (&'a str, Shape);
+/// One labelled way of running the same set of tokens.
+type Set<'a> = (&'a str, Vec<Trial<'a>>);
+/// One query, measured several ways.
+type Group<'a> = (&'a str, Vec<Set<'a>>);
+
+/// Condition 2 of decision 13: the AND, measured under the rule rather than under
+/// production's single shape. Each group holds **one set of tokens** measured several
+/// ways, and every row of a group has to return the same ids in the same order — which is
+/// the equivalence the rule depends on, checked here instead of asserted.
+fn and_ladder(conn: &Connection, rare: &str) -> rusqlite::Result<()> {
+    let groups: Vec<Group> = vec![
+        (
+            "rare AND dense",
+            vec![
+                (
+                    "both semi, rare typed first (today)",
+                    vec![(rare, Shape::Semi), ("big_breasts", Shape::Semi)],
+                ),
+                (
+                    "semi + probe, rare typed first (rule)",
+                    vec![(rare, Shape::Semi), ("big_breasts", Shape::Probe)],
+                ),
+                (
+                    "both semi, dense typed first (today)",
+                    vec![("big_breasts", Shape::Semi), (rare, Shape::Semi)],
+                ),
+                (
+                    "probe + semi, dense typed first (rule)",
+                    vec![("big_breasts", Shape::Probe), (rare, Shape::Semi)],
+                ),
+                (
+                    "both probe",
+                    vec![("big_breasts", Shape::Probe), (rare, Shape::Probe)],
+                ),
+            ],
+        ),
+        (
+            "dense AND dense",
+            vec![
+                (
+                    "both semi (today)",
+                    vec![("big_breasts", Shape::Semi), ("anal", Shape::Semi)],
+                ),
+                (
+                    "semi + probe",
+                    vec![("big_breasts", Shape::Semi), ("anal", Shape::Probe)],
+                ),
+                (
+                    "both probe (rule)",
+                    vec![("big_breasts", Shape::Probe), ("anal", Shape::Probe)],
+                ),
+            ],
+        ),
+        (
+            "dense AND -dense",
+            vec![
+                (
+                    "semi + anti-semi (today)",
+                    vec![("big_breasts", Shape::Semi), ("anal", Shape::AntiSemi)],
+                ),
+                (
+                    "semi + anti-probe",
+                    vec![("big_breasts", Shape::Semi), ("anal", Shape::AntiProbe)],
+                ),
+                (
+                    "probe + anti-probe (rule)",
+                    vec![("big_breasts", Shape::Probe), ("anal", Shape::AntiProbe)],
+                ),
+            ],
+        ),
+        (
+            "rare AND -dense",
+            vec![
+                (
+                    "semi + anti-probe (rule)",
+                    vec![(rare, Shape::Semi), ("big_breasts", Shape::AntiProbe)],
+                ),
+                (
+                    "semi + anti-semi (the wrong choice)",
+                    vec![(rare, Shape::Semi), ("big_breasts", Shape::AntiSemi)],
+                ),
+            ],
+        ),
+        (
+            "-dense alone",
+            vec![
+                ("anti-semi (today)", vec![("big_breasts", Shape::AntiSemi)]),
+                ("anti-probe (rule)", vec![("big_breasts", Shape::AntiProbe)]),
+            ],
+        ),
+    ];
+    for (group, rows) in groups {
+        println!("\n  {group}");
+        let mut first: Option<Vec<String>> = None;
+        let mut first_label = "";
+        for (label, terms) in rows {
+            let ids = and_row(conn, label, &terms);
+            match &first {
+                None => {
+                    first = Some(ids);
+                    first_label = label;
+                }
+                Some(want) => {
+                    if *want != ids {
+                        println!(
+                            "    !! DISAGREEMENT against {first_label:?}: {} vs {} rows, and the ids differ",
+                            want.len(),
+                            ids.len()
+                        );
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `tag_page` binds one fold twice; an AND carries a pair of parameters per term, so the
+/// page reader takes the list the caller built.
+fn and_page(conn: &Connection, body: &str, params: &[query::Value]) -> Vec<String> {
+    let sql = tag_sql(body, false);
+    let limit = PAGE;
+    let mut stmt = conn.prepare_cached(&sql).expect("page prepares");
+    stmt.query_map(
+        rusqlite::params_from_iter(
+            params
+                .iter()
+                .map(|v| v as &dyn rusqlite::ToSql)
+                .chain(std::iter::once(&limit as &dyn rusqlite::ToSql)),
+        ),
+        |r| r.get::<_, String>(0),
+    )
+    .expect("page runs")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("page rows")
+}
+
+/// The same query through the **shipping** path: parse, plan with the vault's own numbers,
+/// run `db::page_items`. It prints the plan's shape note (decision 13, condition 4), the
+/// timing against the semi-join's, and whether the page is id-for-id the page the
+/// semi-join shape returns — the claim the whole rule rests on, checked at 100 000 items
+/// instead of argued.
+fn shipped_row(conn: &Connection, label: &str, text: &str) {
+    let parsed = query::parse(text, Scope::Media)
+        .unwrap_or_else(|e| panic!("{text:?} must parse: {}", e.message));
+    let stats = db::VaultStats::new(conn);
+    let shaped = parsed.plan_with(&stats);
+    let plain = parsed.plan();
+    let shaped_ids = db::page_items(conn, Scope::Media, &shaped, PAGE, None).expect("shaped page");
+    let plain_ids = db::page_items(conn, Scope::Media, &plain, PAGE, None).expect("plain page");
+    let ids = |p: &Vec<db::ItemSummary>| p.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+    let same = ids(&shaped_ids) == ids(&plain_ids);
+    let shaped_t = timed(|| {
+        db::page_items(conn, Scope::Media, &shaped, PAGE, None)
+            .expect("shaped page")
+            .len()
+    });
+    let plain_t = timed(|| {
+        db::page_items(conn, Scope::Media, &plain, PAGE, None)
+            .expect("plain page")
+            .len()
+    });
+    // The shape print explains the id-only form of the statement, for the reason
+    // `driving_step` states: the thumbnail `EXISTS` is the same in both shapes.
+    let explained = format!(
+        "SELECT items.id FROM items{}{ORDER} LIMIT ?",
+        db::planned_where(Scope::Media, &shaped)
+    );
+    let mut bound = shaped.bind();
+    let limit = PAGE;
+    bound.push(&limit as &dyn rusqlite::ToSql);
+    println!(
+        "\n  {label:<18} {text}\n    {} | {} rows, {} ms p50 / {} ms p95 as shaped, {} ms p50 / {} ms p95 as semi-join | {}",
+        shaped
+            .shapes
+            .iter()
+            .map(|s| s.to_string())
+            .collect::<Vec<_>>()
+            .join(", "),
+        shaped_ids.len(),
+        shaped_t.0,
+        shaped_t.1,
+        plain_t.0,
+        plain_t.1,
+        driving_step(conn, &explained, &bound),
+    );
+    println!(
+        "    same rows as the semi-join page: {}",
+        if same {
+            "yes"
+        } else {
+            "NO — the rule changed the answer"
+        }
+    );
+    println!("    plan: {}", full_plan(conn, &explained, &bound));
+}
+
+/// Every line the planner gives for one statement, in one string. The shape print above
+/// names the step that reaches `items`; this is the whole plan, so a later regression can
+/// be read out of the log instead of re-created from a changed number.
+fn full_plan(conn: &Connection, sql: &str, params: &[&dyn rusqlite::ToSql]) -> String {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .expect("explain prepares");
+    let rows = stmt
+        .query_map(params, |r| r.get::<_, String>(3))
+        .expect("explain runs");
+    rows.flatten()
+        .map(|d| d.trim().to_string())
+        .collect::<Vec<_>>()
+        .join(" / ")
 }
 
 /// Times one closure `REPS` times and returns (p50, p95) in milliseconds. The

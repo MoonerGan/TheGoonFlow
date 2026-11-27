@@ -348,8 +348,11 @@ CREATE INDEX media_item_kind_idx  ON media(item_id, kind);        -- has:/stored
   the library — 0 ms at 157 items, 19 ms at 7 995 — and the expensive one once it
   matches a large share, because the id list has to be sorted before `LIMIT` can
   stop: 196 ms at 64 092 items, where the row-side `EXISTS` probe over the same
-  index pages the identical rows in 1 ms. The plan's shape stays the default; the
-  case where it loses is open decision 13.
+  index pages the identical rows in 1 ms. The plan's shape stays the default only until the
+  vault says otherwise, and it now does: **decision 13 closed 2026-11-27**, with
+  `Query::plan_with` asking `db::VaultStats` two cheap counts per token and choosing the
+  shape per token at a quarter of the library, inside the crossing the same probe measures
+  (DEVELOPMENT invariant 33, TESTING item 47).
 - Title LIKE stays un-indexed: a 100k-row `LIKE '%…%'` scan under SQLCipher is
   ~tens of ms and honest; FTS5 is not bought this pass (open decision 9).
 - Range predicates read `media.bytes/width/height/duration_ms` — plain columns,
@@ -511,15 +514,53 @@ New checks this card needs:
     `status:`). Alternative kept on the table: Games keeps its status rails and
     only the rest is replaced — smaller change, but two filter mental models live
     on, which is what the user asked to end.
-13. **Tag predicate shape, chosen per token** (opened 2026-11-26 by the measurements
-   under decision 9). Tag-first for the long tail, row-first once a token's postings
-   pass a threshold — suggested ~20% of the view's rows, where the two curves cross,
-   so a wrong guess near the line costs tens of ms rather than hundreds. Needs: the
-   plan to carry the shape, so the page, the paired count, `search_item_ids`, the tag
-   cloud and the site counts all run one predicate as they do today; `db` to answer
-   "how many postings does this token have" (measured at 0-1 ms); and a test that the
-   two shapes select the same rows, because they are only equivalent if the `fold`
-   test is identical.
+13. **Tag predicate shape, chosen per token** — **closed 2026-11-27 by measurement**
+     (opened 2026-11-26 under decision 9). `Query::plan_with` now asks the vault two cheap
+     questions per tag token and picks the shape per token. The threshold is **a quarter of
+     the library**, drawn inside the crossing the new ladder brackets: a token 16 018 of
+     80 000 items carry costs 44 ms as a semi-join against 73 ms as a probe, and at 24 004
+     items it is 66 against 55. The four conditions the review set, all answered by
+     `filter_scale_probe`'s `decision 13` section (`tools/filter-scale-20261127k.log`:
+     100 000 items, 80 000 library rows, a 300-row page, 21 reps, p50/p95, plaintext
+     SQLite — which makes every number a floor, not an estimate):
+
+      * **`PRAGMA analyze` was tried first and rejected.** One ladder tag at eight
+        cardinalities, each rung measured with statistics absent, stale (taken **before**
+        the postings existed, which is what a vault looks like right after an import) and
+        fresh. The planner chose the **same** plan at the same speed in all three states at
+        every rung — 1 posting: 0 ms as a semi-join against 100-102 ms as a probe; 20 000
+        postings: 44-46 against 76-78; 40 000: 90 against 41-42 — while `ANALYZE` itself
+        cost 366-405 ms per run and left `sqlite_stat1` at the same 15 rows. On the
+        encrypted
+        vault it is worse, not better: every page it walks pays the codec, for a plan the
+        planner did not change even once.
+      * **Mixed AND, in both typing orders.** The rule makes the rarest **positive** term
+        drive, whatever the order it is typed in: `fixture_tag_09835 AND big_breasts` costs
+        0 ms where the dense term alone would cost 30, and with the dense term typed first
+        it is still 0 ms against 62. A negated term never drives either: on the ladder
+        `-big_breasts` is 34 ms as an anti-join against 1 ms as a `NOT EXISTS` probe, and
+        `big_breasts AND -big_breasts` is 17 ms against 145. A hand-built
+        ladder walks one set of tokens through every shape pair (`semi+semi`, `semi+probe`,
+        `probe+semi`, `probe+probe`, `anti-semi`, `anti-probe`) and every row of a group has
+        to return the same ids in the same order or the log says `!! DISAGREEMENT`.
+      * **The estimator's own cost is why the hand-rolled one ships:** 2 ms for the
+        library's row count, 0 ms for a 6-posting token, 9-30 ms for a token 42-60 k items
+        carry. The count is `COUNT(DISTINCT it.item_id)` taken the way the predicate matches
+        the token, because raw postings report 79 407 where 60 164 items actually carry it —
+        a 32 % over-count fed straight into the threshold. The exactly-right question
+        (count inside the view the query runs on) costs 80-93 ms, which is the price of the
+        page the estimate exists to make cheap, so it does not run.
+      * **The choice is printed, not implied.** Every probe row carries the plan's own note
+        (`big_breasts: 60164 of 80000 items -> row probe`), the whole `EXPLAIN QUERY PLAN`,
+        and `same rows as the semi-join page: yes` beneath it, because the two shapes are
+        only interchangeable if they answer identically. S5's query diagnostic prints
+        `Plan::shapes` for the same reason.
+
+     What it buys on the shipping path (`query::parse` → `Query::plan_with` →
+     `db::page_items`): the dense tag's page 148 ms → 15 ms, `dense AND dense` 149 → 17,
+     `dense AND -dense` 164 → 17, and §6's ~50 ms is met by every shape measured, with no
+     new index and no FTS5. `db::VaultStats`, `query::PROBE_MIN_RATIO`, DEVELOPMENT
+     invariant 33, TESTING item 47.
 
 ---
 
