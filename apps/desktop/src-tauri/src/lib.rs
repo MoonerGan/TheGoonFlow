@@ -73,6 +73,35 @@ pub struct Core {
     pub(crate) queue: Arc<queue::SiteQueue>,
 }
 
+/// The live probes (`http.rs`, `ingest.rs`) ask real hosts about real items, and
+/// **no url that names a real item may be committed in this repository**: a
+/// fixture in a public repo is a fact about somebody's library, and it is
+/// unrecoverable once pushed. Committed fixtures therefore use self-evidently
+/// placeholder ids (`9000001`, `0123456789`, `x.to`, `example.org`), which
+/// `goon-core`'s `fixture_urls_in_the_repo_are_never_real` enforces.
+///
+/// A fake url is useless to a live probe — it would "answer" with a 404 and the
+/// probe would report a policy that no host holds. So a live probe reads its
+/// target from the environment instead and says out loud when it was given none:
+///
+/// ```text
+/// $env:GOON_PROBE_BOORU_API  = "https://…/index.php?page=dapi&…&id=…"  post page, api
+/// $env:GOON_PROBE_BOORU_FILE = "https://…/images/…/…jpeg?…"            cdn file link
+/// $env:GOON_PROBE_BOORU_MP4  = "https://…/images/…/…mp4?…"             the #64 clip
+/// $env:GOON_PROBE_EH_GALLERY = "https://e-hentai.org/g/<gid>/<key>/"   gallery link
+/// $env:GOON_PROBE_F95_THREAD = "https://f95zone.to/threads/<slug>.<id>/"
+/// ```
+#[cfg(test)]
+pub(crate) fn probe_url(var: &str, what: &str) -> Option<String> {
+    match std::env::var(var).map(|v| v.trim().to_string()) {
+        Ok(v) if v.starts_with("http") => Some(v),
+        _ => {
+            println!("SKIP {what}: set ${var} to a url from your own library to run it");
+            None
+        }
+    }
+}
+
 /// A scratch vault for tests: a real encrypted vault in a temp folder, unlocked,
 /// with the schema applied, inside a `Core` built the way the app builds one.
 /// Both `companion` (#19 clips) and `ingest` (#38/#52 live rehearsals) need it,

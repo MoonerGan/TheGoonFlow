@@ -1397,7 +1397,7 @@ fn pairing_key(title: &str) -> String {
 ///   N·(N-1)/2 rows.
 /// - Media: **the same stored bytes** (media.hash) on two items — a repost of
 ///   one image across boorus, or the same file imported twice. Title matching
-///   is useless for `1743761874698456.jpg`, so we match content instead.
+///   is useless for `1000000000000.jpg`, so we match content instead.
 ///
 /// These are only ever *suggestions*; a human confirms the merge.
 pub fn pairing_suggestions(
@@ -2079,12 +2079,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sources (item_id, site, url) VALUES ('m1','i','https://i.4cdn.org/h/1743761874698456.jpg')",
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','i','https://i.4cdn.org/h/1000000000000.jpg')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sources (item_id, site, url) VALUES ('m1','wimg','https://wimg.rule34.xxx//images/3868/x.jpeg?11353035')",
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','wimg','https://wimg.rule34.xxx//images/9001/x.jpeg?9000004')",
             [],
         )
         .unwrap();
@@ -2108,7 +2108,7 @@ mod tests {
     fn media_pairing_by_shared_content_hash() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
-        for (id, title) in [("m1", "1743761874698456.jpg"), ("m2", "untitled jpeg")] {
+        for (id, title) in [("m1", "1000000000000.jpg"), ("m2", "untitled jpeg")] {
             conn.execute(
                 "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post',?2,'0','1')",
                 params![id, title],

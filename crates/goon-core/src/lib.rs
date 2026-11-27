@@ -4,6 +4,12 @@ pub mod db;
 pub mod media;
 pub mod model;
 
+/// The repository's own privacy audit. Test-only: it exists to be run, not to
+/// ship, and it is here rather than in a script because the suite is the one
+/// place every change is guaranteed to pass through.
+#[cfg(test)]
+mod audit;
+
 /// Storage schema version, tracked in `meta.schema_version`.
 pub const SCHEMA_VERSION: i64 = 9;
 

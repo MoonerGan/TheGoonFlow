@@ -253,7 +253,7 @@ the board's *In review* column is the current list.
      stored (measured `200 image/jpeg 177 497 B` for page 1, `image/webp 76 300 B` for
      page 7, with or without a referer, with or without a cookie).
  28. A rule34/gelbooru **file** link (#50), e.g.
-     `https://wimg.rule34.xxx/images/3043/a6cf….jpeg?3411909` → the picture stores, and the
+     `https://wimg.rule34.xxx/images/9000/a6cf….jpeg?9000003` → the picture stores, and the
      note must say the tags could not be read: that site's metadata api answers a
      Cloudflare bot check (measured `403 text/html` plus `cf-mitigated: challenge` for this
      app's honest UA, for a browser UA and for no UA at all, while the file host answers the
@@ -404,6 +404,19 @@ the board's *In review* column is the current list.
         limit and what to do instead (`is 18 MB, over this app's 16 MB limit for cover
         art`, `… save the file and add it with + Images`), never a raw byte count.
 
+  39. **The repo holds no url that names a real item** (found while reviewing #76:
+      33 content urls - post ids, file hashes, one gallery gid **and its showkey**,
+      one f95 poster avatar id - sat in committed test data and docs). The check is
+      `fixture_urls_in_the_repo_are_never_real` in goon-core: it reads `git ls-files`,
+      scans every tracked text file for a url that addresses one item (a CDN file link,
+      a post id, a `/g/<gid>/<key>/` gallery, a `<slug>.<id>` thread, a content hash, a
+      file named by a number) and insists every id inside it is placeholder-shaped. It
+      prints its coverage - 106 tracked text files, 57 content-shaped urls at the time of
+      writing - and `the_audit_refuses_a_real_shaped_url` feeds it real-shaped urls and
+      insists it reject them, so it cannot rot into the vacuous `CLEAN` of DEVELOPMENT §4
+      item 29. Live probes take their target from `GOON_PROBE_*` instead (same item, §4
+      item 30).
+
 ## 4. House rules that prevent whole classes of damage
 
 - **Never edit non-ASCII docs/UI text through PowerShell.** This machine's ANSI
@@ -411,6 +424,9 @@ the board's *In review* column is the current list.
   UTF-8 (em dashes become ` E`, newlines get swallowed). Use a node script or the
   editor's tools; audit with `node tools\char-audit.js`, repair with
   `node tools\restore-nonascii.js`.
+- **No committed url may name a real item** (DEVELOPMENT §4 item 30): fixtures use
+  placeholder ids, live probes read theirs from `GOON_PROBE_*`. The audit is a test, and
+  it prints how much it read.
 - Nothing vault-shaped may be committed. `.gitignore` covers `flow.cfg` (the plaintext
   pointer beside the exe), `chrome.cfg` (the plaintext decoy title, also beside the exe),
   `goonflow-vault/`, `*.db` / `*.db-wal` / `*.db-shm`, `*-journal`, `*.log`, `tools/*.log`

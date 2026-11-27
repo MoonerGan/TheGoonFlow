@@ -13,7 +13,7 @@
 //! * [`file_client_for`] sends an ordinary browser UA and is used only for the
 //!   **image/file bytes the user asked for** (clip covers, thumbnails, direct
 //!   file links). Content CDNs reject anything that is not a browser: measured on
-//!   `wimg.rule34.xxx/images/7783/…png?8886918`, our UA gets a 403 with a 77 KB
+//!   `wimg.rule34.xxx/images/9004/…png?9000016`, our UA gets a 403 with a 77 KB
 //!   error page while a browser UA gets 200 with the real 1 042 205 byte PNG.
 //!   `Referer` makes no difference there — only the UA does.
 //!
@@ -212,7 +212,7 @@ mod ua_policy_tests {
     async fn page_clients_are_honest_and_file_clients_look_like_browsers() {
         let state = locked_down_state();
         let (port, rx) = stub_server(3);
-        let url = format!("http://127.0.0.1:{port}/images/7783/post.png?8886918");
+        let url = format!("http://127.0.0.1:{port}/images/9004/post.png?9000016");
 
         client_for(&state, 5)
             .unwrap()
@@ -349,12 +349,16 @@ mod wiring_tests {
 ///
 /// ```text
 /// $env:GOON_EH_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\ehentaicookie.txt" -Raw).Trim()
+/// $env:GOON_PROBE_BOORU_API / GOON_PROBE_BOORU_FILE / GOON_PROBE_BOORU_MP4 /
+/// GOON_PROBE_EH_GALLERY = urls from your own library: no url that names a real
+/// post is committed here, so the rows that need one skip until you supply it.
 /// powershell -ExecutionPolicy Bypass -Command "& tools\dev-env.ps1; `
 ///   cargo test -p goonflow-desktop --lib -- --ignored --nocapture --test-threads 1 live_site_answers"
 /// ```
 #[cfg(test)]
 mod live_probe {
     use super::*;
+    use crate::probe_url;
     use std::time::Duration;
 
     /// Same knobs as `build_client`, minus the vault (no proxy to honor).
@@ -371,6 +375,15 @@ mod live_probe {
             b = b.http1_only();
         }
         b.build().expect("client")
+    }
+
+    /// `scheme://host` of a url, i.e. the referer a file host accepts (the whole
+    /// finding of #64). Written here and not in the shipping path because the
+    /// shipping path derives its referer from the site key, not from a url.
+    fn origin_of(url: &str) -> String {
+        let (scheme, rest) = url.split_once("://").unwrap_or(("https", url));
+        let host = rest.split('/').next().unwrap_or(rest);
+        format!("{scheme}://{host}")
     }
 
     /// One request, printed in one line: status, content type, size, and the
@@ -415,10 +428,7 @@ mod live_probe {
                     .collect::<Vec<_>>()
                     .join(" ");
                 let bytes = r.bytes().await.map(|b| b.len()).unwrap_or(0);
-                println!(
-                    "{label:<44} {:<3} {kind} {bytes} B  {cf}",
-                    status.as_u16(),
-                );
+                println!("{label:<44} {:<3} {kind} {bytes} B  {cf}", status.as_u16(),);
                 status.is_success() && bytes > 0
             }
         }
@@ -439,7 +449,9 @@ mod live_probe {
     fn grab(html: &str, pat: &str) -> Option<String> {
         let i = html.find(pat)? + pat.len();
         let rest = &html[i..];
-        let end = rest.find(['"', '\'', ')', ' ', ';', '\n']).unwrap_or(rest.len());
+        let end = rest
+            .find(['"', '\'', ')', ' ', ';', '\n'])
+            .unwrap_or(rest.len());
         let s = rest[..end].trim();
         (!s.is_empty()).then(|| s.to_string())
     }
@@ -449,7 +461,9 @@ mod live_probe {
     fn grab_url(html: &str, pat: &str) -> Option<String> {
         let i = html.find(pat)?;
         let rest = &html[i..];
-        let end = rest.find(['"', '\'', ')', ' ', ';', '\n']).unwrap_or(rest.len());
+        let end = rest
+            .find(['"', '\'', ')', ' ', ';', '\n'])
+            .unwrap_or(rest.len());
         let s = rest[..end].trim();
         (!s.is_empty()).then(|| s.to_string())
     }
@@ -467,107 +481,124 @@ mod live_probe {
         let ck = cookie.as_deref();
 
         println!("--- rule34: does the site still answer, and does the CDN care? ---");
-        // The dapi call clip() makes for a rule34 post link.
-        ask(
-            "rule34 dapi, honest UA",
-            "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id=3411909",
-            crate::ingest::UA,
-            Some("https://rule34.xxx"),
-            None,
-            false,
-        )
-        .await;
-        ask(
-            "rule34 dapi, browser UA",
-            "https://rule34.xxx/public/index.php?page=dapi&s=post&q=index&json=1&id=3411909",
-            FILE_UA,
-            Some("https://rule34.xxx"),
-            None,
-            false,
-        )
-        .await;
-        // The clipped file link itself, exactly as ingest::get_bytes asks for it.
-        ask(
-            "rule34 cdn, file UA + referer (h2)",
-            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
-            FILE_UA,
-            Some("https://rule34.xxx"),
-            None,
-            false,
-        )
-        .await;
-        ask(
-            "rule34 cdn, file UA + referer (http1)",
-            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
-            FILE_UA,
-            Some("https://rule34.xxx"),
-            None,
-            true,
-        )
-        .await;
-        ask(
-            "rule34 cdn, honest UA + referer",
-            "https://wimg.rule34.xxx//images/3043/a6cf369e5d7e473d9decc31cf7d0e1b9.jpeg?3411909",
-            crate::ingest::UA,
-            Some("https://rule34.xxx"),
-            None,
-            true,
-        )
-        .await;
+        // The dapi call clip() makes for a rule34 post link, and the clipped file
+        // link, both taken from the operator's library (see `probe_url`).
+        if let Some(api) = probe_url("GOON_PROBE_BOORU_API", "rule34 dapi rows") {
+            ask(
+                "rule34 dapi, honest UA",
+                &api,
+                crate::ingest::UA,
+                Some("https://rule34.xxx"),
+                None,
+                false,
+            )
+            .await;
+            ask(
+                "rule34 dapi, browser UA",
+                &api,
+                FILE_UA,
+                Some("https://rule34.xxx"),
+                None,
+                false,
+            )
+            .await;
+        }
+        if let Some(file) = probe_url("GOON_PROBE_BOORU_FILE", "rule34 cdn rows") {
+            // The clipped file link itself, exactly as ingest::get_bytes asks for it.
+            ask(
+                "rule34 cdn, file UA + referer (h2)",
+                &file,
+                FILE_UA,
+                Some("https://rule34.xxx"),
+                None,
+                false,
+            )
+            .await;
+            ask(
+                "rule34 cdn, file UA + referer (http1)",
+                &file,
+                FILE_UA,
+                Some("https://rule34.xxx"),
+                None,
+                true,
+            )
+            .await;
+            ask(
+                "rule34 cdn, honest UA + referer",
+                &file,
+                crate::ingest::UA,
+                Some("https://rule34.xxx"),
+                None,
+                true,
+            )
+            .await;
+        }
 
-        // 2026-11-25, the URL the user reported as `http 403 Forbidden` when
+        // 2026-11-25, the clip the user reported as `http 403 Forbidden` when
         // `store_video` asked for it (video.rs:133-137: file_client_for +
-        // REFERER "https://{site}"). The same URL answers 200 / 59 MB to a
+        // REFERER "https://{site}"). The same url answered 200 / 59 MB to a
         // browser and to a plain node fetch with those exact headers, so the
         // question this probe answers is: what does the *app's* stack get, and
         // does the answer carry Cloudflare markers (a bot check) or not.
-        let mp4 = "https://ahri2mp4.rule34.xxx//images/7158/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771";
-        println!("--- rule34 mp4 host: the reported 403, replayed on our stack ---");
-        ask(
-            "ahri2mp4, file UA + referer site (h2)",
-            mp4,
-            FILE_UA,
-            Some("https://ahri2mp4.rule34.xxx"),
-            None,
-            false,
-        )
-        .await;
-        ask(
-            "ahri2mp4, file UA + referer site (http1)",
-            mp4,
-            FILE_UA,
-            Some("https://ahri2mp4.rule34.xxx"),
-            None,
-            true,
-        )
-        .await;
-        ask(
-            "ahri2mp4, file UA, referer rule34.xxx",
-            mp4,
-            FILE_UA,
-            Some("https://rule34.xxx"),
-            None,
-            false,
-        )
-        .await;
-        ask("ahri2mp4, file UA, no referer", mp4, FILE_UA, None, None, false).await;
-        ask(
-            "ahri2mp4, honest UA, no referer",
-            mp4,
-            crate::ingest::UA,
-            None,
-            None,
-            false,
-        )
-        .await;
+        let replay = probe_url("GOON_PROBE_BOORU_MP4", "the reported-403 replay rows");
+        if let Some(mp4) = replay.as_deref() {
+            println!("--- rule34 mp4 host: the reported 403, replayed on our stack ---");
+            ask(
+                "mp4 host, file UA + referer site (h2)",
+                mp4,
+                FILE_UA,
+                Some(origin_of(mp4).as_str()),
+                None,
+                false,
+            )
+            .await;
+            ask(
+                "mp4 host, file UA + referer site (http1)",
+                mp4,
+                FILE_UA,
+                Some(origin_of(mp4).as_str()),
+                None,
+                true,
+            )
+            .await;
+            ask(
+                "mp4 host, file UA, referer rule34.xxx",
+                mp4,
+                FILE_UA,
+                Some("https://rule34.xxx"),
+                None,
+                false,
+            )
+            .await;
+            ask(
+                "mp4 host, file UA, no referer",
+                mp4,
+                FILE_UA,
+                None,
+                None,
+                false,
+            )
+            .await;
+            ask(
+                "mp4 host, honest UA, no referer",
+                mp4,
+                crate::ingest::UA,
+                None,
+                None,
+                false,
+            )
+            .await;
+        }
         // The store_video request replayed **verbatim** (video.rs:133-139):
         // file_client_for(state, 600) + REFERER formatted from the item's site
         // key. clip_url stores the site as the key `rule34`, not a hostname, so
         // the referer this sends is `https://rule34`. If this line 403s while the
         // `ask` rows above 200, the bug is ours and it is the referer.
-        {
+        if let Some(mp4) = replay.as_deref() {
             let state = crate::http::ua_policy_tests::locked_down_state();
-            for site in ["rule34", "ahri2mp4.rule34.xxx", "rule34.xxx"] {
+            let mut referers = vec![origin_of(mp4)];
+            referers.extend(["rule34", "rule34.xxx"].into_iter().map(|s| s.to_string()));
+            for site in referers {
                 let client = file_client_for(&state, 600).expect("file client");
                 let r = client
                     .get(mp4)
@@ -592,13 +623,16 @@ mod live_probe {
                         };
                         println!("store_video replay, referer https://{site:<22} {st:<3} {ct} {n} B{hop}");
                     }
-                    Err(e) => println!("store_video replay, referer https://{site:<22} TRANSPORT {e}"),
+                    Err(e) => {
+                        println!("store_video replay, referer https://{site:<22} TRANSPORT {e}")
+                    }
                 }
             }
         }
-        // A range request is what a streaming player would send (#64): does this
-        // host honour `Range` at all, and does that change what answers 403?
-        {
+        // A range request is what a streaming player would send (#64, and #79 is
+        // going to ask this again): does this host honour `Range` at all, and does
+        // that change what answers 403?
+        if let Some(mp4) = replay.as_deref() {
             let r = client(FILE_UA, true, false)
                 .get(mp4)
                 .header(reqwest::header::RANGE, "bytes=0-65535")
@@ -614,9 +648,9 @@ mod live_probe {
                         .unwrap_or("-")
                         .to_string();
                     let n = r.bytes().await.map(|b| b.len()).unwrap_or(0);
-                    println!("ahri2mp4, file UA + Range 0-65535            {st:<3} {n} B accept-ranges={ar}");
+                    println!("mp4 host, file UA + Range 0-65535           {st:<3} {n} B accept-ranges={ar}");
                 }
-                Err(e) => println!("ahri2mp4, file UA + Range 0-65535            TRANSPORT {e}"),
+                Err(e) => println!("mp4 host, file UA + Range 0-65535           TRANSPORT {e}"),
             }
         }
 
@@ -631,7 +665,12 @@ mod live_probe {
         )
         .await
         {
-            let body = page_text("https://e621.net/posts.json?limit=1", crate::ingest::UA, None).await;
+            let body = page_text(
+                "https://e621.net/posts.json?limit=1",
+                crate::ingest::UA,
+                None,
+            )
+            .await;
             let file = body.and_then(|t| {
                 serde_json::from_str::<serde_json::Value>(&t)
                     .ok()
@@ -639,56 +678,157 @@ mod live_probe {
             });
             println!("e621 live file url: {file:?}");
             if let Some(url) = file {
-                ask("e621 file, file UA + referer", &url, FILE_UA, Some("https://e621.net"), None, false).await;
-                ask("e621 file, file UA, no referer", &url, FILE_UA, None, None, false).await;
-                ask("e621 file, honest UA + referer", &url, crate::ingest::UA, Some("https://e621.net"), None, false).await;
+                ask(
+                    "e621 file, file UA + referer",
+                    &url,
+                    FILE_UA,
+                    Some("https://e621.net"),
+                    None,
+                    false,
+                )
+                .await;
+                ask(
+                    "e621 file, file UA, no referer",
+                    &url,
+                    FILE_UA,
+                    None,
+                    None,
+                    false,
+                )
+                .await;
+                ask(
+                    "e621 file, honest UA + referer",
+                    &url,
+                    crate::ingest::UA,
+                    Some("https://e621.net"),
+                    None,
+                    false,
+                )
+                .await;
             }
         }
 
         println!("--- e-hentai: gallery page, sprite sheet, slideshow, cookie verdicts ---");
-        // gid+key of the gallery the user reported; the key is part of the url
-        // now, /g/<gid>/ alone is a bare apache 404.
-        let gallery = "https://e-hentai.org/g/4089666/b9d914bef4/";
-        ask("eh gallery, honest UA, no cookie", gallery, crate::ingest::UA, None, None, false).await;
-        if ck.is_some() {
-            ask("eh gallery, honest UA, cookie", gallery, crate::ingest::UA, None, ck, false).await;
-            ask("eh gallery, file UA, cookie", gallery, FILE_UA, None, ck, false).await;
-        }
-        // The sprite sheet and the slideshow keys are per-session, so pull them
-        // out of the page we just got instead of hardcoding ones that rot.
-        if let Some(html) = page_text(gallery, crate::ingest::UA, ck).await {
-            // Two different sheets in the 2026 page: the cover tile on ehgt.org
-            // (`gthumb`, offset 0 0) and the grid tiles on a random
-            // `*.hath.network` host, laid out side by side with negative x
-            // offsets. Both are webp; neither was there before (#46's gdtm/
-            // og:image markup is gone).
-            let cover = grab(&html, "background:transparent url(");
-            let grid = grab(&html, "url(").filter(|g| !g.contains("ehgt.org"));
-            let slide = grab_url(&html, "https://e-hentai.org/s/");
-            println!(
-                "eh page {} B, cover sheet {cover:?}, grid sheet {grid:?}",
-                html.len()
-            );
-            println!("eh live slide: {slide:?}");
-            for s in [cover, grid].into_iter().flatten() {
-                ask("eh cover sheet, file UA + referer", &s, FILE_UA, Some("https://e-hentai.org/"), ck, false).await;
-                ask("eh cover sheet, file UA, no referer", &s, FILE_UA, None, ck, false).await;
+        // The gallery these rows follow is one from the operator's library (see
+        // `probe_url`): the key is part of the url now, `/g/<gid>/` alone is a
+        // bare apache 404, which is what #46 was filed as.
+        let gallery = probe_url("GOON_PROBE_EH_GALLERY", "the e-hentai rows");
+        if let Some(gallery) = gallery.as_deref() {
+            ask(
+                "eh gallery, honest UA, no cookie",
+                gallery,
+                crate::ingest::UA,
+                None,
+                None,
+                false,
+            )
+            .await;
+            if ck.is_some() {
+                ask(
+                    "eh gallery, honest UA, cookie",
+                    gallery,
+                    crate::ingest::UA,
+                    None,
+                    ck,
+                    false,
+                )
+                .await;
+                ask(
+                    "eh gallery, file UA, cookie",
+                    gallery,
+                    FILE_UA,
+                    None,
+                    ck,
+                    false,
+                )
+                .await;
             }
-            if let Some(s) = slide {
-                ask("eh slideshow, honest UA", &s, crate::ingest::UA, Some(gallery), ck, false).await;
-                let slide_body = page_text(&s, crate::ingest::UA, ck).await.unwrap_or_default();
-                let full = grab_url(&slide_body, "https://e-hentai.org/r/");
-                let orig = grab_url(&slide_body, "https://e-hentai.org/fullimg/");
+            // The sprite sheet and the slideshow keys are per-session, so pull them
+            // out of the page we just got instead of hardcoding ones that rot.
+            if let Some(html) = page_text(gallery, crate::ingest::UA, ck).await {
+                // Two different sheets in the 2026 page: the cover tile on ehgt.org
+                // (`gthumb`, offset 0 0) and the grid tiles on a random
+                // `*.hath.network` host, laid out side by side with negative x
+                // offsets. Both are webp; neither was there before (#46's gdtm/
+                // og:image markup is gone).
+                let cover = grab(&html, "background:transparent url(");
+                let grid = grab(&html, "url(").filter(|g| !g.contains("ehgt.org"));
+                let slide = grab_url(&html, "https://e-hentai.org/s/");
                 println!(
-                    "eh live r/ image: {full:?}, fullimg: {orig:?} (slide page {} B)",
-                    slide_body.len()
+                    "eh page {} B, cover sheet {cover:?}, grid sheet {grid:?}",
+                    html.len()
                 );
-                if let Some(f) = full {
-                    ask("eh r/ image, file UA + referer", &f, FILE_UA, Some(&s), ck, false).await;
-                    ask("eh r/ image, honest UA, no cookie", &f, crate::ingest::UA, None, None, false).await;
+                println!("eh live slide: {slide:?}");
+                for s in [cover, grid].into_iter().flatten() {
+                    ask(
+                        "eh cover sheet, file UA + referer",
+                        &s,
+                        FILE_UA,
+                        Some("https://e-hentai.org/"),
+                        ck,
+                        false,
+                    )
+                    .await;
+                    ask(
+                        "eh cover sheet, file UA, no referer",
+                        &s,
+                        FILE_UA,
+                        None,
+                        ck,
+                        false,
+                    )
+                    .await;
                 }
-                if let Some(f) = orig {
-                    ask("eh fullimg, file UA + referer", &f, FILE_UA, Some(&s), ck, false).await;
+                if let Some(s) = slide {
+                    ask(
+                        "eh slideshow, honest UA",
+                        &s,
+                        crate::ingest::UA,
+                        Some(gallery),
+                        ck,
+                        false,
+                    )
+                    .await;
+                    let slide_body = page_text(&s, crate::ingest::UA, ck)
+                        .await
+                        .unwrap_or_default();
+                    let full = grab_url(&slide_body, "https://e-hentai.org/r/");
+                    let orig = grab_url(&slide_body, "https://e-hentai.org/fullimg/");
+                    println!(
+                        "eh live r/ image: {full:?}, fullimg: {orig:?} (slide page {} B)",
+                        slide_body.len()
+                    );
+                    if let Some(f) = full {
+                        ask(
+                            "eh r/ image, file UA + referer",
+                            &f,
+                            FILE_UA,
+                            Some(&s),
+                            ck,
+                            false,
+                        )
+                        .await;
+                        ask(
+                            "eh r/ image, honest UA, no cookie",
+                            &f,
+                            crate::ingest::UA,
+                            None,
+                            None,
+                            false,
+                        )
+                        .await;
+                    }
+                    if let Some(f) = orig {
+                        ask(
+                            "eh fullimg, file UA + referer",
+                            &f,
+                            FILE_UA,
+                            Some(&s),
+                            ck,
+                            false,
+                        )
+                        .await;
+                    }
                 }
             }
         }
@@ -707,18 +847,28 @@ mod live_probe {
             let with_igneous = format!("{c}; igneous=mystery");
             println!(
                 "exhentai root, cookie + igneous   {} B",
-                page_text("https://exhentai.org/", crate::ingest::UA, Some(&with_igneous))
+                page_text(
+                    "https://exhentai.org/",
+                    crate::ingest::UA,
+                    Some(&with_igneous)
+                )
+                .await
+                .map(|t| t.len())
+                .unwrap_or(0)
+            );
+            if let Some(g) = gallery.as_deref() {
+                println!(
+                    "exhentai /g/ cookie + igneous     {} B",
+                    page_text(
+                        g.replace("e-hentai", "exhentai").as_str(),
+                        crate::ingest::UA,
+                        Some(&with_igneous)
+                    )
                     .await
                     .map(|t| t.len())
                     .unwrap_or(0)
-            );
-            println!(
-                "exhentai /g/ cookie + igneous     {} B",
-                page_text(gallery.replace("e-hentai", "exhentai").as_str(), crate::ingest::UA, Some(&with_igneous))
-                    .await
-                    .map(|t| t.len())
-                    .unwrap_or(0)
-            );
+                );
+            }
             // redirects NOT followed: for exhentai the login hop is the verdict.
             let r = client(crate::ingest::UA, false, false)
                 .get("https://exhentai.org/")

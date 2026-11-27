@@ -259,7 +259,7 @@ tools/
   originals (`kind='full'`), content-hash deduped BLOBs. Keeping them in the
   DB keeps the wipe story to "shred one directory". Media dupe suggestions
   (`pairing_suggestions(conn, Some("media"))`) pair *different items sharing
-  one stored hash* — titles are useless for `1743761874698456.jpg`.
+  one stored hash* — titles are useless for `1000000000000.jpg`.
 - `site_settings` (v2) — per site: `enabled`, `cookie`, `rate_ms`. Read with
   `site_enabled(conn, site, default)` — the default differs per site (repack
   mirrors ship **off**, D8), so never assume `true`.
@@ -345,7 +345,7 @@ tools/
 10. **Site names come from `HOST_SUFFIXES`, never from a host label.** Early
     field reports got site "i" (from `i.4cdn.org`) and "wimg". Unknown hosts
     fall back to the *registrable domain*, and booru-CDN file links carrying a
-    numeric query id (`?11353035`) route through the site API (`Mode::BooruId`)
+    numeric query id (`?9000004`) route through the site API (`Mode::BooruId`)
     — pulling bytes from a CDN with the CDN as referer is what hotlink
     protection kills. `JobInfo.finished_at` exists so the ActivityBar can
     expire finished rows; don't remove it.
@@ -561,6 +561,32 @@ tools/
     general rule: when quoting a green check, know what the command actually
     looked at — a pass line with no coverage count is a red flag, and audit tools
     must state their coverage.
+30. **Nothing in this repository may name a real item on a content site**
+    (found 2026-11-26 while reviewing #76, when the branch's leak scan flagged a
+    fixture url that nobody could prove was synthetic). The repository is public,
+    and a committed url that addresses one specific post, gallery, thread or file
+    is a fact about somebody's library: it stays there whatever happens to the
+    account, and "the item is public anyway" is not the point. The sweep found 33
+    such urls in files that had already been reviewed and merged - among them one
+    gallery's real gid **and its real showkey**, which is nearer a credential
+    than a link, and one real f95 poster's avatar id. So:
+
+    - a committed fixture url must be **self-evidently fake**: placeholder ids
+      (`9000001`), placeholder hashes (`1111...aaaa`), `example.org`, `x.to`. Its
+      *shape* has to stay valid for whatever parses it, or the fixture has stopped
+      testing the thing while looking clean;
+    - a **live probe** may not use a fake url - it would "succeed" by being
+      refused and then argue from a policy no host holds - so it reads its target
+      from the environment (`probe_url` in the desktop crate: `GOON_PROBE_BOORU_API`,
+      `GOON_PROBE_BOORU_FILE`, `GOON_PROBE_BOORU_MP4`, `GOON_PROBE_EH_GALLERY`,
+      `GOON_PROBE_F95_THREAD`) and says out loud which one it wanted. A print-only
+      probe skips visibly; the two *rehearsals* that assert a capability panic
+      instead, because a rehearsal that skips quietly is how #46 hid for a release;
+    - the rule runs on every `cargo test` (`fixture_urls_in_the_repo_are_never_real`
+      plus `the_audit_refuses_a_real_shaped_url`, which proves the check still
+      catches what it is for) and prints its coverage, for the reason in item 29.
+
+    A real url belongs in an **untracked** file on the machine that uses it.
 
 ## 5. Testing
 
@@ -579,10 +605,13 @@ cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
   `file:///…` links), and a real-vault roundtrip proving local `file:///…mp4`
   / `.png` bookmarks and direct booru CDN links import as **media** (the M1
   field report said they landed in "unrecognized").
-- `ingest` — classify() for every supported shape (post pages, `…/file.gif?267940`
+- `ingest` — classify() for every supported shape (post pages, `…/file.gif?9000001`
   CDN links, `file:///C:/…`, UNC, mirrors), `local_path` Windows path handling,
   and the HTML parsers (e-hentai gate vs gallery, DLsite og:*, f95 og:title →
   title + version + engine tags). All parse-only: no network in tests.
+- live probes (`http.rs`, `ingest.rs`) stay `#[ignore]`d and read their target url
+  from the environment (`GOON_PROBE_*` via `probe_url`): no url naming a real item is
+  committed, so a probe without a target names the variable it wanted.
 - `jobs` — one job per kind, progress visible in the snapshot, `cancel` /
   `cancel_all` reach the work loop, finished list bounded.
 - `bookmarks` (job path) — a pre-cancelled import stops early and reports
@@ -704,13 +733,13 @@ Set-Location apps\desktop
     at all. The CDN answers that same post's file at `200 image/jpeg 678 634 B`
     to all three. So a link that **names a file** is classified
     `Mode::DirectMedia` and never sent to the api, even when a post id can be
-    read out of the query (`…jpeg?3411909`) — the id is kept so the note can name
+    read out of the query (`…jpeg?9000003`) — the id is kept so the note can name
     the post it came from, and the note says plainly that the tags could not be
     read. A link that names no file is a post page, and that still goes to the
     api. **e621 is the exception**: its api and its file host both answer 200, so
     its post pages keep the api path and keep their tags.
   - rule34 CDN file URLs carry the **post id in the query**
-    (`…/7783/<md5>.png?8886918`) — free identity to verify against.
+    (`…/9004/<md5>.png?9000016`) — free identity to verify against.
   - **f95zone without a login cookie** returns the thread with a "register to …"
     wall and **zero** post images. With a saved cookie the page grows
     (~290 KB → ~449 KB) and the art appears, **lazily**: `<img
@@ -735,7 +764,7 @@ Set-Location apps\desktop
     link finds its gallery.
   - **The `/s/<imgkey>/<gid>-<n>` slideshow page is worth fetching**
     (*re-measured*): `200`, 4 534 B, and it carries
-    `<img id="img" src="https://<rand>.hath.network/h/<hash>-…-1200-630-jpg/keystamp=…;fileindex=…;xres=org/12349451_0.jpg">`
+    `<img id="img" src="https://<rand>.hath.network/h/<hash>-…-1200-630-jpg/keystamp=…;fileindex=…;xres=org/9000009_0.jpg">`
     — the **full art of that one page**, which answered `200 image/jpeg
     177 497 B` with our UA, referer or not, cookie or not. The host and the
     `keystamp` are handed out per request, so the *page link* is what gets
