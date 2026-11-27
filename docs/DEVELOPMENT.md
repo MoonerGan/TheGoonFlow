@@ -942,6 +942,44 @@ tools/
     those numbers are a floor, since the probe runs plaintext SQLite and a real vault reads
     every page through the codec. The 2 ms question that does move the plan is what runs.
 
+35. **The query box is the only filter state a view has (#76 stage S5).** The text in
+    the box *is* the query: chips, preset buttons and autocomplete rows all edit that
+    text (`rewrite`, `removeTerm`, `insertTerm`), and nothing beside it may hold a
+    predicate of its own. That is not tidiness — the four rails this replaced each kept
+    a selected-facet state, which is how a rail goes stale against its own grid:
+    offering a chip that produces an empty page, or quietly still filtering after the
+    rows behind it changed. The old games view showed the same failure from the other
+    side, filtering the fetched page in JS (`filtered`), which breaks paging and the
+    paired total at once, because it filters a *page* and not the result. Two pins:
+    `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text` (the
+    #40 queues are grammar text and the grammar answers them) and
+    `tools\filter-ui-probe.js` (one preset click writes `-has:tags` into the box; one
+    chip click deletes a term from the box and the grid follows the text left behind).
+    Stage S6 deletes that client-side filter instead of teaching it a second predicate.
+    And the box stays session state, never persisted: invariant 28.
+
+36. **A number on the grid belongs to the query on screen (#76 stage S5).** A keystroke
+    page and a committed page are different statements, so three rules hold together:
+
+    * a debounce tick re-runs the **page** with `withCount: false`  — the count is a
+      second statement over the whole result (46-151 ms at 100k items, TESTING item 46),
+      and it belongs to the query the user commits to with Enter or blur;
+    * an uncounted page renders `… matches`  — not a spinner, not the previous query's
+      number, not `0 matches`. `total` is cleared exactly when the query changes, and a
+      page or an append may **not** overwrite a known total with the `null` that
+      `withCount: false` answers;
+    * `total = 0` together with `needs_facts` renders *not measured yet*, never
+      `0 matches` (invariant 27), while a term that parses and matches nothing gets the
+      plain "Nothing matches" state, so "nobody looked" and "there is nothing" stay two
+      different sentences on screen.
+
+    The probe broke the second rule by itself on its first run: *Load more* re-ran an
+    uncounted page, and `showing 303 of 303` went back to "(press Enter for the total)"
+    for a number the view had already paid for. A control that offers a page the known
+    total says does not exist is the same class of lie, so *Load more* is disabled once
+    the loaded count reaches a known `total` (invariant 31 is why there are no page
+    numbers to distrust instead).
+
 ## 5. Testing
 
 ```powershell

@@ -117,6 +117,7 @@ single-instance behaviour are the two things unit tests cannot cover.
 | `tools\panic-hold-test.ps1` | holding 3 s escalates to the crypto-erase path |
 | `tools\panic-stale-test.ps1` | a stale erase marker from an old run does not fire (and the watcher really notices a fresh one) |
 | `tools\window-probe.ps1` | enumerates every window a running instance owns, with styles + pixel proof — how the 16×16 hand-off window was shown to paint nothing |
+| `tools\filter-ui-probe.js` | the #76 query box in a live session: it runs the **debug** exe of the tree it lives in (and refuses to start if that exe is older than any file under `apps\desktop\src` or `dist`, because the frontend is baked into the binary), against a throwaway vault it builds at `%TEMP%\goon-filter-probe`, and types real keystrokes into the real box through WebView2 DevTools, then reads the page back: chip row *above* the grid, `… matches` while typing and `N matches` after Enter, an inline parse error that survives as state, the `ext:gif ext:mp4` conflict hint, the *not measured yet* row for an unprobed fact, the predicate shape each tag term got, *Load more* / *Back to start* across a real 300-row page boundary with no page numbers anywhere, and the *Possible dupes* + *Vault* items plan §5 keeps |
 
 Safety rules for this group:
 
@@ -124,6 +125,12 @@ Safety rules for this group:
   `panic-stale-test.ps1` against a *scratch copy* of the exe in its own folder with
   no `flow.cfg` beside it, so no real vault is attached. The scripts take `-Exe`
   and `-Dir` for that reason.
+- `filter-ui-probe.js` types arbitrary queries into **whatever vault the app has**
+  open, so it will not start unless the scratch folder is exactly
+  `%TEMP%\goon-filter-probe`, and it checks a second time after unlocking that
+  `app_status.vaultRoot` is that folder before it types a single character. If the
+  single-instance plugin ever hands the copy to a running app, that second check is
+  what stops the probe (invariant 29: a guard that cannot fire is worse than none).
 - Kill leftover instances before rebuilding (`Get-Process GoonFlow | Stop-Process
   -Force`) — a running instance holds `target\release\GoonFlow.exe` open and cargo
   fails with `failed to remove file`.
@@ -962,6 +969,78 @@ the board's *In review* column is the current list.
          `db::tests::the_shape_rule_reads_the_counts_and_negation_overrides_them` (same
          ids, same paired total, the dense token probed, the rare one still a semi-join,
          and a negated token never an anti-join whatever its count says).
+
+    49. **The query box, typed into for real: `tools\filter-ui-probe.js`** (#76 stage
+       S5, DESIGN D26). Everything S5 promises about the media view is a *rendering*
+       claim, and the Rust suites prove only what a query means and what it returns.
+       So the box is driven in a live session: a copy of the tree's own **debug** exe
+       with a DevTools port, `window.__TAURI_INTERNALS__.invoke` plus
+       `Runtime.evaluate` as `viewer-layout-probe.js` does, into a throwaway vault at
+       `%TEMP%\goon-filter-probe` that the probe builds itself (three solid-colour PNGs
+       in three folders, because `import_image_files` makes **one item per call**, plus
+       300 stub video paths for the paging case). Fixtures are seeded only through real
+       commands - `create_vault`, `import_image_files`, `import_video_files`,
+       `add_item_tag` - so nothing writes the vault behind the app's back. Measured
+       2026-11-27: **13 cases / 16 recorded states, `VERDICT: all cases OK`**, exit 0,
+       exact strings in `tools\filter-ui-probe.log` (the console codepage mangles the
+       em dashes, so the log is the citation, not the transcript above it):
+      - *the number on the grid belongs to the query on screen.* Typing `big_breasts`
+        without pressing Enter renders `… matches · 3 in the library` over a grid of 2,
+        with `showing 2 (press Enter for the total)`; Enter renders
+        `2 matches · 3 in the library`. Across a real page boundary (303 items): page 1
+        is `showing 300 of 303` with *Load more* enabled, page 2 is
+        `showing 303 of 303` and the count line still reads `303 matches`. That last
+        claim **failed on the probe's first run**: `runQuery` copied `page.total` over
+        the total, and an uncounted append answers `null`, so the hint went back to
+        "(press Enter for the total)" for a number already paid for. Fixed (a page may
+        not overwrite a known total; only a query change clears it) and pinned by the
+        case. The same fix made *Load more* honest the other way: with a known total of
+        300 and 300 rows on screen the button now reads "That is all of it" instead of
+        offering a page that can only come back empty.
+      - *a parse error is form state.* `type:banana` prints the parser's own sentence
+        inline ("…is not a type - it is what GoonFlow read from the bytes…"), it is
+        still there 1.5 s later, it is not a toast, and the grid goes empty rather than
+        leave rows under a sentence that says the query is broken (invariant 24).
+      - *an unsatisfiable conjunction is named, not rendered as an empty grid.*
+        `ext:gif ext:mp4` says "cannot both be true: an item has exactly one `ext:`
+        value, so this matches nothing" and the empty state repeats it **without** the
+        *Not measured yet* row. Both at once was what the first run printed: an
+        unprobed fact and an impossible query are different sentences and now read
+        differently.
+      - *autocomplete, presets and chips all write text into the box.* `has:` offers
+        `has:thumb` / `has:tags`; the `no tags` preset puts `-has:tags` in the box and
+        that grammar answers `1 match` for the one untagged import; clicking the
+        `big_breasts` chip out of `big_breasts -anal` leaves `-anal` in the box, which
+        answers `2 matches`. A candidate count is labelled for what it measures: a
+        negated row reads "300 items carry this, and those are the rows that leave the
+        grid", because the grid under `-source:local` holds 3 (invariant 35).
+      - *an unmeasured fact still says so.* `length>30s` renders the "Not measured yet"
+        row with a **disabled** *Measure my files* button - the facts job is stage S7 -
+        and the count line reads `not measured yet · 3 in the library` instead of a
+        number (invariant 27). A term that parses but matches nothing (`source:ehentai`)
+        gets the plain "Nothing matches" state, so the two empties stay
+        distinguishable.
+      - *the chosen shape is printed.* `how this query ran (1 tag term)` expands to
+        `big_breasts: 2 of 3 items -> row probe` and `-anal: 1 of 3 items -> row
+        probe`: decision 13's fourth condition, carried on `SearchPage.shapes` and
+        pinned at the wire by `the_page_carries_each_tag_terms_chosen_shape_printed`.
+      - *invariant 24 measured rather than assumed.* In all eleven grid states the chip
+        row's bottom edge (264-374 px) is above the grid's top edge (288-398 px), its
+        parent computes to `flex/column`, and no control is labelled like a page
+        number - a keyset-paged grid has *Load more* and *Back to start* (invariant 31).
+      - *what S5 promised to keep.* The sidebar's sections are *Everything*, *Possible
+        dupes* and *Vault*; *Possible dupes* still opens ("No duplicates found." on the
+        throwaway vault) and the Vault section names the throwaway path.
+      - *honest limits, stated by the probe itself.* *Measure my files* is inert until
+        S7, so the `needs_facts` row is pinned only here  — `ext:` cannot be exercised as
+        a **filter**, because `db::set_item_extension_tag` has no production caller and
+        `add_item_tag` cannot mint an `extension` tag (S7's backfill), so `ext:` is
+        pinned here only as a parse-time conflict  — and there is no `add_source`
+        command, so provenance is exercised through the two importers that do write
+        `sources` rows - which turned out to differ: the video importer records a
+        `local` source, the image importer stores bytes and records **no** source at
+        all. That is why `source:local` answers 300 while `-source:local` answers 3,
+        and it is a fact about the importers that no rail ever showed.
 
 ## 4. House rules that prevent whole classes of damage
 

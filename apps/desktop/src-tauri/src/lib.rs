@@ -885,6 +885,14 @@ fn kind_stats(state: tauri::State<'_, AppState>) -> Result<Vec<(&'static str, i6
     goon_core::db::counts_by_kind(&opened.conn).map_err(err)
 }
 
+/// **Legacy, and stage S6 deletes it** (#76). This is the games grid's read path with
+/// the old facet arguments; the media grid left it in stage S5, and the games rails, the
+/// client-side `filtered` hack, the `tag`/`site`/`source` arguments and `source_stats`
+/// all go in the **same** S6 commit that puts `searchItems("games")` and `status:` in
+/// their place. Deleting the arguments here instead would leave the games rails inert —
+/// a rail that stops filtering is the silent breakage DESIGN forbids — so the wire stays
+/// whole for one more stage and nothing on the media view can reach it.
+///
 /// The flat argument list is the wire contract: `api.ts listItems` sends these
 /// keys and Tauri matches them by name. Nesting them into one struct argument
 /// would be the cleaner Rust shape but would change every grid call's payload for
@@ -916,6 +924,16 @@ fn list_items(
     goon_core::db::list_items(&opened.conn, &q).map_err(err)
 }
 
+/// #76 stage S5: the media view came off this command. Its four facet rails and the three
+/// #40 queues became grammar (`source:…`, a bare tag, `stored:local-only`,
+/// `-stored:disk`, `-has:tags`), pinned word-for-word against the badge SQL by
+/// `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`, so the
+/// preset chips and the old badges are one predicate counted two ways rather than two
+/// predicates that happen to agree today. The *core* functions (`db::list_items`,
+/// `db::source_stats`) stay in the crate for the same reason: importers call the first and
+/// that pin reads the second, which is how the equivalence stays checkable after the last
+/// caller goes away in stage S6.
+///
 /// Parse the box once, for the three query commands. A `ParseError` becomes its
 /// one-sentence message as a command error: Tauri delivers that as the rejected
 /// promise the form has already caught, and stage S5 shows it **inline under the
@@ -1029,6 +1047,13 @@ fn filter_suggest(
     goon_core::db::suggest(&opened.conn, scope, &ctx, limit.unwrap_or(12)).map_err(err)
 }
 
+/// **Legacy, and stage S6 deletes it** (#76). The media view's #40 badges left in stage
+/// S5: those three queues are grammar now — `stored:local-only`, `-stored:disk`,
+/// `-has:tags` — pinned word-for-word against this command's own SQL by
+/// `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`. GamesView
+/// still renders them, so the command stays one more stage and dies in the same S6 commit
+/// that replaces the games rails with `searchItems("games")` + `status:`; taking it away
+/// on its own would leave those queue buttons inert.
 #[tauri::command]
 fn source_stats(
     state: tauri::State<'_, AppState>,
@@ -2785,6 +2810,7 @@ mod integration_tests {
             items: vec![],
             total: None,
             needs_facts: false,
+            shapes: vec![],
         };
         let json = serde_json::to_string(&uncounted).unwrap();
         assert!(json.contains("\"total\":null"), "{json}");
@@ -2793,6 +2819,7 @@ mod integration_tests {
             items: vec![],
             total: Some(0),
             needs_facts: false,
+            shapes: vec![],
         };
         assert!(
             serde_json::to_string(&counted)
@@ -2800,6 +2827,42 @@ mod integration_tests {
                 .contains("\"total\":0"),
             "a real zero still crosses as a number, because that is an answer"
         );
+    }
+
+    /// Decision 13's fourth condition, on the wire rather than in a probe log: the shape
+    /// each tag term got travels with the page, printed, so a user reporting "the grid is
+    /// slow" reports which shape ran on which counts. A page that only carried a timing
+    /// would leave the shape a guess, and the rule only helps if a reader can see it.
+    #[test]
+    fn the_page_carries_each_tag_terms_chosen_shape_printed() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        goon_core::db::init_schema(&conn).unwrap();
+        let parsed = goon_core::query::parse("big_breasts -anal", goon_core::query::Scope::Media)
+            .unwrap()
+            .plan_with(&goon_core::db::VaultStats::new(&conn));
+        let page = goon_core::db::SearchPage {
+            items: vec![],
+            total: Some(0),
+            needs_facts: false,
+            shapes: parsed
+                .shapes
+                .iter()
+                .map(|note| note.to_string())
+                .collect(),
+        };
+        let json = serde_json::to_string(&page).unwrap();
+        assert_eq!(page.shapes.len(), 2, "{json}");
+        // typed order, one note per tag term, and each says what it counted and what it
+        // chose — the empty fixture library has nothing, which is still an answer
+        assert!(
+            page.shapes[0].starts_with("big_breasts: ") && page.shapes[0].contains(" -> "),
+            "{json}"
+        );
+        assert!(
+            page.shapes[1].starts_with("-anal: ") && page.shapes[1].contains(" -> "),
+            "{json}"
+        );
+        assert!(json.contains("\"shapes\":[\"big_breasts:"), "{json}");
     }
 
     /// #76 decision 10: the page cursor on the wire. Tauri builds [`goon_core::db::PageCursor`]

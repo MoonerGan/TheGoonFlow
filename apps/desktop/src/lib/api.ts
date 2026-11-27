@@ -237,6 +237,13 @@ export type PairSuggestion = {
   bSrc: string;
 };
 
+/** **Legacy path, and #76 stage S6 deletes it.** The media grid left this call in stage
+ *  S5 — filtering there is the query box now (`searchItems`). GamesView still reads its
+ *  grid through it, so the `tag`/`site`/`source` facet arguments stay one more stage:
+ *  they die in the **same** S6 commit that puts `searchItems("games")` and `status:` in
+ *  place of the games rails, because an argument removed on its own would leave those
+ *  rails inert, and a facet that silently stops filtering is worse than a facet that is
+ *  still there. Nothing on the media view can reach them any more. */
 export const listItems = (
   limit = 300,
   offset = 0,
@@ -267,13 +274,18 @@ export type QueryView = "media" | "games";
  *  (rulings C). `null` means the call asked for the page only (`withCount: false`)
  *  — the shape a keystroke pays, because the count is a second statement over the
  *  whole result (measured at 100k items: 46-151 ms of count, against a page that is
- *  3 ms for a fact query and 196 ms for a dense tag).
- *  means the query read a fact this vault may never have measured, so a zero
- *  `total` is "not measured yet", not an answer (invariant 27). */
+ *  3 ms for a fact query and 196 ms for a dense tag). A view holding `null` renders
+ *  **no total at all**: not a spinner, not last time's number, and never a zero
+ *  (invariant 27). `needsFacts` means the query read a fact this vault may never have
+ *  measured, so a zero `total` is "not measured yet", not an answer. `shapes` prints
+ *  how each tag term was planned — `big_breasts: 60164 of 80000 items -> probe`, in
+ *  typed order — which is what makes "this grid is slow" a report someone can check
+ *  (decision 13, condition 4). */
 export type SearchPage = {
   items: ItemSummary[];
   total: number | null;
   needsFacts: boolean;
+  shapes: string[];
 };
 
 /** One autocomplete row. `token` is the whole term to insert — `-type:video`
@@ -323,7 +335,11 @@ export const filterSuggest = (view: QueryView, text: string, limit = 12) =>
 export const siteStats = (kind?: string) =>
   invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
 
-// source-state filters (#40): sidebar badges
+// source-state filters (#40): the queue vocabulary. The **wire** behind it came off in
+// #76 stage S5 (`source_stats` is gone from `lib.rs`) — the three queues are grammar now
+// (`stored:local-only`, `-stored:disk`, `-has:tags`). The type survives one stage only
+// because GamesView's rails, its `filtered` hack and this mirror die together in stage
+// S6: a half-deleted wire is the second filter language plan §5 forbids.
 export type SourceStats = { localOnly: number; noLocal: number; noTags: number };
 export const sourceStats = (kind?: "game" | "media") =>
   invoke<SourceStats>("source_stats", { kind: kind ?? null });

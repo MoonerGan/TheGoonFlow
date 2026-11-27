@@ -951,6 +951,13 @@ pub struct SearchPage {
     /// — stage S5 renders "not measured yet · measure my files" for it instead of
     /// a count that reads like one (invariant 27).
     pub needs_facts: bool,
+    /// Every tag term's chosen SQL shape, printed (see [`Plan::shapes`] and
+    /// [`crate::query::ShapeNote`]), in the order the terms were typed:
+    /// `big_breasts: 60164 of 80000 items -> probe`. Diagnosis only — nothing that
+    /// runs the query reads it — but it is the reason "the grid got slower" is a
+    /// claim someone can check instead of a guess, and stage S5's query box prints
+    /// it (decision 13, condition 4: the choice is printed, not implied).
+    pub shapes: Vec<String>,
 }
 
 /// Where the grid stopped: the sort key of the last row the user was actually
@@ -1066,6 +1073,11 @@ pub fn search_items(
             .then(|| count_matches(conn, scope, plan))
             .transpose()?,
         needs_facts: plan.needs_facts(),
+        shapes: plan
+            .shapes
+            .iter()
+            .map(|note| note.to_string())
+            .collect(),
     })
 }
 

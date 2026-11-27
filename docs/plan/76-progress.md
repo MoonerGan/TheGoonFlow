@@ -1081,3 +1081,167 @@ unchanged, which is what placeholder-shaped means. `cargo test --workspace` = **
 among them; `node tools\fixture-url-audit.js --range origin/main..HEAD` = 0 violations
 (15 commits, 13 016 added lines, 5 site urls read, the merge itself adding nothing because
 its conflict resolution kept `main`'s line).
+
+## S5 — the media query box: four rails die, one box learns to count (2026-11-27)
+
+Plan §5 for the **media** view only. Games, the facts jobs, and the wire deletions that
+would strand the games rails are S6 and S7.
+
+### What the view is now
+
+`MediaView.svelte` keeps one piece of filter state: the text in the box.
+
+- The box teaches the grammar in its placeholder (`type:video source:ehentai
+  big_breasts -anal`) and is what the chip row is *derived from*: a chip click deletes a
+  term from the text, a preset click writes one in, an autocomplete row appends one.
+  Nothing else holds a predicate (invariant 35).
+- The four facet rails and their badges are gone, with every media call to `listItems`
+  and `sourceStats` and the tag-list fetch that fed the Tagged rail. The sidebar is
+  *Everything*, *Possible dupes*, *Vault* — plan §5 keeps exactly those.
+- Counts: the header line is `N matches · M in the library`, where `M` is the kind count
+  the old *Everything* rail wore and `N` is `SearchPage.total`. While the user is typing
+  there is no `N`: the line reads `… matches` and the paging hint says "(press Enter for
+  the total)" (invariant 36).
+- Three preset chips, each writing grammar: `no tags` → `-has:tags`, `local only` →
+  `stored:local-only`, `no local file` → `-stored:disk`.
+- A `details` block prints `Plan::shapes`: `big_breasts: 2 of 3 items -> row probe`.
+  Decision 13's fourth condition, so a shape change is readable in the page instead of
+  inferred from a timing that moved.
+- Paging is the cursor the wire already had: *Load more* (the next page starts after the
+  last row on screen), *Back to start*, `showing X of Y`. No page numbers anywhere
+  (invariant 31).
+- `needs_facts` renders a *Not measured yet* panel with a **disabled** *Measure my
+  files* button: that job is S7, and an enabled button that does nothing is worse than
+  none.
+- `ext:gif ext:mp4` is caught client-side — an item carries exactly one `extension` tag,
+  so the conjunction is empty *by construction* and says so beside the box rather than
+  rendering as "searched, found nothing".
+
+### Wire
+
+`db::SearchPage` gained `shapes` and `api.ts` mirrors it; lib.rs has a command-level test
+for it, `the_page_carries_each_tag_terms_chosen_shape_printed` (the note is printed for
+the token the planner shaped, and the page still answers the same rows). `list_items` and
+`source_stats` are annotated *legacy, deleted in S6* in both `lib.rs` and `api.ts`.
+
+### Measured
+
+- `cargo test --workspace` **243 passed, 0 failed, 8 ignored** (was 242; +1 for the
+  shapes wire test) — `tools/cargo-test-s5-ui.log`.
+- `cargo clean -p goon-core -p goonflow-desktop` (**Removed 1 624 files, 5.5GiB**) and
+  then `cargo clippy --workspace --all-targets`: the log *is* the re-check (`Checking
+  goon-core …`, `Compiling goonflow-desktop …`, `Finished`, no `warning:` line, exit 0) —
+  `tools/cargo-clippy-s5-ui.log`.
+- `npx svelte-check --tsconfig ./tsconfig.json --output human` — **`svelte-check found 0
+  errors and 0 warnings`** (`tools/svelte-check-s5-ui.log`); `npm run build` clean (136
+  modules, `dist/assets/index-*.js` 168.48 kB, `tools/npm-build-s5-ui.log`).
+- `cargo build -p goonflow-desktop` → `target/debug/GoonFlow.exe` (25.80 s), so the probe
+  measures this tree and not last week's markup. That build log carries the usual
+  environment noise (`LNK4099` about `ossl_static.pdb`: a missing debug symbol file for
+  the static OpenSSL), which is not a source warning.
+- `node tools/char-audit.js` over every touched file plus the probe — **`8 file(s)
+  audited` / `CLEAN`**.
+
+### The probe: `tools/filter-ui-probe.js`
+
+A live session, not a DOM unit test. It copies the tree's own **debug** exe into
+`%TEMP%\goon-filter-probe`, starts it with a DevTools port, and drives the real page
+through `window.__TAURI_INTERNALS__.invoke` + `Runtime.evaluate`, the route
+`viewer-layout-probe.js` already uses. It refuses to run unless the scratch folder is
+exactly `%TEMP%\goon-filter-probe`, and refuses again after unlocking if
+`app_status.vaultRoot` is not that folder — a probe that can open the operator's real
+library is not a probe (invariant 29). It also refuses an exe older than any file under
+`apps/desktop/src` or `dist`, because the frontend is baked into the binary.
+
+The fixtures come from the app's own commands: `create_vault`; three
+`import_image_files` calls, one folder each, because that command makes **one item per
+call** (the first run of the probe measured one tile for three images and had to be told
+so); `add_item_tag` for `big_breasts` and `anal`, the latter with `site: ehentai` so tag
+provenance is real too; and 300 stub `import_video_files` paths to push the library past
+the view's 300-row page.
+
+**13 cases / 16 recorded states, `VERDICT: all cases OK`, exit 0**, exact strings in
+`tools/filter-ui-probe.log` — the console codepage mangles the em dashes, so the log is
+the citation. What each case claims:
+
+1. `big_breasts` typed, no Enter: `… matches · 3 in the library` over 2 tiles, hint
+   "(press Enter for the total)". No stale number, no spinner, no zero.
+2. Enter: `2 matches · 3 in the library`, and the shape note is printed.
+3. `type:banana`: the parser's sentence inline, identical 1.5 s later (it is state), grid
+   empty, no toast (invariant 24).
+4. `ext:gif ext:mp4`: the conflict line names the reason and the empty state repeats it,
+   **without** the *Not measured yet* row.
+5. `has:`: `has:thumb` / `has:tags` offered, plus the parse error for the bare key.
+6–7. `big_breasts -anal`, then a click on the `big_breasts` chip: the box holds `-anal`,
+   the chips hold `-anal`, Enter answers `2 matches`. The text is the source of truth.
+8. the `no tags` preset: `-has:tags` in the box, the chip shows active, `1 match`.
+9. `length>30s`: the *Not measured yet* panel, a disabled *Measure my files*, and the
+   count line reads `not measured yet · 3 in the library` (invariant 27).
+10. `source:ehentai`: the plain "Nothing matches" state, so an empty result and an
+    unmeasured fact stay two different sentences.
+11–13. 300-item paging: page 1 `showing 300 of 303` with *Load more* enabled; page 2
+    `showing 303 of 303` with the count line still `303 matches`; *Back to start* brings
+    the 300-row first page back. Nothing is labelled like a page number.
+14. `source:local` → 300 matches, `-source:local` → 3: provenance is reachable from the
+    box.
+15. the sidebar: *Possible dupes* opens ("No duplicates found."), and the *Vault* section
+    names the throwaway path.
+
+### What the probe caught (all four fixed in this stage)
+
+1. **An append wiped a total the commit had already paid for.** *Load more* re-ran the
+   page with `withCount: false`; `runQuery` copied `page.total` (which is `null` then)
+   over the known number, so the header fell from `303 matches` to `… matches` with
+   "(press Enter for the total)". A page never changes the query, so it may not touch the
+   number: only a query change clears it.
+2. **A query that is impossible by construction also claimed "not measured yet".**
+   `ext:gif ext:mp4` sets `needs_facts`, so both empty states rendered at once. An
+   unprobed fact and an unsatisfiable conjunction are different sentences; the conflict
+   now wins and the facts panel stands down.
+3. **`Load more` offered a page the known total says does not exist.** With 300 rows on
+   screen and `total = 300` the button was enabled; it is now disabled whenever the loaded
+   count has caught a known total, and stays optimistic only for an uncounted keystroke
+   page.
+4. **A negated candidate's count read like a result count.** `filter_suggest` measures
+   candidates against the query *without* the token being typed, so `-source:local 300`
+   sat beside a grid of 3. The number was right and the label was not: a negated row now
+   reads "300 items carry this, and those are the rows that leave the grid".
+
+### One fact the probe found about the importers
+
+`import_image_files` stores bytes in `media` and writes **no `sources` row**;
+`import_video_files` writes a `local` source and no bytes. So `source:local` answers the
+videos (300) while `-source:local` answers the pictures (3), and `stored:disk` is the
+term that describes the disk imports. No rail ever showed this; it surfaces only once one
+grammar can ask the question both ways. Worth remembering for S7 (the facts job has to
+walk `media` rows *and* `sources` rows) and for #40's queues, which are `stored:`-based
+for exactly this reason.
+
+### Deviation from plan §5, and why
+
+§5 has the old `listItems(tag/site/source)` arguments and the `list_items` /
+`source_stats` wire dying "in the same commit" as the rails. **S5 deleted the media half
+only**: the rails, the badges, the media callers and the facet-count fetches. The
+commands, the `listItems` arguments and `SourceStats` stay, annotated *legacy, deleted in
+S6*, because the **games** view still reads its grid and its queue badges through them.
+Deleting them in S5 would have left the games rails rendering but inert — a facet that
+silently stops filtering is the drift this card exists to end. S6 swaps GamesView
+(`searchItems("games")`, `status:` in SQL) and deletes all of it in one commit, so no
+view is ever left filtering on nothing.
+
+### Carry-over for S6 and S7
+
+- The `needs_facts` panel and its disabled button are pinned **only** by this probe (no
+  Rust test renders UI), so the probe has to stay in the loop when the facts job lands.
+- `ext:` is pinned client-side as a conflict only. `db::set_item_extension_tag` still has
+  **no production caller**, and `add_item_tag` cannot mint an `extension` tag, so a vault
+  built through the app has no extension tags yet: that is S7's backfill, and the live
+  `ext:` filter is untested until then — S7 owes the caller plus a test that a real
+  import grows an `ext:` row.
+- There is no `add_source` command, so the probe reaches provenance through the two
+  importers. A live `source:ehentai` case would need a network clip, which no probe here
+  does; the SQL half is pinned by the S3 source-state tests.
+- Docs: TESTING item **49** (new) plus the §2 live-suite row and the vault-guard safety
+  bullet; DEVELOPMENT invariants **35** (the box is the only filter state a view has) and
+  **36** (a number on the grid belongs to the query on screen); plan §5 (the deviation),
+  §7 (S5 closed) and §8 item 4 (the probe, built).

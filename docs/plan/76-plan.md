@@ -322,6 +322,23 @@ persisted anywhere (nothing decrypted survives).
 
 `api.ts` grows the mirror of the new command structs (invariant 6); the old
 `listItems(tag/site/source)` arguments are removed in the same commit — one wire
+
+**S5 as built (2026-11-27), and the one place it parts from this section.** S5 removed
+the four media facet rails, their badges and every media caller of `listItems` /
+`sourceStats`, and it removed the facet-count queries: the media view now asks for one
+page plus (on commit) one paired total, and a facet count only ever exists inside an
+autocomplete row, scoped to the query minus the token being typed. **What it did not do
+is delete `list_items`, `source_stats`, the `listItems` facet arguments or
+`SourceStats`.** Those three wires are how the **games** view still reads its grid and
+its queue badges, so deleting them in S5 would have left the games facet rails alive but
+inert — a rail that silently stops filtering, which is the exact drift this card
+exists to end. They are annotated *legacy, deleted in S6* in `lib.rs` and `api.ts`, and
+S6 deletes them in the same commit that swaps GamesView (so `status:` lands in SQL
+before the rails that used them die, and the media rails never exist twice). The part of
+§5 that mattered for S5 — the queues survive as grammar, not as a parallel filter state
+— is pinned without the wire: `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`
+asserts each #40 queue's predicate equals the preset chip's text, and the live probe
+clicks the `no tags` preset and counts what the grammar answers.
 shape, no legacy branch.
 
 ---
@@ -388,6 +405,11 @@ facts already true).
    (lib.rs, registered in `generate_handler!`), `api.ts` mirror, `add_item_tag`
    gains site.
 5. **S5 — MediaView** swaps to query bar + chips + presets; dupes/Vault untouched.
+   **Built 2026-11-27** (TESTING item 49; live probe `tools\filter-ui-probe.js`, 13
+   cases, `VERDICT: all cases OK`). The wire deletions §5 lists alongside it — the
+   `list_items` / `source_stats` commands, the `listItems` facet arguments and
+   `SourceStats` — move to S6, so the games rails die in the same commit that gives
+   `status:` to SQL and no view is left filtering on nothing (see §5).
 6. **S6 — GamesView** swaps likewise (status predicates replace the client filter).
 7. **S7 — facts jobs**: duration-probe + disk-size refresh as one cancellable
    job kind (`jobs.rs`, D15); `+ Video` import writes them going forward.
@@ -424,6 +446,15 @@ New checks this card needs:
    types real queries into the real box, asserts the chip row renders the parsed
    terms, the count line prints "N matches · M total", a parse error shows inline
    and survives (it is state), and *Possible dupes* + *Vault* still respond.
+
+   **Built 2026-11-27**: 13 cases / 16 recorded states, `VERDICT: all cases OK`, exit 0,
+   exact strings in `tools\filter-ui-probe.log`. It also covers what this list forgot to
+   name: the honest count line (an uncounted keystroke paints `… matches`, never a stale
+   number), the `ext:gif ext:mp4` conflict hint, the *not measured yet* row with its
+   disabled *Measure my files* button, page-2-by-cursor over a 303-item library with no
+   page-number control, and the predicate shape each tag term got printed in the page.
+   TESTING item 49 states the limits with it (`ext:` unfilterable until S7 backfills the
+   extension tag; *Measure my files* inert until S7).
 5. Manual checklist additions for the field round (chip click-to-remove, preset
    chips, Games `status:` replacing the old rails, dupes/Vault untouched).
 

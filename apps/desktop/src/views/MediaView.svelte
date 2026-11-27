@@ -1,32 +1,33 @@
 <script lang="ts">
   // Media view: booru posts, galleries, stored images, local file links.
   // No pipeline filters here — seen/tracking/wishlist are game concepts (D14).
-  // What matters for media is which site it came from, how it is tagged, and
-  // content-duplicate detection (same bytes twice).
+  // What matters for media is *the query box*: one grammar for tags, provenance,
+  // storage shape and file facts (#76). The four facet rails (source-state badges,
+  // sites, tag cloud) and their badge counts are gone: per-facet counts live inside
+  // the autocomplete rows, scoped to the query already typed, and the three #40
+  // queues survive as preset chips that write the equivalent predicate into the box.
   import { onMount } from "svelte";
   import { open } from "@tauri-apps/plugin-dialog";
   import {
-    getKindStats,
     deleteItems,
+    filterSuggest,
+    getKindStats,
     getThumbs,
     importBookmarks,
     importImageFiles,
     importVideoFiles,
-    listItems,
     mergeItems,
     dismissPair,
     pairingSuggestions,
     reEnrichItems,
-    siteStats,
-    sourceStats,
-    topTags,
+    searchItemIds,
+    searchItems,
     type AppStatus,
     type FailureDetail,
     type ItemSummary,
     type PairSuggestion,
-    type SiteCount,
-    type SourceStats,
-    type TagCount,
+    type PageCursor,
+    type Suggestion,
   } from "../lib/api";
   import { bad, info } from "../lib/toast.svelte";
   import { evictMedia } from "../lib/mediacache.svelte";
@@ -46,16 +47,7 @@
   } = $props();
 
   let items = $state<ItemSummary[]>([]);
-  let tags = $state<TagCount[]>([]);
-  let sites = $state<SiteCount[]>([]);
   let thumbs = $state<Record<string, string>>({});
-  let mediaCount = $state(0);
-  let search = $state("");
-  let tagFilter = $state<string | null>(null);
-  let siteFilter = $state<string | null>(null);
-  // #40: source-state filters (local-only items are the "fix my metadata" queue)
-  let sourceFilter = $state<"local_only" | "no_tags" | null>(null);
-  let stats = $state<SourceStats>({ localOnly: 0, noLocal: 0, noTags: 0 });
   let panel = $state<"library" | "pairs">("library");
   let report = $state<string | null>(null);
   let bmFailures = $state<FailureDetail[]>([]);
@@ -79,58 +71,275 @@
   const bookmarksJob = $derived(jobState("bookmarks"));
   const pairCount = $derived(pairs.length);
 
-  // debounced search (#8)
-  let searchFor = $state("");
-  let searchTimer: ReturnType<typeof setTimeout> | undefined;
-  function onSearch(v: string) {
-    clearTimeout(searchTimer);
-    searchTimer = setTimeout(() => (searchFor = v.trim()), 300);
+  // ---------- the query box (#76 stage S5) ----------
+  // One text box is the source of truth; the chips below are a *view* of it, so a
+  // chip click edits the text rather than setting a second filter state (plan §5).
+  const PAGE = 300;
+  let text = $state("");
+  let committed = $state("");
+  let queryError = $state<string | null>(null);
+  let total = $state<number | null>(null);
+  let needsFacts = $state(false);
+  let shapes = $state<string[]>([]);
+  let hasMore = $state(false);
+  let libraryCount = $state(0);
+  let suggest = $state<Suggestion[]>([]);
+  // A dense tag page can outlive the keystroke that started it, so the response that
+  // is applied has to be the one the *current* query asked for. Without this, a slow
+  // `big_breasts` page lands on top of the empty grid the user typed after it.
+  let seq = 0;
+
+  // The debounce is not decoration: at 100k items one keystroke-replan of a dense
+  // tag costs more than the page it re-runs, and the count is a second statement
+  // over the whole result (46-151 ms). So a tick re-runs the **page** (withCount
+  // false) and the total belongs to the query the user commits to with Enter or blur.
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  function retype() {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const next = text.trim();
+      if (next === committed) return;
+      committed = next;
+      // A keystroke page has no total, and it must not show the previous query's
+      // number either: the total is dropped the moment the query changes (inv 27).
+      total = null;
+      needsFacts = false;
+      shapes = [];
+      void runQuery(next === "");
+    }, 300);
   }
 
-  async function load() {
-    loadError = null;
+  /** A query is one or more tokens separated by spaces; a quoted phrase ("summer
+   *  witch", circle:"Red Garden") is a single token and stays quoted, or the chip
+   *  row would write back something that no longer parses. */
+  const TOKENS = /"[^"]*"|\S+/g;
+  const tokens = (): string[] => text.match(TOKENS) ?? [];
+
+  function rewrite(next: string) {
+    text = next.replace(/\s+/g, " ").trim();
+    retype();
+  }
+
+  function removeTerm(term: string) {
+    const kept = tokens();
+    const at = kept.indexOf(term);
+    if (at < 0) return;
+    kept.splice(at, 1);
+    rewrite(kept.join(" "));
+  }
+
+  function insertTerm(term: string) {
+    const all = tokens();
+    if (!all.includes(term)) all.push(term);
+    rewrite(all.join(" "));
+  }
+
+  /** A preset is one click and visible in the grammar: it writes (or clears) the
+   *  predicate, it does not keep a parallel filter state of its own. */
+  const PRESETS: { label: string; term: string; why: string }[] = [
+    {
+      label: "no tags",
+      term: "-has:tags",
+      why: "items with no tags at all — bare file links and imports no post could be matched to",
+    },
+    {
+      label: "local only",
+      term: "stored:local-only",
+      why: "a local file or folder and no online source — the queue for adding links and tags by hand",
+    },
+    {
+      label: "no local file",
+      term: "-stored:disk",
+      why: "nothing stored in the vault and nothing on disk: links only",
+    },
+  ];
+
+  /** `ext:gif ext:mp4` and friends cannot be satisfied: an item carries exactly one
+   *  `extension` tag (`db::set_item_extension_tag`), so ANDing two of them is an empty
+   *  grid by construction, not a search that found nothing. The grammar is right to
+   *  AND — the box has to notice and say so. Only `ext:` is single-valued for certain:
+   *  an item can be `stored:vault` *and* `stored:disk`, and a gallery item can hold a
+   *  still and a video, so `stored:` and `type:` are left alone. */
+  const SINGLE_VALUED = ["ext"];
+  const conflict = $derived.by(() => {
+    const byKey = new Map<string, string[]>();
+    for (const raw of tokens()) {
+      const negated = raw.startsWith("-");
+      const tok = negated ? raw.slice(1) : raw;
+      const m = /^([a-z]+):/.exec(tok);
+      if (!m || negated) continue;
+      if (!SINGLE_VALUED.includes(m[1])) continue;
+      const seen = byKey.get(m[1]) ?? [];
+      if (!seen.includes(tok)) seen.push(tok);
+      byKey.set(m[1], seen);
+    }
+    for (const [key, terms] of byKey) {
+      if (terms.length > 1) {
+        return `${terms.join(" ")} cannot both be true: an item has exactly one \`${key}:\` value, so this matches nothing`;
+      }
+    }
+    return null;
+  });
+
+  const cursor = $derived<PageCursor | undefined>(
+    items.length
+      ? { updatedAt: items[items.length - 1].updatedAt, id: items[items.length - 1].id }
+      : undefined,
+  );
+  const querying = $derived(text.trim() !== "");
+
+  async function runQuery(withCount: boolean, append = false) {
+    queryError = null;
+    const mine = ++seq;
     try {
-      items = await listItems(
-        300,
-        0,
-        searchFor || undefined,
+      const page = await searchItems(
         "media",
-        tagFilter ?? undefined,
-        siteFilter ?? undefined,
-        sourceFilter ?? undefined,
+        committed || undefined,
+        PAGE,
+        append ? cursor : undefined,
+        withCount,
       );
-      const t = await getThumbs(items.filter((i) => i.hasThumb).map((i) => i.id));
-      thumbs = Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`]));
-      const kinds = await getKindStats();
-      const k = Object.fromEntries(kinds);
-      mediaCount = (k["gallery"] ?? 0) + (k["post"] ?? 0);
-      tags = await topTags(24, "media");
-      sites = await siteStats("media");
-      stats = await sourceStats("media");
+      if (mine !== seq) return;
+      items = append ? [...items, ...page.items] : page.items;
+      // A page never changes the query, so `withCount: false` answering `total: null`
+      // must not wipe a total this query already paid for: the number on screen either
+      // belongs to the query on screen or is not shown at all (invariant 27). Every
+      // path that *does* change the query clears it first (`retype`, the error arm).
+      if (page.total !== null) total = page.total;
+      needsFacts = page.needsFacts;
+      shapes = page.shapes;
+      // A full page usually means another one exists, but when the total is known the
+      // count is the authority: offering *Load more* over a result the count says is
+      // exhausted is a button that can only ever do nothing.
+      hasMore = page.items.length === PAGE && (page.total === null || items.length < page.total);
+      await loadThumbs();
     } catch (e) {
-      items = [];
-      tags = [];
-      thumbs = {};
-      loadError = `media could not be loaded: ${e}`;
+      if (mine !== seq) return;
+      // A parse error is form state: inline under the box, un-dismissed, readable a
+      // minute later while the box still holds the mistake (invariant 24). It is not
+      // a toast. The grid goes empty rather than keeping the last good page: rows
+      // sitting under a sentence that says the query is broken would claim those rows
+      // match something that does not parse.
+      if (append) hasMore = false;
+      else {
+        items = [];
+        total = null;
+        needsFacts = false;
+        shapes = [];
+        hasMore = false;
+      }
+      queryError = String(e);
     }
   }
 
-  $effect(() => {
-    tagFilter;
-    siteFilter;
-    sourceFilter;
-    searchFor;
-    void load();
-  });
+  /** Enter (or leaving the box): the query is settled, so this is where the total is
+   *  paid for. `withCount: true` is a second statement over the whole result — 46-151 ms
+   *  at 100k items — which is exactly why it is not what a keystroke runs. */
+  function commitQuery() {
+    clearTimeout(timer);
+    committed = text.trim();
+    void runQuery(true);
+  }
+
+  function loadMore() {
+    if (hasMore) void runQuery(false, true);
+  }
+
+  function backToStart() {
+    // The same query, only page 1 again, so the total is already paid for and this
+    // request does not buy a second one (`runQuery` keeps the number it already has).
+    void runQuery(total === null);
+  }
+
+  /** The autocomplete reads the box as the parser does: the query minus the token under
+   *  the caret, and that token. `filter_suggest` splits it again on its own side, so
+   *  candidate counts are measured on top of the query already typed. No candidates is
+   *  a normal answer (no partial token, or a box that does not parse yet). */
+  let suggestSeq = 0;
+  async function suggestFor(value: string) {
+    const mine = ++suggestSeq;
+    try {
+      const at = value.lastIndexOf(" ");
+      const tail = value.slice(at + 1);
+      if (!tail || tail.includes('"')) {
+        suggest = [];
+        return;
+      }
+      const rows = await filterSuggest("media", value);
+      if (mine !== suggestSeq) return; // the box moved while the call was in flight
+      suggest = rows;
+    } catch {
+      if (mine === suggestSeq) suggest = [];
+    }
+  }
+
+  function acceptSuggestion(s: Suggestion) {
+    const at = text.lastIndexOf(" ");
+    text = `${text.slice(0, at + 1)}${s.token} `;
+    suggest = [];
+    retype();
+  }
+
+  async function loadThumbs() {
+    const want = items.filter((i) => i.hasThumb && !thumbs[i.id]).map((i) => i.id);
+    if (want.length === 0) return;
+    try {
+      const t = await getThumbs(want);
+      thumbs = {
+        ...thumbs,
+        ...Object.fromEntries(t.map((x) => [x.id, `data:${x.mime};base64,${x.data}`])),
+      };
+    } catch {
+      // A tile is decoration; the grid and its counts stand without it.
+    }
+  }
+
+  /** The `M` in "N matches · M total": what the media library holds, from the kind
+   *  counts. It is one statement, and it is the number the old "Everything" rail
+   *  wore; the per-facet counts moved into the autocomplete rows. */
+  async function loadLibraryCount() {
+    try {
+      const kinds = Object.fromEntries(await getKindStats());
+      libraryCount = (kinds["gallery"] ?? 0) + (kinds["post"] ?? 0);
+    } catch (e) {
+      loadError = `media could not be counted: ${e}`;
+    }
+  }
+
+  /** The full read: page + total, and the library count for the header line. Called on
+   *  mount and whenever a job moves, which is how imported cards (and their art)
+   *  arrive one by one. A facet count is no longer loaded here at all: it is paid for
+   *  inside an autocomplete row, scoped to the query already typed (plan §5). */
+  async function load() {
+    loadError = null;
+    committed = text.trim();
+    await runQuery(true);
+    await loadLibraryCount();
+  }
 
   // re-read whenever job state moves, so cards (and their art) arrive one by one
-  onMount(() => onActivityChange(() => void load()));
+  onMount(() => {
+    void load();
+    return onActivityChange(() => void load());
+  });
 
   function toggleSelect(item: ItemSummary) {
     const next = new Set(selectedIds);
     if (next.has(item.id)) next.delete(item.id);
     else next.add(item.id);
     selectedIds = next;
+  }
+
+  /** Select-all means the whole match set, not the 300 rows on screen: the grid is a
+   *  query now, so the bulk actions have to reach everything the predicate matches
+   *  (plan §9 rulings C). */
+  async function selectAllMatches() {
+    try {
+      const ids = await searchItemIds("media", committed || undefined);
+      selectedIds = new Set(ids);
+    } catch (e) {
+      report = `select all failed: ${e}`;
+    }
   }
 
   async function doBatchDelete() {
@@ -232,6 +441,11 @@
       .catch((e) => bad(String(e)));
   }
 
+  function backToLibrary() {
+    panel = "library";
+    void load();
+  }
+
   async function doMerge(s: PairSuggestion, keep: "a" | "b") {
     try {
       await mergeItems(keep === "a" ? s.aId : s.bId, keep === "a" ? s.bId : s.aId);
@@ -289,17 +503,33 @@
     enrich online <span class="hint">(fetch art for bookmarked posts)</span>
   </label>
   <input
-    class="search-box"
+    class="search-box query-box"
     type="text"
-    placeholder="search title…"
-    aria-label="Search media"
-    value={search}
-    oninput={(e) => onSearch(e.currentTarget.value)}
+    placeholder="type:video source:ehentai big_breasts -anal"
+    aria-label="Query the media library"
+    aria-autocomplete="list"
+    bind:value={text}
+    oninput={(e) => {
+      retype();
+      void suggestFor(e.currentTarget.value);
+    }}
+    onkeydown={(e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commitQuery();
+      } else if (e.key === "Escape") {
+        suggest = [];
+      }
+    }}
+    onblur={() => {
+      suggest = [];
+      if (text.trim() !== committed) commitQuery();
+    }}
   />
   <span class="spacer"></span>
   {#if selectMode}
     <span class="hint">{selectedIds.size} selected</span>
-    <button onclick={() => (selectedIds = new Set(items.map((i) => i.id)))}>Select all</button>
+    <button onclick={() => void selectAllMatches()}>Select all</button>
     <button disabled={refetching || selectedIds.size === 0} onclick={doBatchRefetch} title="re-fetch art/tags/online info for the selection — runs as a job you can stop">
       {refetching ? "Re-fetching…" : "Re-fetch metadata"}
     </button>
@@ -346,57 +576,90 @@
   <ReportBar text={loadError} tone="error" onDismiss={() => (loadError = null)} />
 {/if}
 
+{#if panel === "library"}
+  {#if queryError}
+    <p class="query-error">{queryError}</p>
+  {/if}
+  {#if conflict}
+    <p class="query-conflict">{conflict}</p>
+  {/if}
+
+  <div class="query-presets">
+    <span class="hint">presets</span>
+    {#each PRESETS as p (p.term)}
+      <button
+        class="preset"
+        class:on={tokens().includes(p.term)}
+        title={p.why}
+        onclick={() => (tokens().includes(p.term) ? removeTerm(p.term) : insertTerm(p.term))}
+      >
+        {p.label}
+      </button>
+    {/each}
+  </div>
+
+  {#if suggest.length > 0}
+    <div class="query-suggest">
+      {#each suggest as s (s.token)}
+        <button
+          class="suggest"
+          aria-label="use {s.token}"
+          title={s.count === null
+            ? "grammar, not a count from this vault"
+            : s.token.startsWith("-")
+              ? `${s.count} items carry this, and those are the rows that leave the grid`
+              : `${s.count} items match this on top of the query already typed`}
+          onclick={() => acceptSuggestion(s)}
+        >
+          <code>{s.token}</code>
+          <span class="suggest-count">{s.count === null ? "" : s.count}</span>
+        </button>
+      {/each}
+    </div>
+  {/if}
+
+  <div class="query-chips">
+    {#if querying}
+      <span class="hint">filters</span>
+      {#each tokens() as term (term)}
+        <button class="chip" title="click to remove this term from the box" onclick={() => removeTerm(term)}>
+          {term}<span class="chip-x" aria-hidden="true">×</span>
+        </button>
+      {/each}
+      <button class="link" onclick={() => rewrite("")}>clear</button>
+    {:else}
+      <span class="hint">no filters — the whole media library</span>
+    {/if}
+    <span class="spacer"></span>
+    <span class="query-count">
+      {#if total === null}
+        … matches
+      {:else if needsFacts && total === 0}
+        not measured yet
+      {:else}
+        {total} match{total === 1 ? "" : "es"}
+      {/if}
+      {#if libraryCount > 0} · {libraryCount} in the library{/if}
+    </span>
+    {#if shapes.length > 0}
+      <details class="details query-diagnostic">
+        <summary>how this query ran ({shapes.length} tag term{shapes.length === 1 ? "" : "s"})</summary>
+        <ul>
+          {#each shapes as note (note)}
+            <li><code>{note}</code></li>
+          {/each}
+        </ul>
+      </details>
+    {/if}
+  </div>
+{/if}
+
 <div class="main">
   <nav class="sidebar">
-    <div class="section">Media</div>
-    <button class="nav-item" class:active={panel === "library" && !tagFilter && !siteFilter && !sourceFilter} onclick={() => { panel = "library"; tagFilter = null; siteFilter = null; sourceFilter = null; }}>
-      Everything <span class="count">{mediaCount}</span>
+    <div class="section">Library</div>
+    <button class="nav-item" class:active={panel === "library"} onclick={backToLibrary}>
+      Everything <span class="count">{libraryCount}</span>
     </button>
-
-    <div class="section">
-      Sources
-      {#if sourceFilter}
-        <button class="link" onclick={() => (sourceFilter = null)}>clear</button>
-      {/if}
-    </div>
-    <button class="nav-item" class:active={sourceFilter === "local_only"} onclick={() => (sourceFilter = sourceFilter === "local_only" ? null : "local_only")} title="Items with only a local file/folder and no online source — the queue for adding links and tags by hand.">
-      Local only <span class="count">{stats.localOnly || ""}</span>
-    </button>
-    <button class="nav-item" class:active={sourceFilter === "no_tags"} onclick={() => (sourceFilter = sourceFilter === "no_tags" ? null : "no_tags")} title="Items with no tags at all — bare file links and imports that no post could be matched to.">
-      No tags <span class="count">{stats.noTags || ""}</span>
-    </button>
-
-    <div class="section">
-      From site
-      {#if siteFilter}
-        <button class="link" onclick={() => (siteFilter = null)}>clear</button>
-      {/if}
-    </div>
-    {#if sites.length === 0}
-      <div class="vault-info">Nothing imported from a site yet.</div>
-    {:else}
-      {#each sites as s (s.site)}
-        <button class="nav-item" class:active={siteFilter === s.site} onclick={() => (siteFilter = siteFilter === s.site ? null : s.site)}>
-          {s.site} <span class="count">{s.count}</span>
-        </button>
-      {/each}
-    {/if}
-
-    <div class="section">
-      Tagged
-      {#if tagFilter}
-        <button class="link" onclick={() => (tagFilter = null)}>clear</button>
-      {/if}
-    </div>
-    {#if tags.length === 0}
-      <div class="vault-info">No media tags yet. Enriched bookmarks and clips bring tags in; you can add your own on any item.</div>
-    {:else}
-      {#each tags as t (t.id)}
-        <button class="nav-item" class:active={tagFilter === t.name} onclick={() => (tagFilter = tagFilter === t.name ? null : t.name)} title={t.typeKey}>
-          {t.name} <span class="count">{t.count}</span>
-        </button>
-      {/each}
-    {/if}
 
     <div class="section">Keep current</div>
     <button class="nav-item" class:active={panel === "pairs"} onclick={openPairs}>
@@ -405,6 +668,8 @@
 
     <div class="section">Vault</div>
     <div class="vault-info">{status.vaultRoot}</div>
+    <div class="hint">The query box is per session and is never saved to disk, and it is
+      not case-folded for tags: a tag matches exactly as it is spelled.</div>
   </nav>
 
   <main class="content">
@@ -447,9 +712,40 @@
         {/each}
       {/if}
 
+    {:else if needsFacts && items.length === 0 && conflict === null}
+      <div class="empty facts-row">
+        <strong>Not measured yet.</strong><br />
+        This query asks about facts the vault has never read off the files —
+        sizes, durations, picture dimensions, whether a file is animated, what extension it
+        calls itself. A NULL fact never matches, so this is not "nothing has it", it is
+        "nobody has looked".
+        <br /><br />
+        <button disabled title="the facts pass is stage S7 of #76: one cancellable job that reads the vault's own files">
+          Measure my files
+        </button>
+      </div>
     {:else if items.length === 0}
       <div class="empty">
-        <strong>{loadError ? "Couldn't load media." : searchFor ? `Nothing matches "${searchFor}".` : tagFilter || siteFilter ? "Nothing matches this filter." : "No media in the vault."}</strong><br />
+        <strong>{queryError
+          ? "Nothing is shown: the box does not parse."
+          : conflict
+            ? "Nothing is shown: the box says this cannot match."
+            : querying
+              ? `Nothing matches "${committed}".`
+              : "No media in the vault."}</strong><br />
+        {#if conflict}
+          {conflict} A fact that was never measured would read *Not measured yet* instead: a
+          NULL column never matches, so an unmeasured vault is not a vault without it.
+          <br /><br />
+        {/if}
+        {#if querying}
+          Tags match exactly, case and all: <code>Big_Breasts</code> finds nothing where
+          <code>big_breasts</code> does. A bare word is one tag, <code>tag:"…"</code> is an exact
+          name including its namespace, a quoted phrase searches titles, and
+          <code>source:ehentai</code> pins provenance. An item has exactly one
+          <code>ext:</code> value, so <code>ext:gif ext:mp4</code> is empty by construction.
+          <br /><br />
+        {/if}
         <em>+ Clip URL</em> takes a single link — a booru post, a gallery, a direct image/video URL, or a
         <code>file:///</code> link to media you already have. <em>+ Images</em> stores image files inside the
         encrypted vault; <em>+ Video</em> tracks video files by path; <em>+ Bookmarks</em> imports a whole browser export.
@@ -466,6 +762,18 @@
         onOpen={(item) => (viewerIndex = items.indexOf(item))}
         onToggle={toggleSelect}
       />
+      <div class="query-paging">
+        <button disabled={!hasMore} onclick={loadMore} title="the next page starts after the last row on screen — a cursor, not a row count, so a delete behind you cannot skip rows">
+          {hasMore ? "Load more" : "That is all of it"}
+        </button>
+        {#if items.length > PAGE}
+          <button class="ghost" onclick={backToStart} title="back to the first page">Back to start</button>
+        {/if}
+        <span class="hint">
+          showing {items.length}{total === null ? "" : ` of ${total}`}
+          {#if total === null}(press Enter for the total){/if}
+        </span>
+      </div>
     {/if}
   </main>
 </div>
@@ -500,3 +808,113 @@
     onCancel={() => (confirmBatchDelete = false)}
   />
 {/if}
+
+<style>
+  /* The query bar's own state lines. They sit **above** the grid, never beside it:
+     a sentence sharing flex space with the thing it describes is invariant 24. */
+  .query-error,
+  .query-conflict {
+    margin: 0.4rem 1rem 0;
+    padding: 0.35rem 0.6rem;
+    border-radius: 8px;
+    font-size: 0.85rem;
+    white-space: pre-wrap;
+  }
+
+  .query-error {
+    background: #2a1414;
+    color: #fca5a5;
+    border-left: 3px solid var(--danger);
+  }
+
+  .query-conflict {
+    background: var(--panel-2);
+    color: var(--muted);
+    border-left: 3px solid var(--muted);
+  }
+
+  .query-presets {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0.5rem 1rem 0;
+  }
+
+  .preset {
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--muted);
+    padding: 0.2rem 0.65rem;
+    font-size: 0.78rem;
+  }
+
+  .preset.on {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* One row per candidate, each carrying the count it would produce on top of the
+     query already typed — this is where the old rail counts went. */
+  .query-suggest {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin: 0.4rem 1rem 0;
+  }
+
+  .suggest {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--panel-2);
+    color: var(--text);
+    padding: 0.15rem 0.5rem;
+    font-size: 0.78rem;
+  }
+
+  .suggest code {
+    font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  }
+
+  .suggest-count {
+    color: var(--muted);
+  }
+
+  .query-chips {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.35rem;
+    margin: 0.6rem 1rem 0;
+  }
+
+  .query-chips .chip {
+    cursor: pointer;
+  }
+
+  .query-count {
+    color: var(--muted);
+    font-size: 0.85rem;
+    white-space: nowrap;
+  }
+
+  .query-diagnostic summary {
+    color: var(--muted);
+    font-size: 0.78rem;
+  }
+
+  .query-paging {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.9rem;
+  }
+
+  .facts-row button {
+    margin-top: 0.5rem;
+  }
+</style>
