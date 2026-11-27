@@ -1493,7 +1493,7 @@ const TAG_SEMI: &str = "items.id IN (SELECT it.item_id FROM item_tags AS it \
 /// (tag_id=? AND item_id=?)`), so no list of matching ids is ever built and the only sort
 /// left is the id tie-break inside one stamp — `USE TEMP B-TREE FOR LAST TERM OF ORDER BY`,
 /// where the semi-join sorts every match. Measured against [`TAG_SEMI`] at eight
-/// cardinalities (`filter_scale_probe`, TESTING item 47): one posting is 0 ms as a
+/// cardinalities (`filter_scale_probe`, TESTING item 48): one posting is 0 ms as a
 /// semi-join and 101 ms as a probe, a token 16 018 of 80 000 items carry is 44 ms against
 /// 73 ms, and at 24 004 items it is 66 ms against 55 — so the two cross over inside a
 /// real library, and [`Query::plan_with`] chooses per token from a measurement rather

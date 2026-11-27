@@ -179,7 +179,7 @@ fn query_param(url: &str, key: &str) -> Option<String> {
 }
 
 /// If the whole query string is digits (booru file-cache pattern
-/// `…/file.gif?267940`), that number is the post id.
+/// `…/file.gif?9000001`), that number is the post id.
 fn numeric_query_id(url: &str) -> Option<String> {
     let q = url.split_once('?')?.1.split('#').next()?.trim();
     (!q.is_empty() && q.chars().all(|c| c.is_ascii_digit())).then(|| q.to_string())
@@ -368,7 +368,7 @@ pub fn classify(url: &str) -> Option<SiteRef> {
         let site = site_for_host(&host_no_port)
             .map(str::to_string)
             .unwrap_or_else(|| registrable_domain(&host_no_port));
-        // Booru file-cache links (`wimg.rule34.xxx//images/…jpeg?11353035`)
+        // Booru file-cache links (`wimg.rule34.xxx//images/…jpeg?9000004`)
         // carry the post id as a numeric query, and #50 routed them through the
         // site's API because that got tags + file with the right referer. That
         // routing is what broke rule34: measured 2026-11-14, the danbooru dapi
@@ -1028,7 +1028,7 @@ pub fn eh_is_show(url: &str) -> bool {
 
 /// One page of the slideshow, as its own page describes it.
 ///
-/// Measured 2026-11-14 on `https://e-hentai.org/s/3c7a2c86a5/4089666-1` with
+/// Measured 2026-11-14 on `https://e-hentai.org/s/aaaaaaaaaa/9000009-1` with
 /// this app's own UA and **no cookie at all**:
 /// * `<img id="img" src="https://fivpjap.ezrzluxzxslb.hath.network/h/<hash>-…
 ///   /keystamp=1794642300-…;fileindex=…;xres=org/12349451_0.jpg">` — the real
@@ -1038,7 +1038,7 @@ pub fn eh_is_show(url: &str) -> bool {
 ///   keep: the **page link** is the thing worth remembering.
 /// * `<div>12349451_0.jpg :: 1200 x 630 :: 173.3 KiB</div>` — name and size.
 /// * `<span>1</span> / <span>20</span>` — this page and the page count.
-/// * `<div id="i5"><a href="https://e-hentai.org/g/4089666/b9d914bef4/">` — the
+/// * `<div id="i5"><a href="https://e-hentai.org/g/9000009/0123456789/">` — the
 ///   gallery, **with the key the gallery page needs**.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct EhShow {
@@ -1119,7 +1119,7 @@ async fn eh_gallery(
     // #46: the gallery url needs its **key**. A `/s/` slideshow link used to be
     // folded onto `https://host/g/<gid>/`; since 2026-11 that is a bare apache
     // 404 (`http 404 Not Found`, exactly what the user saw when clipping
-    // e-hentai.org/s/fd0163b571/4089666-7), while the shell page still names the
+    // e-hentai.org/s/aaaaaaaaaa/9000009-7), while the shell page still names the
     // gallery with its key. So the key comes from the page, never from a guess.
     let show_link = eh_is_show(url);
     let root = eh_root(site);
@@ -2991,6 +2991,7 @@ pub async fn find_matches(state: &crate::Core, job: &JobHandle) -> Result<MatchR
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe_url;
 
     /// #76: the query grammar's `type:video` and this importer's idea of a video
     /// have to be the same list, or `type:video` misses what the app imported.
@@ -3025,7 +3026,7 @@ mod tests {
     /// Field report #1: `i.4cdn.org` used to become site "i" (first host label).
     #[test]
     fn cdn_hosts_fold_into_their_real_site() {
-        let s = classify("https://i.4cdn.org/h/1743761874698456.jpg").unwrap();
+        let s = classify("https://i.4cdn.org/h/1000000000000.jpg").unwrap();
         assert_eq!(s.site, "4chan", "4cdn must be 4chan, not 'i'");
         assert_eq!(s.mode, Mode::DirectMedia);
 
@@ -3044,21 +3045,21 @@ mod tests {
     #[test]
     fn booru_cdn_file_links_keep_their_post_id_but_fetch_as_files() {
         let s = classify(
-            "https://wimg.rule34.xxx//images/3868/7412ed67862b691cceef71b918028f66.jpeg?11353035",
+            "https://wimg.rule34.xxx//images/9001/5555555555555555555555555555eeee.jpeg?9000004",
         )
         .unwrap();
         assert_eq!(s.site, "rule34");
         assert_eq!(s.mode, Mode::DirectMedia);
-        assert_eq!(s.remote_id.as_deref(), Some("11353035"));
+        assert_eq!(s.remote_id.as_deref(), Some("9000004"));
 
-        let s = classify("https://img3.gelbooru.com//images/2b/34/2b34cd.jpg?4765984").unwrap();
+        let s = classify("https://img3.gelbooru.com//images/99/99/9999abcd.jpg?9000005").unwrap();
         assert_eq!(s.site, "gelbooru");
         assert_eq!(s.mode, Mode::DirectMedia);
-        assert_eq!(s.remote_id.as_deref(), Some("4765984"));
+        assert_eq!(s.remote_id.as_deref(), Some("9000005"));
 
         // hypnohub has no API wired → stays a direct file, but named correctly
         let s = classify(
-            "https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940",
+            "https://hypnohub.net//images/6c/e0/1111111111111111111111111111aaaa.gif?9000001",
         )
         .unwrap();
         assert_eq!(s.site, "hypnohub");
@@ -3076,14 +3077,14 @@ mod tests {
     /// vault even when no post can be identified.
     #[test]
     fn idless_booru_file_links_still_store_the_image() {
-        let s = classify("https://img3.gelbooru.com/images/2b/34/2b34cd76ef.jpg").unwrap();
+        let s = classify("https://img3.gelbooru.com/images/99/99/9999abcd76ef.jpg").unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
             ("gelbooru", Mode::DirectMedia, None)
         );
 
         let s =
-            classify("https://wimg.rule34.xxx/images/3868/7412ed67862b691cceef71b918028f66.jpeg")
+            classify("https://wimg.rule34.xxx/images/9001/5555555555555555555555555555eeee.jpeg")
                 .unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
@@ -3091,30 +3092,30 @@ mod tests {
         );
 
         // a post page URL that carries its id in the path still resolves as a post
-        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=11353035").unwrap();
+        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=9000004").unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
-            ("rule34", Mode::BooruId, Some("11353035"))
+            ("rule34", Mode::BooruId, Some("9000004"))
         );
-        let s = classify("https://rule34.xxx/post/show/11353035").unwrap();
+        let s = classify("https://rule34.xxx/post/show/9000004").unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
-            ("rule34", Mode::BooruId, Some("11353035"))
+            ("rule34", Mode::BooruId, Some("9000004"))
         );
     }
 
     #[test]
     fn direct_media_on_booru_cdn_resolves() {
-        let s = classify("https://hypnohub.net//images/6c/e0/6ce01.gif?267940").unwrap();
+        let s = classify("https://hypnohub.net//images/6c/e0/6ce01.gif?9000001").unwrap();
         assert_eq!(s.mode, Mode::DirectMedia);
         assert_eq!(s.site, "hypnohub");
-        assert_eq!(s.remote_id.as_deref(), Some("267940"));
-        let s = classify("https://hypnohub.net//images/ec/47/ec47.mp4?250356").unwrap();
+        assert_eq!(s.remote_id.as_deref(), Some("9000001"));
+        let s = classify("https://hypnohub.net//images/ec/47/ec47.mp4?9000002").unwrap();
         assert_eq!(s.mode, Mode::DirectMedia);
         // a post page still classifies as a booru post
-        let s = classify("https://hypnohub.net/index.php?page=post&s=view&id=267940").unwrap();
+        let s = classify("https://hypnohub.net/index.php?page=post&s=view&id=9000001").unwrap();
         assert_eq!(s.mode, Mode::BooruId);
-        assert_eq!(s.remote_id.as_deref(), Some("267940"));
+        assert_eq!(s.remote_id.as_deref(), Some("9000001"));
     }
 
     /// #50, the part that was actually broken. The app used to send every rule34
@@ -3125,8 +3126,10 @@ mod tests {
     /// three). A link that names a file must therefore be fetched as a file.
     #[test]
     fn a_booru_file_link_is_fetched_as_a_file_not_through_the_api() {
-        let s = classify("https://wimg.rule34.xxx//images/3043/a6cf0e6d194728b189303b9da8c904e6.jpeg?3411909")
-            .expect("rule34 file link");
+        let s = classify(
+            "https://wimg.rule34.xxx//images/9000/4444444444444444444444444444dddd.jpeg?9000003",
+        )
+        .expect("rule34 file link");
         assert_eq!(
             (s.site.as_str(), s.mode),
             ("rule34", Mode::DirectMedia),
@@ -3134,22 +3137,24 @@ mod tests {
         );
         assert_eq!(
             s.remote_id.as_deref(),
-            Some("3411909"),
+            Some("9000003"),
             "the post id is kept, so the report can name the post"
         );
         // same rule for gelbooru, and the doubled slash the bookmark carries is
         // normalised later, in direct_media, not here
-        let s = classify("https://img3.gelbooru.com//images/f2/1e/f21e0ce1d9ff33ba2b7fdc75f01e6a3d.jpeg?11353035")
-            .expect("gelbooru file link");
+        let s = classify(
+            "https://img3.gelbooru.com//images/f2/1e/7777777777777777777777777777aaaa.jpeg?9000004",
+        )
+        .expect("gelbooru file link");
         assert_eq!((s.site.as_str(), s.mode), ("gelbooru", Mode::DirectMedia));
         // a post *page* still goes to the api, where the fallback note explains
         // what could not be read
-        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=3411909").unwrap();
+        let s = classify("https://rule34.xxx/index.php?page=post&s=view&id=9000003").unwrap();
         assert_eq!((s.site.as_str(), s.mode), ("rule34", Mode::BooruId));
         // e621 is the one booru whose api answers this app (measured `200
         // application/json`, and its file host `200 image/png`), so its post
         // pages still take the api path and keep their tags
-        let s = classify("https://e621.net/posts/4914601").unwrap();
+        let s = classify("https://e621.net/posts/9000010").unwrap();
         assert_eq!((s.site.as_str(), s.mode), ("e621", Mode::BooruId));
     }
 
@@ -3217,8 +3222,8 @@ mod tests {
     #[test]
     fn f95_search_parses_thread_links_and_dedupes() {
         let html = r#"
-        <div class="block-row"><a href="https://f95zone.to/threads/summer-witch.10599/"><img src="x.jpg"></a>
-        <h3 class="structItem-title"><a href="https://f95zone.to/threads/summer-witch.10599/">Summer Witch [v1.2] [renpy] [WiP]</a></h3>
+        <div class="block-row"><a href="https://f95zone.to/threads/summer-witch.9000013/"><img src="x.jpg"></a>
+        <h3 class="structItem-title"><a href="https://f95zone.to/threads/summer-witch.9000013/">Summer Witch [v1.2] [renpy] [WiP]</a></h3>
         <a href="https://f95zone.to/threads/other-game.99999/page-2#post-1">Other Game &amp; Sequel</a>
         <a href="https://f95zone.to/threads/">bad</a>
         "#;
@@ -3226,7 +3231,7 @@ mod tests {
         assert_eq!(hits.len(), 2);
         assert_eq!(
             hits[0].url,
-            "https://f95zone.to/threads/summer-witch.10599/"
+            "https://f95zone.to/threads/summer-witch.9000013/"
         );
         assert_eq!(hits[0].title, "Summer Witch [v1.2] [renpy] [WiP]");
         assert_eq!(hits[1].title, "Other Game & Sequel");
@@ -3237,8 +3242,8 @@ mod tests {
     #[test]
     fn field_report_urls_all_resolve_as_media() {
         let urls = [
-            "https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940",
-            "https://hypnohub.net//images/ec/47/ec47078adbb43723acf78708b1a7f435.mp4?250356",
+            "https://hypnohub.net//images/6c/e0/1111111111111111111111111111aaaa.gif?9000001",
+            "https://hypnohub.net//images/ec/47/2222222222222222222222222222bbbb.mp4?9000002",
             "file:///C:/Users/Admin/Videos/EnomeSnake.mp4",
             "file:///C:/Users/Admin/Documents/New%20folder/Media/Renetan/Renetan_Animations_2025-08_Update/hasumi%20swimsuit%20zuri%20uncensored%20sound.mp4",
             "file:///C:/Users/Admin/Videos/[Kimochi]%20Cissia's%20Paizuri-fellatio%20animation/uncensored%20fix.mp4",
@@ -3273,7 +3278,9 @@ mod tests {
     fn eh_gate_pages_are_recognised() {
         let gate = r##"<html><body><div class="gtable ggate">You must <a href="#">IP Login</a> to continue</div></body></html>"##;
         assert!(eh_is_gate(gate));
-        assert!(!eh_is_gate("<html><body><h1 id=\"gn\">Real gallery</h1></body></html>"));
+        assert!(!eh_is_gate(
+            "<html><body><h1 id=\"gn\">Real gallery</h1></body></html>"
+        ));
 
         // The shape #46 was written against (`gdtm` + `<img src>` per thumbnail)
         // no longer exists on the site, and the parser must not invent a cover
@@ -3283,11 +3290,17 @@ mod tests {
         <a href="https://e-hentai.org/s/abc/1234-1"><img src="https://ex.ph/cover1.jpg"></a></div></div>
         <div class="gld">This gallery has <em>24</em> pages.</div></body></html>"#;
         let g = parse_eh_gallery(legacy);
-        assert!(g.cover.is_none(), "no sprite box means no cover, not a guess");
+        assert!(
+            g.cover.is_none(),
+            "no sprite box means no cover, not a guess"
+        );
         assert_eq!(g.pages, None);
         // a title is still a title, and that must be reported as partial success
         assert_eq!(g.title.as_deref(), Some("Kanojo no Kaomo | e-hentai.org"));
-        assert_eq!(g.slides, vec!["https://e-hentai.org/s/abc/1234-1".to_string()]);
+        assert_eq!(
+            g.slides,
+            vec!["https://e-hentai.org/s/abc/1234-1".to_string()]
+        );
     }
 
     #[test]
@@ -3309,15 +3322,15 @@ mod tests {
         <meta property="og:title" content="Lewd Customs in the Tsugai Mating Village 2 Final [v1.0] [renpy] [Completed] | f95zone">
         <meta property="og:image" content="https://f95zone.to/assets/images/logo-sqw192.png">
         </head><body>
-        <div class="message-userAvatar"><img src="https://f95zone.to/data/avatars/m/112/1121990.jpg" class="board-avatar-image" alt=""></div>
+        <div class="message-userAvatar"><img src="https://f95zone.to/data/avatars/m/112/9000014.jpg" class="board-avatar-image" alt=""></div>
         <img class="smilie smilie--smile" src="https://f95zone.to/data/smililies/custom/smiley4.png" alt=":o">
         <img src="data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 560 420'%3E%3Crect width='560' height='420' fill='%2323262e'/%3E%3C/svg%3E"
-             data-src="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
-             data-url="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg"
+             data-src="https://attachments.f95zone.to/2026-11-9000015_d_642380pr.jpg"
+             data-url="https://attachments.f95zone.to/2026-11-9000015_d_642380pr.jpg"
              class="bbImage lazyload" data-zoom-target="1" alt="preview">
-        <img src="data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E" class="bbImage lazyload" data-src="https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg">
-        <img src="//attachments.f95zone.to/2026-11-6671101_second.png" class="bbImage lazyload">
-        <img src="https://attachments.f95zone.to/2026-11-6671101_third.jpg?sig=1&amp;t=2" class="bbImage lazyload">
+        <img src="data:image/svg+xml;charset=utf-8,%3Csvg%3E%3C/svg%3E" class="bbImage lazyload" data-src="https://attachments.f95zone.to/2026-11-9000015_d_642380pr.jpg">
+        <img src="//attachments.f95zone.to/2026-11-9000015_second.png" class="bbImage lazyload">
+        <img src="https://attachments.f95zone.to/2026-11-9000015_third.jpg?sig=1&amp;t=2" class="bbImage lazyload">
         <img src="https://f95zone.to/data/badges/2022/wholesome.png" class="message-userInfo-badge">
         <div class="samAd"><img src="https://ads.example.net/banner.gif" data-src="https://ads.example.net/banner.gif"></div>
         </body></html>"##;
@@ -3339,9 +3352,9 @@ mod tests {
         assert_eq!(
             imgs,
             vec![
-                "https://attachments.f95zone.to/2026-11-6671101_d_642380pr.jpg",
-                "https://attachments.f95zone.to/2026-11-6671101_second.png",
-                "https://attachments.f95zone.to/2026-11-6671101_third.jpg?sig=1&t=2",
+                "https://attachments.f95zone.to/2026-11-9000015_d_642380pr.jpg",
+                "https://attachments.f95zone.to/2026-11-9000015_second.png",
+                "https://attachments.f95zone.to/2026-11-9000015_third.jpg?sig=1&t=2",
             ],
             "the svg placeholder must not win over data-src, dupes/ad/ badge hosts must drop"
         );
@@ -3385,38 +3398,38 @@ mod tests {
     /// slideshow page names its gallery with the key the gallery url needs.
     #[test]
     fn eh_slideshow_links_are_resolved_from_the_page_not_a_guess() {
-        let shell = r##"<html><head><title>[horosuke] Asuka Dairy</title><script>
-            var gid=4089666;var startpage=1;var startkey="3c7a2c86a5";var showkey="3w32t1laoni";
-            </script></head><body><div id="i3"><a onclick="return load_image(2, '24e4797087')"
-            href="https://e-hentai.org/s/24e4797087/4089666-2"><img id="img" src="https://fivpjap.ezrzluxzxslb.hath.network/h/3c7a2c86a58d-177497-1200-630-jpg/keystamp=1794642300-f03a00b680;fileindex=254604586;xres=org/12349451_0.jpg"
+        let shell = r##"<html><head><title>[fake-circle] Fake Gallery</title><script>
+            var gid=9000009;var startpage=1;var startkey="aaaaaaaaaa";var showkey="0123456789a";
+            </script></head><body><div id="i3"><a onclick="return load_image(2, 'bbbbbbbbbb')"
+            href="https://e-hentai.org/s/bbbbbbbbbb/9000009-2"><img id="img" src="https://zzzzzzz.hath.network/h/aaaaaaaaaaaa-100000-1200-630-jpg/keystamp=1000000000-0000000000;fileindex=100000000;xres=org/9000009_0.jpg"
             style="width:1200px;height:630px" /></a></div>
-            <div>12349451_0.jpg :: 1200 x 630 :: 173.3 KiB</div>
+            <div>9000009_0.jpg :: 1200 x 630 :: 173.3 KiB</div>
             <div><span>1</span> / <span>20</span></div>
-            <div id="i5"><a href="https://e-hentai.org/g/4089666/b9d914bef4/"></a></div></body></html>"##;
+            <div id="i5"><a href="https://e-hentai.org/g/9000009/0123456789/"></a></div></body></html>"##;
         assert_eq!(
             eh_gallery_link(shell, "https://e-hentai.org").as_deref(),
-            Some("https://e-hentai.org/g/4089666/b9d914bef4/")
+            Some("https://e-hentai.org/g/9000009/0123456789/")
         );
         let show = parse_eh_show(shell);
-        assert_eq!(show.title.as_deref(), Some("[horosuke] Asuka Dairy"));
+        assert_eq!(show.title.as_deref(), Some("[fake-circle] Fake Gallery"));
         assert_eq!(show.page, Some(1));
         assert_eq!(show.pages, Some(20));
         assert!(
             show.image
                 .as_deref()
                 .unwrap()
-                .contains("keystamp=1794642300-f03a00b680"),
+                .contains("keystamp=1000000000-0000000000"),
             "the art url is per-request: it is fetched, never stored as a candidate"
         );
 
         // the gid is still what the item records, and both link kinds are eh
-        let s = classify("https://e-hentai.org/s/fd0163b571/4089666-7").unwrap();
+        let s = classify("https://e-hentai.org/s/cccccccccc/9000009-7").unwrap();
         assert_eq!(
             (s.site.as_str(), s.mode, s.remote_id.as_deref()),
-            ("ehentai", Mode::Ehentai, Some("4089666"))
+            ("ehentai", Mode::Ehentai, Some("9000009"))
         );
-        assert!(eh_is_show("https://e-hentai.org/s/fd0163b571/4089666-7"));
-        assert!(!eh_is_show("https://e-hentai.org/g/4089666/b9d914bef4/"));
+        assert!(eh_is_show("https://e-hentai.org/s/cccccccccc/9000009-7"));
+        assert!(!eh_is_show("https://e-hentai.org/g/9000009/0123456789/"));
 
         // #46 as reported: the gallery key missing from the url is an error the
         // site states in words, and it must not read as a gallery with no art.
@@ -3427,47 +3440,53 @@ mod tests {
     /// are all markup this app has never read before.
     #[test]
     fn eh_gallery_page_reads_the_2026_shape() {
-        // Trimmed from the real page for gid 4089666 (saved live). What stays is
+        // Trimmed from the real page for gid 9000009 (saved live). What stays is
         // what the parser depends on: `id="gn"`, `id="ta_"`, `Length:`, and the
         // `background:transparent url(<sheet>) -Xpx 0` boxes.
-        let page = r##"<html><head><title>[horosuke] Asuka Dairy - E-Hentai Galleries</title></head>
+        let page = r##"<html><head><title>[fake-circle] Fake Gallery - E-Hentai Galleries</title></head>
         <body><div class="gm"><div id="gleft"><div id="gd1"><div style="width:250px; height:131px;
-        background:transparent url(https://ehgt.org/w/02/546/04586-20dsbt2q.webp) 0 0 no-repeat"></div></div></div>
-        <div id="gd2"><h1 id="gn">[horosuke] Asuka Dairy</h1><h1 id="gj"></h1></div>
-        <a id="ta_artist:horosuke" href="https://e-hentai.org/tag/artist:horosuke">horosuke</a>
+        background:transparent url(https://ehgt.org/w/02/546/900009-aaaaaaaaaa.webp) 0 0 no-repeat"></div></div></div>
+        <div id="gd2"><h1 id="gn">[fake-circle] Fake Gallery</h1><h1 id="gj"></h1></div>
+        <a id="ta_artist:fakecircle" href="https://e-hentai.org/tag/artist:fakecircle">fakecircle</a>
         <a id="ta_female:big_breasts" href="https://e-hentai.org/tag/female:big+breasts">big breasts</a>
         <td class="gdt1">Length:</td><td class="gdt2">20 pages</td>
         <div id="gdt" class="gt200">
-        <a href="https://e-hentai.org/s/3c7a2c86a5/4089666-1"><div title="Page 1: 12349451_0.jpg"
-          style="width:200px;height:105px;background:transparent url(https://puzaqhxrbn.hath.network/c2/du3afh26zz2jhx1a05/4089666-0.webp) -0px 0 no-repeat"></div></a>
-        <a href="https://e-hentai.org/s/24e4797087/4089666-2"><div title="Page 2: 12349451_1.jpg"
-          style="width:200px;height:141px;background:transparent url(https://puzaqhxrbn.hath.network/c2/du3afh26zz2jhx1a05/4089666-0.webp) -200px 0 no-repeat"></div></a>
+        <a href="https://e-hentai.org/s/aaaaaaaaaa/9000009-1"><div title="Page 1: 9000009_0.jpg"
+          style="width:200px;height:105px;background:transparent url(https://yyyyyyy.hath.network/c2/aaaaaaaaaaaaaaaaaa/9000009-0.webp) -0px 0 no-repeat"></div></a>
+        <a href="https://e-hentai.org/s/bbbbbbbbbb/9000009-2"><div title="Page 2: 9000009_1.jpg"
+          style="width:200px;height:141px;background:transparent url(https://yyyyyyy.hath.network/c2/aaaaaaaaaaaaaaaaaa/9000009-0.webp) -200px 0 no-repeat"></div></a>
         </div></body></html>"##;
         let g = parse_eh_gallery(page);
-        assert_eq!(g.title.as_deref(), Some("[horosuke] Asuka Dairy"));
+        assert_eq!(g.title.as_deref(), Some("[fake-circle] Fake Gallery"));
         assert_eq!(g.pages, Some(20));
         assert_eq!(
             g.tags,
-            vec!["artist:horosuke".to_string(), "female:big_breasts".to_string()]
+            vec![
+                "artist:fakecircle".to_string(),
+                "female:big_breasts".to_string()
+            ]
         );
         assert_eq!(
             g.slides,
             vec![
-                "https://e-hentai.org/s/3c7a2c86a5/4089666-1".to_string(),
-                "https://e-hentai.org/s/24e4797087/4089666-2".to_string()
+                "https://e-hentai.org/s/aaaaaaaaaa/9000009-1".to_string(),
+                "https://e-hentai.org/s/bbbbbbbbbb/9000009-2".to_string()
             ],
             "every page of the gallery becomes one candidate, not a download"
         );
         // The cover is the box in `gd1`, and the box is a position *inside a
         // sheet*: what has to be stored is a crop, not the sheet url.
         let cover = g.cover.expect("the cover box must be found");
-        assert_eq!(cover.sheet, "https://ehgt.org/w/02/546/04586-20dsbt2q.webp");
+        assert_eq!(
+            cover.sheet,
+            "https://ehgt.org/w/02/546/900009-aaaaaaaaaa.webp"
+        );
         assert_eq!((cover.x, cover.y, cover.w, cover.h), (0, 0, 250, 131));
 
         // and the grid tiles: the page's own offsets say where each one sits
-        let t0 = eh_tile(r#"width:200px;height:105px;background:transparent url(https://x.hath.network/c2/a/4089666-0.webp) -0px 0 no-repeat"#).unwrap();
+        let t0 = eh_tile(r#"width:200px;height:105px;background:transparent url(https://x.hath.network/c2/a/9000009-0.webp) -0px 0 no-repeat"#).unwrap();
         assert_eq!((t0.x, t0.y, t0.w, t0.h), (0, 0, 200, 105));
-        let t7 = eh_tile(r#"width:200px;height:141px;background:transparent url(https://x.hath.network/c2/a/4089666-0.webp) -1200px 0 no-repeat"#).unwrap();
+        let t7 = eh_tile(r#"width:200px;height:141px;background:transparent url(https://x.hath.network/c2/a/9000009-0.webp) -1200px 0 no-repeat"#).unwrap();
         assert_eq!((t7.x, t7.y, t7.w, t7.h), (1200, 0, 200, 141));
         // a banner box with no sheet in it is not a picture
         assert!(eh_tile("width:720px;height:80px;margin:0 auto").is_none());
@@ -3892,7 +3911,10 @@ mod tests {
             return;
         };
         let cookie = cookie.trim();
-        let url = "https://f95zone.to/threads/lewd-customs-in-the-tsugai-mating-village-2-final-itsumoeswaninatteorimasu.321420/";
+        let target = probe_url("GOON_PROBE_F95_THREAD", "the f95 art rows");
+        let Some(url) = target.as_deref() else {
+            return;
+        };
         // page fetch: the honest UA. The attachment fetch inside get_bytes
         // overrides it with the browser UA, which is the #50 half.
         let client = reqwest::Client::builder()
@@ -3969,6 +3991,8 @@ mod tests {
     /// bytes: stored cover + a real thumbnail row + the grid reporting `has_thumb`.
     ///
     ///   $env:GOON_F95_COOKIE = (Get-Content "$env:USERPROFILE\Downloads\f95cookie.txt" -Raw).Trim()
+    ///   $env:GOON_PROBE_F95_THREAD = the thread to rehearse against (no real thread
+    ///   url is committed, so this test takes its target from the environment)
     ///   powershell -ExecutionPolicy Bypass -Command ". tools\dev-env.ps1; cargo test -p goonflow-desktop --lib -- --ignored --nocapture f95_live_clip_rehearsal"
     #[tokio::test]
     #[ignore]
@@ -3979,7 +4003,13 @@ mod tests {
             );
         };
         let cookie = cookie.trim().to_string();
-        let url = "https://f95zone.to/threads/lewd-customs-in-the-tsugai-mating-village-2-final-itsumoeswaninatteorimasu.321420/";
+        let url = match probe_url("GOON_PROBE_F95_THREAD", "the f95 clip rehearsal").as_deref() {
+            Some(u) => u.to_string(),
+            None => panic!(
+                "GOON_PROBE_F95_THREAD must be set to the f95 thread you are rehearsing against \
+                 (a rehearsal that skips quietly is how #46 hid for a release)"
+            ),
+        };
 
         let (core, tmp) = crate::scratch_core("f95clip", true);
         {
@@ -4246,9 +4276,17 @@ mod tests {
             ),
         }
 
-        // 1. a gallery link. The gid+key are this gallery's real ones; the gid
-        //    alone is an apache 404 now, which is the bug #46 was filed as.
-        let gallery = clip(&core, "https://e-hentai.org/g/4089666/b9d914bef4/".to_string())
+        // 1. a gallery link. The gid+key come from GOON_PROBE_EH_GALLERY (no real
+        //    gallery url is committed); the gid alone is an apache 404 now, which
+        //    is the bug #46 was filed as.
+        let target = match probe_url("GOON_PROBE_EH_GALLERY", "the e-hentai clip rehearsal") {
+            Some(u) => u,
+            None => panic!(
+                "GOON_PROBE_EH_GALLERY must be set to the gallery you are rehearsing against \
+                 (a rehearsal that skips quietly is how #46 hid for a release)"
+            ),
+        };
+        let gallery = clip(&core, target.to_string())
             .await
             .expect("clip an e-hentai gallery");
         println!(
@@ -4266,7 +4304,10 @@ mod tests {
             "the cover must be cut out of the gallery sheet (#46: no <img> to fetch)"
         );
         assert!(gallery.thumb, "and it must decode into a grid tile");
-        assert!(gallery.tags > 0, "the tags are on the gallery page: {gallery:?}");
+        assert!(
+            gallery.tags > 0,
+            "the tags are on the gallery page: {gallery:?}"
+        );
         assert!(
             gallery.images_found >= 20,
             "every page of the gallery is a candidate, none of them fetched"
@@ -4312,11 +4353,7 @@ mod tests {
             .expect("a slideshow link must resolve through its gallery, not 404");
         println!(
             "slideshow= created {} stored_image {} thumb {} tags {} images_found {}",
-            slide.created,
-            slide.stored_image,
-            slide.thumb,
-            slide.tags,
-            slide.images_found
+            slide.created, slide.stored_image, slide.thumb, slide.tags, slide.images_found
         );
         println!("slideshow= note {:?}", slide.note);
         assert!(slide.created, "the same page as a link is still an item");

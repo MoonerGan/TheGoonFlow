@@ -87,7 +87,7 @@ fn is_html_ct(ct: Option<&str>) -> bool {
 ///
 /// The old line formatted `https://{site}` from the **site key** the sources row
 /// stores — `rule34`, not a hostname. Measured against the URL the user reported
-/// (`…/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771`, live in `http.rs`'s
+/// (`…/6666666666666666666666666666ffff.mp4?9000006`, live in `http.rs`'s
 /// `live_site_answers`):
 ///
 /// ```text
@@ -415,10 +415,11 @@ mod tests {
     /// 77 684 B of HTML, where the URL's own origin gives 200 / 59 MB).
     #[test]
     fn referer_is_the_file_origin_not_the_site_key() {
-        let cdn = "https://ahri2mp4.rule34.xxx//images/7158/71bd5b0c47e11f5db8675ca10484f5bd.mp4?8161771";
+        let cdn =
+            "https://ahri2mp4.rule34.xxx//images/9002/6666666666666666666666666666ffff.mp4?9000006";
         assert_eq!(referer_for(cdn), "https://ahri2mp4.rule34.xxx");
         assert_eq!(
-            referer_for("https://api-cdn-us-mp4.rule34.xxx/images/1440/x.mp4?10938771"),
+            referer_for("https://api-cdn-us-mp4.rule34.xxx/images/9003/x.mp4?9000007"),
             "https://api-cdn-us-mp4.rule34.xxx"
         );
         assert_eq!(referer_for("https://host.example"), "https://host.example");
@@ -437,7 +438,7 @@ mod tests {
         assert!(is_html_ct(Some("application/xhtml+xml")));
         assert!(!is_html_ct(Some("video/mp4")));
         assert!(!is_html_ct(None), "no content-type is not a web page");
-        let mp4 = "https://ahri2mp4.rule34.xxx//images/7158/x.mp4?8161771";
+        let mp4 = "https://ahri2mp4.rule34.xxx//images/9002/x.mp4?9000006";
         let hop = "https://hl.rule34.xxx/public/hotlink.php?img=x.mp4";
         assert!(redirect_hop(mp4, hop));
         assert!(!redirect_hop(mp4, mp4));

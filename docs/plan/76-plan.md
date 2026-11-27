@@ -352,7 +352,7 @@ CREATE INDEX media_item_kind_idx  ON media(item_id, kind);        -- has:/stored
   vault says otherwise, and it now does: **decision 13 closed 2026-11-27**, with
   `Query::plan_with` asking `db::VaultStats` two cheap counts per token and choosing the
   shape per token at a quarter of the library, inside the crossing the same probe measures
-  (DEVELOPMENT invariant 33, TESTING item 47).
+  (DEVELOPMENT invariant 34, TESTING item 48).
 - Title LIKE stays un-indexed: a 100k-row `LIKE '%…%'` scan under SQLCipher is
   ~tens of ms and honest; FTS5 is not bought this pass (open decision 9).
 - Range predicates read `media.bytes/width/height/duration_ms` — plain columns,
@@ -364,7 +364,7 @@ CREATE INDEX media_item_kind_idx  ON media(item_id, kind);        -- has:/stored
   cursor over its own sort key (`PageCursor { updatedAt, id }`), not on an
   `OFFSET`** — at 100k items an offset skips 1 200 surviving rows when a bulk delete
   shortens the result mid-walk, and costs 187 ms where the cursor costs 7 ms to reach
-  the same page (`filter_scale_probe`; DEVELOPMENT invariant 30, TESTING item 44).
+  the same page (`filter_scale_probe`; DEVELOPMENT invariant 31, TESTING item 45).
 - Measurement, not assumption: a generated 100k-item fixture vault and a timing
   probe (§8) must show the worked-example set under ~50 ms end-to-end before the
   card is Done.
@@ -506,7 +506,7 @@ New checks this card needs:
     continuation starts at **survivor #1200** — 1 200 rows the user was never shown
     leave the walk — while the cursor continuation starts at survivor #0.
     `filter_scale_probe`'s `paging` and `delete shift` sections print both halves, and
-    TESTING item 44 pins them.
+    TESTING item 45 pins them.
 11. **`f95-completed` moves to `site_flag`** during backfill (one-row type fix
     consistent with D9). Recommendation: yes, in v10.
 12. **Games grammar**: `status:` in the same query box replaces the pipeline
@@ -560,7 +560,7 @@ New checks this card needs:
      `db::page_items`): the dense tag's page 148 ms → 15 ms, `dense AND dense` 149 → 17,
      `dense AND -dense` 164 → 17, and §6's ~50 ms is met by every shape measured, with no
      new index and no FTS5. `db::VaultStats`, `query::PROBE_MIN_RATIO`, DEVELOPMENT
-     invariant 33, TESTING item 47.
+     invariant 34, TESTING item 48.
 
 ---
 

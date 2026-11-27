@@ -263,7 +263,7 @@ the board's *In review* column is the current list.
      stored (measured `200 image/jpeg 177 497 B` for page 1, `image/webp 76 300 B` for
      page 7, with or without a referer, with or without a cookie).
  28. A rule34/gelbooru **file** link (#50), e.g.
-     `https://wimg.rule34.xxx/images/3043/a6cf….jpeg?3411909` → the picture stores, and the
+     `https://wimg.rule34.xxx/images/9000/a6cf….jpeg?9000003` → the picture stores, and the
      note must say the tags could not be read: that site's metadata api answers a
      Cloudflare bot check (measured `403 text/html` plus `cf-mitigated: challenge` for this
      app's honest UA, for a browser UA and for no UA at all, while the file host answers the
@@ -414,7 +414,20 @@ the board's *In review* column is the current list.
       limit and what to do instead (`is 18 MB, over this app's 16 MB limit for cover
       art`, `… save the file and add it with + Images`), never a raw byte count.
 
-   39. **Schema v10: an old vault upgrades without losing one tag** (#76 stage
+  39. **The repo holds no url that names a real item** (found while reviewing #76:
+      33 content urls - post ids, file hashes, one gallery gid **and its showkey**,
+      one f95 poster avatar id - sat in committed test data and docs). The check is
+      `fixture_urls_in_the_repo_are_never_real` in goon-core: it reads `git ls-files`,
+      scans every tracked text file for a url that addresses one item (a CDN file link,
+      a post id, a `/g/<gid>/<key>/` gallery, a `<slug>.<id>` thread, a content hash, a
+      file named by a number) and insists every id inside it is placeholder-shaped. It
+      prints its coverage - 106 tracked text files, 57 content-shaped urls at the time of
+      writing - and `the_audit_refuses_a_real_shaped_url` feeds it real-shaped urls and
+      insists it reject them, so it cannot rot into the vacuous `CLEAN` of DEVELOPMENT §4
+      item 29. Live probes take their target from `GOON_PROBE_*` instead (same item, §4
+      item 30).
+
+   40. **Schema v10: an old vault upgrades without losing one tag** (#76 stage
       S1). Unlock a field-test vault made before this change: the grid holds the
       same items, every item's tag chips are the tags it had (the rebuild reuses
       the old tag ids, so `item_tags` never moves), the schema is at v10, and
@@ -459,7 +472,7 @@ the board's *In review* column is the current list.
       it takes to read the library once (measured **185 ms** for 1 000 rows at
       200 KB, ~1 GB/s), so it runs as a job with progress, never inside unlock.
 
-   40. **The query box is understood before it is ever run** (#76 stage S2). Each
+   41. **The query box is understood before it is ever run** (#76 stage S2). Each
       worked example in `docs/plan/76-plan.md` §4 parses to the AST the plan
       promises, and the same set **prepares and binds as real SQL against the
       real v10 schema**, so stage S3 has nothing left to discover. Pinned by the
@@ -578,7 +591,7 @@ the board's *In review* column is the current list.
       in total. The parse is noise next to the SQL it feeds, so the suggester can
       re-plan on every debounce tick without a cache.
 
-    41. **100k items, filtered, in milliseconds** (#76 stages S2 and S3, plan §6/§8.3).
+    42. **100k items, filtered, in milliseconds** (#76 stages S2 and S3, plan §6/§8.3).
       `cargo run -p goon-core --release --example filter_scale_probe` builds a
       throwaway plaintext vault under `%TEMP%` (**100 000 items**, 10 tags each
       ≈ **1 000 000** `item_tags` rows, 20 000 distinct tags, half vaulted, 70 %
@@ -628,7 +641,7 @@ the board's *In review* column is the current list.
       then `item_tags_tag_idx` as a covering index - which is why it gets *slower*
       the more items match.
 
-    42. **The planned predicate, run: `db::search_items` and its four siblings**
+    43. **The planned predicate, run: `db::search_items` and its four siblings**
        (#76 stage S3). The grammar proved what a query *means*; these tests prove
        what it *returns* once the view scope, the paging and the sidebar aggregates
        are attached — all against the synthetic `query_fixture()` vault, whose ids
@@ -676,7 +689,7 @@ the board's *In review* column is the current list.
         `now_epoch_text()` keeps, and `items_updated_idx` is the index the page
         walks — a `CAST` there would trade that index for a full sort of the table.
 
-    43. **The box, read while it is being typed: `filter_suggest` and the wire that
+    44. **The box, read while it is being typed: `filter_suggest` and the wire that
        carries a query** (#76 stage S4). S3 made the query select rows; S4 puts it on
        the wire and makes the box autocomplete. Measured 2026-11-26 with
        `cargo test --workspace` = **229 passed, 0 failed, 8 ignored** (goon-core
@@ -747,7 +760,7 @@ the board's *In review* column is the current list.
         site is recorded (invariant 21); insert the ledger row the clip actually wrote
         and the same query finds the item.
 
-    44. **Paging a result that changes under the grid: cursor, not row count** (#76
+    45. **Paging a result that changes under the grid: cursor, not row count** (#76
        plan open decision 10, now closed). The grid used to be able to ask for "page 5"
        by counting rows; it can now ask only for "the next 300 rows after this one",
        where *this one* is the sort key of the last row on screen. Two things had to be
@@ -757,7 +770,7 @@ the board's *In review* column is the current list.
        0 failed, 8 ignored** (goon-core **121** (was 120), desktop **104** + 8 ignored
        (was 103), vault 4, locator 2) in `tools/cargo-test-s5-paging.log`, and at 100k
        items in `tools/filter-scale-20261126d.log` (plaintext SQLite, so a floor, not
-       the number a locked vault shows — the same caveat item 41 carries).
+       the number a locked vault shows — the same caveat item 42 carries).
        - `a_bulk_delete_cannot_make_a_paged_grid_skip_rows` is the correctness pin, on
          the five-row `query_fixture()`: read a page of two (`q_big`, `q_small`), delete
          exactly those two the way *Delete selected* does, and the cursor read returns
@@ -800,11 +813,11 @@ the board's *In review* column is the current list.
          `OFFSET` in `crates/goon-core/src/db.rs`: the only hits are `list_items`, which
          stage S5 deletes, and this counter-example.
 
-    45. **What a filtered page costs, and what a keystroke may pay** (#76 plan open
-       decision 9, measured 2026-11-26; DEVELOPMENT invariants 30 and 31). The budget in
+    46. **What a filtered page costs, and what a keystroke may pay** (#76 plan open
+       decision 9, measured 2026-11-26; DEVELOPMENT invariants 31 and 32). The budget in
        plan §6 was written before anything was measured, so this item is where the
        real numbers live: 100k items, 21 reps, p50/p95, plaintext SQLite (a floor, same
-       caveat item 41 carries), logged in `tools/filter-scale-20261126h.log`. Four probe
+       caveat item 42 carries), logged in `tools/filter-scale-20261126h.log`. Four probe
        sections, each printing `EXPLAIN QUERY PLAN` and the row count beside every
        timing, because a fast empty page is not a measurement:
        - **An index on the grid’s own pair is not the fix.** `CREATE INDEX
@@ -861,13 +874,13 @@ the board's *In review* column is the current list.
          pick between them costs 0-1 ms. Recorded as plan open decision 13, and the
          reason §6’s ~50 ms is still reachable without FTS5.
        - `the_stamp_is_one_width_so_the_text_order_and_the_numeric_order_agree` is the
-         check for invariant 31: it pins the width of what `now_epoch_text()` writes *and*
+         check for invariant 32: it pins the width of what `now_epoch_text()` writes *and*
          demonstrates the disagreement on a mixed-width fixture (TEXT ranks
          `'999999999'` above `'1000000000'`, a number ranks it below), so the test can
          actually fail rather than restate a comment.
 
-    46. **Fixture hygiene: no test data may name a link that could be real** (#76
-       review, 2026-11-27; DEVELOPMENT invariant 32).
+    47. **Fixture hygiene: no test data may name a link that could be real** (#76
+       review, 2026-11-27; DEVELOPMENT invariant 33).
        `node tools\fixture-url-audit.js` walks the added lines of every commit in
        `origin/main..HEAD`, takes every URL that carries a path or a query, matches it
        against the site vocabulary this app speaks, and fails when its identifiers are
@@ -908,9 +921,9 @@ the board's *In review* column is the current list.
          forward-only cleanup in one commit with **no history rewrite**, and where that
          commit meets a branch over a fixture string, the branch takes `main`’s version.
 
-    47. **A tag term’s predicate shape is chosen from the vault’s counts, and the
+    48. **A tag term’s predicate shape is chosen from the vault’s counts, and the
        choice is printed** (#76 plan §9 decision 13, closed 2026-11-27; DEVELOPMENT
-       invariant 33). `filter_scale_probe`’s `decision 13` section answers the four
+       invariant 34). `filter_scale_probe`’s `decision 13` section answers the four
        conditions the review set: 100 000 items, 80 000 library rows, a 300-row page,
        21 reps, p50/p95, plaintext SQLite, logged in `tools/filter-scale-20261127k.log`.
 
@@ -957,13 +970,16 @@ the board's *In review* column is the current list.
   UTF-8 (em dashes become ` E`, newlines get swallowed). Use a node script or the
   editor's tools; audit with `node tools\char-audit.js`, repair with
   `node tools\restore-nonascii.js`.
+- **No committed url may name a real item** (DEVELOPMENT §4 item 30): fixtures use
+  placeholder ids, live probes read theirs from `GOON_PROBE_*`. The audit is a test, and
+  it prints how much it read.
 - Nothing vault-shaped may be committed. `.gitignore` covers `flow.cfg` (the plaintext
   pointer beside the exe), `chrome.cfg` (the plaintext decoy title, also beside the exe),
   `goonflow-vault/`, `*.db` / `*.db-wal` / `*.db-shm`, `*-journal`, `*.log`, `tools/*.log`
   and `tools/last-build.lock`. Check with `git check-ignore -v <path>` rather than trusting
   this sentence, and never print cookie or passphrase values into logs or issue comments.
 - Fake is a shape, not an intention. A fixture URL or id must be obviously
-  placeholder-shaped (DEVELOPMENT invariant 32); `node tools\fixture-url-audit.js`
+  placeholder-shaped (DEVELOPMENT invariant 33); `node tools\fixture-url-audit.js`
   checks the added lines of a branch range and prints what it read. Ownership is part
   of the rule: a branch fixes the fixture lines **it** added, and pre-existing content
   URLs on `main` are the board's forward-only cleanup, not something a feature branch

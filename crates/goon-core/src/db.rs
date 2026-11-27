@@ -319,7 +319,7 @@ fn migrate_v10(conn: &Connection) -> rusqlite::Result<()> {
 
         -- The byte size of a stored row is a fact the engine can state exactly,
         -- and without moving the BLOB: length() on an encrypted row returns the
-        -- plaintext length (measured through SQLCipher, TESTING item 39).
+        -- plaintext length (measured through SQLCipher, TESTING item 40).
         UPDATE media SET bytes = length(data) WHERE bytes IS NULL;
 
         -- A pre-v10 writer wrote 0 for a header it could not read. 0 px is not a
@@ -957,7 +957,7 @@ pub struct SearchPage {
 /// shown. The grid asks for "the next `limit` rows after this one", not "skip N
 /// rows", because an offset is a position in a list that a bulk action keeps
 /// changing. `filter_scale_probe` deletes 20 000 matched rows out of a 64 092-row
-/// result and reads the next page both ways (TESTING item 44): the `OFFSET` read
+/// result and reads the next page both ways (TESTING item 45): the `OFFSET` read
 /// starts **1 200 surviving rows past** where the user was, so those rows are never
 /// shown, while the cursor read starts at the first survivor after the cursor and
 /// passes nothing over. #73's *Delete selected* is that delete.
@@ -1038,7 +1038,7 @@ pub fn page_statement(
 /// The count is a separate statement on purpose, and it counts the **whole**
 /// result, cursor or no cursor — "N matches · M total" is about the predicate, not
 /// about the page. It is also not free, and neither is the page. At 100k items
-/// `filter_scale_probe` (TESTING item 45) counts a dense tag in 86 ms and a fact
+/// `filter_scale_probe` (TESTING item 46) counts a dense tag in 86 ms and a fact
 /// range in 151 ms; the 300-row page is only cheap when the predicate can walk
 /// `items_updated_idx` and stop early (3 ms for `size>100mb type:image`), and it is
 /// not cheap at all when a tag matches a large share of the library, because SQLite
@@ -2289,7 +2289,7 @@ fn pairing_key(title: &str) -> String {
 ///   N·(N-1)/2 rows.
 /// - Media: **the same stored bytes** (media.hash) on two items — a repost of
 ///   one image across boorus, or the same file imported twice. Title matching
-///   is useless for `1743761874698456.jpg`, so we match content instead.
+///   is useless for `1000000000000.jpg`, so we match content instead.
 ///
 /// These are only ever *suggestions*; a human confirms the merge.
 pub fn pairing_suggestions(
@@ -3333,12 +3333,12 @@ mod tests {
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sources (item_id, site, url) VALUES ('m1','i','https://i.4cdn.org/h/1743761874698456.jpg')",
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','i','https://i.4cdn.org/h/1000000000000.jpg')",
             [],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO sources (item_id, site, url) VALUES ('m1','wimg','https://wimg.rule34.xxx//images/3868/x.jpeg?11353035')",
+            "INSERT INTO sources (item_id, site, url) VALUES ('m1','wimg','https://wimg.rule34.xxx//images/9001/x.jpeg?9000004')",
             [],
         )
         .unwrap();
@@ -3362,7 +3362,7 @@ mod tests {
     fn media_pairing_by_shared_content_hash() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
-        for (id, title) in [("m1", "1743761874698456.jpg"), ("m2", "untitled jpeg")] {
+        for (id, title) in [("m1", "1000000000000.jpg"), ("m2", "untitled jpeg")] {
             conn.execute(
                 "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,'post',?2,'0','1')",
                 params![id, title],
@@ -4171,7 +4171,7 @@ mod tests {
         );
     }
 
-    /// Decision 13, measured at 100 000 items (`filter_scale_probe`, TESTING item 47):
+    /// Decision 13, measured at 100 000 items (`filter_scale_probe`, TESTING item 48):
     /// a tag a quarter of the library carries is 148 ms as a semi-join and 15 ms as a
     /// row-side probe, while a token six items carry is 0 ms as a semi-join and 101 ms as a
     /// probe. So the shape is chosen per token from the vault’s own counts — which only

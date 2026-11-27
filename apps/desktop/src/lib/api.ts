@@ -290,7 +290,7 @@ export type Suggestion = {
 /** Where the grid stopped: the sort key of the last row actually on screen. The
  *  next page means "the rows after this one", never "skip N rows" — a bulk delete
  *  during a paged walk shifts an offset, and at 100k items one delete hid 1 200
- *  surviving rows from a reader that used one (TESTING item 44). `updatedAt` is the
+ *  surviving rows from a reader that used one (TESTING item 45). `updatedAt` is the
  *  stamp **as stored**, compared as text, because that is how the grid orders. */
 export type PageCursor = { updatedAt: string; id: string };
 

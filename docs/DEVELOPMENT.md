@@ -265,10 +265,10 @@ tools/
   originals (`kind='full'`, `kind='video'`), content-hash deduped BLOBs. Keeping
   them in the DB keeps the wipe story to "shred one directory". Media dupe suggestions
   (`pairing_suggestions(conn, Some("media"))`) pair *different items sharing
-  one stored hash* — titles are useless for `1743761874698456.jpg`.
+  one stored hash* — titles are useless for `1000000000000.jpg`.
   v10 adds the **facts** the filter's meta predicates read: `bytes` (written by
   every writer, backfilled as `length(data)` — measured exact under SQLCipher,
-  TESTING item 39), `duration_ms` (NULL until the facts probe measures it),
+  TESTING item 40), `duration_ms` (NULL until the facts probe measures it),
   `animated` (read from the container: gif frame count, PNG `acTL`, WebP
   `ANMF`) and `probed_at` — the marker that says a container has already been
   asked about this row, including when it answered nothing. A thumb row gets
@@ -563,7 +563,7 @@ tools/
 10. **Site names come from `HOST_SUFFIXES`, never from a host label.** Early
     field reports got site "i" (from `i.4cdn.org`) and "wimg". Unknown hosts
     fall back to the *registrable domain*, and booru-CDN file links carrying a
-    numeric query id (`?11353035`) route through the site API (`Mode::BooruId`)
+    numeric query id (`?9000004`) route through the site API (`Mode::BooruId`)
     — pulling bytes from a CDN with the CDN as referer is what hotlink
     protection kills. `JobInfo.finished_at` exists so the ActivityBar can
     expire finished rows; don't remove it.
@@ -776,7 +776,7 @@ tools/
     `type:gif` all miss an un-probed item). Nothing may invent a value to make a
     query return rows:
     `bytes` is written by every media writer and backfilled as `length(data)`
-    (measured exact through SQLCipher, TESTING item 39); `animated` is read from
+    (measured exact through SQLCipher, TESTING item 40); `animated` is read from
     the container's own chunks (gif frame count, PNG `acTL`, WebP `ANIM`/`ANMF`),
     never from the file name or from a thumbnail — a re-encoded tile says nothing
     about the original, so thumb rows keep `animated` NULL; durations and the
@@ -822,8 +822,34 @@ tools/
     general rule: when quoting a green check, know what the command actually
     looked at — a pass line with no coverage count is a red flag, and audit tools
     must state their coverage.
+30. **Nothing in this repository may name a real item on a content site**
+    (found 2026-11-26 while reviewing #76, when the branch's leak scan flagged a
+    fixture url that nobody could prove was synthetic). The repository is public,
+    and a committed url that addresses one specific post, gallery, thread or file
+    is a fact about somebody's library: it stays there whatever happens to the
+    account, and "the item is public anyway" is not the point. The sweep found 33
+    such urls in files that had already been reviewed and merged - among them one
+    gallery's real gid **and its real showkey**, which is nearer a credential
+    than a link, and one real f95 poster's avatar id. So:
 
-30. **A grid page resumes on its own sort key, never on a row count** (#76, plan
+    - a committed fixture url must be **self-evidently fake**: placeholder ids
+      (`9000001`), placeholder hashes (`1111...aaaa`), `example.org`, `x.to`. Its
+      *shape* has to stay valid for whatever parses it, or the fixture has stopped
+      testing the thing while looking clean;
+    - a **live probe** may not use a fake url - it would "succeed" by being
+      refused and then argue from a policy no host holds - so it reads its target
+      from the environment (`probe_url` in the desktop crate: `GOON_PROBE_BOORU_API`,
+      `GOON_PROBE_BOORU_FILE`, `GOON_PROBE_BOORU_MP4`, `GOON_PROBE_EH_GALLERY`,
+      `GOON_PROBE_F95_THREAD`) and says out loud which one it wanted. A print-only
+      probe skips visibly; the two *rehearsals* that assert a capability panic
+      instead, because a rehearsal that skips quietly is how #46 hid for a release;
+    - the rule runs on every `cargo test` (`fixture_urls_in_the_repo_are_never_real`
+      plus `the_audit_refuses_a_real_shaped_url`, which proves the check still
+      catches what it is for) and prints its coverage, for the reason in item 29.
+
+    A real url belongs in an **untracked** file on the machine that uses it.
+
+31. **A grid page resumes on its own sort key, never on a row count** (#76, plan
     open decision 10, closed by measurement rather than preference). `search_items`
     takes `after: PageCursor { updatedAt, id }` and there is **no `OFFSET` anywhere in
     the query path**. The reason is a measured one. `filter_scale_probe` at 100k items
@@ -834,12 +860,12 @@ tools/
     passes nothing over. Depth is the other half: on the last page of a 5 000-match
     fact query the offset page costs 187 ms p50 and the cursor page 7 ms. Both halves
     are pinned — `a_bulk_delete_cannot_make_a_paged_grid_skip_rows` in `goon-core` and
-    the probe's `delete shift` section (TESTING item 44). A cursor is only correct
+    the probe's `delete shift` section (TESTING item 45). A cursor is only correct
     while it compares on exactly the key the `ORDER BY` sorts by, so the order lives
     in one string (`db::GRID_ORDER`), its cursor form in the const beside it
     (`db::AFTER_CURSOR`), and the two are never written out separately again.
 
-31. **Three readers treat the stamp as one order, and only its width keeps them in
+32. **Three readers treat the stamp as one order, and only its width keeps them in
     step** (#76 review). `items.updated_at` is TEXT. `db::GRID_ORDER` sorts that TEXT,
     `db::AFTER_CURSOR` compares that TEXT, and the `added:` / `updated:` predicates
     compare `CAST(updated_at AS INTEGER)`. Those are one order only while every stamp
@@ -857,24 +883,32 @@ tools/
     format ever changes — ISO dates, milliseconds, anything — the order, the cursor
     and the date predicates change in the **same** commit, together with that test.
 
-32. **Test data uses identifiers that are obviously fake, never a link that could be
-    real** (#76 review). A fixture written as an e-hentai gallery URL with a
-    six-digit id cannot be told apart from a link that came out of somebody’s
-    library, and in a public repo that stops being recoverable once it is pushed: a
-    force-push moves a ref, it does not un-publish a fact. So a fixture URL carries
-    placeholder-shaped identifiers by construction — `…/g/9999999/0123456789abcdef/`,
-    `…/g/1234/abcd/`, `example.org`, `x.to`, or a template (`{id}`, `<gid>`) — and the
-    same rule covers ids, file names and hashes (`9999999`, 32 zeros, never a value
-    copied from a real clip). `tools/fixture-url-audit.js` enforces the URL half on
-    the lines a range adds — a change owns its own diff, not the repo’s history —
-    prints its coverage, and exits non-zero on a finding. Production host constants
-    and `{id}` templates pass on shape; a flagged line that is legitimate carries a
-    `fixture-url-ok: why` note that the tool echoes, so a suppression stays visible.
-    Fixtures inherited from `main` that predate the rule are a separate cleanup, not
-    something a feature branch rewrites under someone else’s commits — the board owns
-    that forward-only pass, and a branch's job is the lines it adds.
+33. **A fake fixture identifier has to stay the shape it stands in for, and the guard
+    that enforces it runs on the diff** (the #76 review; the principle is §4 item 30, so
+    this is only the half of it a branch can be held to).
 
-33. **A tag term’s SQL shape is chosen per token from what the vault says it holds, and a
+    * **fake must not mean unparseable.** A placeholder the parser under test no longer
+      recognises turns a fixture into a quiet lie. `…/g/9999999/0123456789abcdef/` is
+      still an e-hentai **gallery** to `ingest::classify`, and
+      `…/images/00/00000000000000000000000000000000.jpg?9999999` is still a **file link**;
+      `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
+      (`src-tauri/src/lib.rs`) asserts both, and the same care covers ids, file names and
+      hashes (`9999999`, 32 zeros — never a value copied from a real clip).
+    * **a change owns its own diff.** `tools/fixture-url-audit.js` audits the **added
+      lines** of a branch range (`--range origin/main..HEAD`), prints how many commits,
+      lines and urls it read, and exits non-zero on a finding. The repo-wide audit in
+      `crates/goon-core/src/audit.rs` (§4 item 30) reads the whole tree, which is the
+      right question for a release and the wrong one for a review. Production host
+      constants and `{id}` templates pass on shape; a flagged line that is legitimate
+      carries a `fixture-url-ok: why` note the tool echoes, so a suppression stays
+      visible.
+    * **ownership.** A branch fixes the fixture lines it added — `main`’s pre-existing
+      content urls are the board’s forward-only cleanup, not something a feature branch
+      edits under someone else’s commits, and whether a string that has already been
+      pushed earns a history rewrite is the board’s call (the operator’s ruling,
+      2026-11-27: it does not, when nothing in it identifies a person).
+
+34. **A tag term’s SQL shape is chosen per token from what the vault says it holds, and a
     negated token never gets the shape that drives the plan** (#76 plan §9, decision 13,
     closed by measurement rather than preference). `items.id IN (SELECT …)` from the tag
     side is right for a token a handful of items carry (0 ms at 6 postings) and wrong for
@@ -925,10 +959,13 @@ cmd /c "cargo test --workspace > tools\cargo-test.log 2>&1"
   `file:///…` links), and a real-vault roundtrip proving local `file:///…mp4`
   / `.png` bookmarks and direct booru CDN links import as **media** (the M1
   field report said they landed in "unrecognized").
-- `ingest` — classify() for every supported shape (post pages, `…/file.gif?267940`
+- `ingest` — classify() for every supported shape (post pages, `…/file.gif?9000001`
   CDN links, `file:///C:/…`, UNC, mirrors), `local_path` Windows path handling,
   and the HTML parsers (e-hentai gate vs gallery, DLsite og:*, f95 og:title →
   title + version + engine tags). All parse-only: no network in tests.
+- live probes (`http.rs`, `ingest.rs`) stay `#[ignore]`d and read their target url
+  from the environment (`GOON_PROBE_*` via `probe_url`): no url naming a real item is
+  committed, so a probe without a target names the variable it wanted.
 - `jobs` — one job per kind, progress visible in the snapshot, `cancel` /
   `cancel_all` reach the work loop, finished list bounded.
 - `bookmarks` (job path) — a pre-cancelled import stops early and reports
@@ -1050,13 +1087,13 @@ Set-Location apps\desktop
     at all. The CDN answers that same post's file at `200 image/jpeg 678 634 B`
     to all three. So a link that **names a file** is classified
     `Mode::DirectMedia` and never sent to the api, even when a post id can be
-    read out of the query (`…jpeg?3411909`) — the id is kept so the note can name
+    read out of the query (`…jpeg?9000003`) — the id is kept so the note can name
     the post it came from, and the note says plainly that the tags could not be
     read. A link that names no file is a post page, and that still goes to the
     api. **e621 is the exception**: its api and its file host both answer 200, so
     its post pages keep the api path and keep their tags.
   - rule34 CDN file URLs carry the **post id in the query**
-    (`…/7783/<md5>.png?8886918`) — free identity to verify against.
+    (`…/9004/<md5>.png?9000016`) — free identity to verify against.
   - **f95zone without a login cookie** returns the thread with a "register to …"
     wall and **zero** post images. With a saved cookie the page grows
     (~290 KB → ~449 KB) and the art appears, **lazily**: `<img
@@ -1081,7 +1118,7 @@ Set-Location apps\desktop
     link finds its gallery.
   - **The `/s/<imgkey>/<gid>-<n>` slideshow page is worth fetching**
     (*re-measured*): `200`, 4 534 B, and it carries
-    `<img id="img" src="https://<rand>.hath.network/h/<hash>-…-1200-630-jpg/keystamp=…;fileindex=…;xres=org/12349451_0.jpg">`
+    `<img id="img" src="https://<rand>.hath.network/h/<hash>-…-1200-630-jpg/keystamp=…;fileindex=…;xres=org/9000009_0.jpg">`
     — the **full art of that one page**, which answered `200 image/jpeg
     177 497 B` with our UA, referer or not, cookie or not. The host and the
     `keystamp` are handed out per request, so the *page link* is what gets
@@ -1180,7 +1217,7 @@ Set-Location apps\desktop
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
   `target/`, `node_modules/`, build logs under `tools/*.log`. Shape counts too: a
-  fixture URL or id must be self-evidently fake (invariant 32), and
+  fixture URL or id must be self-evidently fake (invariant 33), and
   `node tools\fixture-url-audit.js` checks that on the lines a branch adds, printing
   how many commits and added lines it read.
 

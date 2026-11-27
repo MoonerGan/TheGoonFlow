@@ -467,8 +467,8 @@ mod tests {
             "{}\n{}\n{}\n{}\n{}\n{}\n",
             file_url(&vid),
             file_url(&img),
-            "https://hypnohub.net//images/6c/e0/6ce01fd2de7cc88d217ac34e44f7601a.gif?267940",
-            "https://hypnohub.net/index.php?page=post&s=view&id=267940",
+            "https://hypnohub.net//images/6c/e0/1111111111111111111111111111aaaa.gif?9000001",
+            "https://hypnohub.net/index.php?page=post&s=view&id=9000001",
             "https://support.mozilla.org/products/firefox",
             "https://www.mozilla.org/contribute/",
         );
@@ -573,7 +573,7 @@ mod tests {
         // come back unescaped or the file lookup fails.
         let html = r##"<DL><p>
     <DT><A HREF="file:///C:/Users/Admin/Videos/[Kimochi]%20Cissia&#39;s%20Paizuri-fellatio%20animation/uncensored%20fix.mp4">uncensored fix.mp4</A>
-    <DT><A HREF="https://hypnohub.net/index.php?page=post&amp;s=view&amp;id=267940">hypnohub post</A>
+    <DT><A HREF="https://hypnohub.net/index.php?page=post&amp;s=view&amp;id=9000001">hypnohub post</A>
 </DL><p>"##;
         let bms = parse_bookmarks(html);
         assert_eq!(bms.len(), 2);
@@ -591,13 +591,13 @@ mod tests {
         );
         let cls = ingest::classify(&bms[1].url).unwrap();
         assert_eq!(cls.site, "hypnohub");
-        assert_eq!(cls.remote_id.as_deref(), Some("267940"));
+        assert_eq!(cls.remote_id.as_deref(), Some("9000001"));
     }
 
     #[test]
     fn parses_netscape_bookmarks() {
         let html = r##"<DL><p>
-    <DT><A HREF="https://gelbooru.com/index.php?page=post&s=view&id=4765984">cool post - Gelbooru</A>
+    <DT><A HREF="https://gelbooru.com/index.php?page=post&s=view&id=9000005">cool post - Gelbooru</A>
     <DT><A HREF="https://rule34.xxx/index.php?page=post&s=view&id=123456&amp;foo=1">esc &amp; test</A>
     <DT><A HREF="file:///C:/Users/Admin/Videos/EnomeSnake.mp4">EnomeSnake.mp4</A>
     <DT><A HREF="https://example.com/random">nope</A>

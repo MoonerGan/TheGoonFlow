@@ -173,7 +173,7 @@ new this session; verified with `node tools/char-audit.js` (**CLEAN**, 0
 unexpected characters) and a byte inventory against `HEAD` (`§x6 —x26→34 …x2
 ↔x2 ·x3` — nothing lost, 8 em dashes added by the new comments). Temporary
 timing code was removed from the source; the numbers live here and in DEVELOPMENT
-§3 / TESTING item 39.
+§3 / TESTING item 40.
 
 ---
 
@@ -573,7 +573,7 @@ prove `stored:local-only` ≡ `local_only`, `-stored:disk` ≡ `no_local` and
 **Docs updated in this commit.** `docs/DEVELOPMENT.md` §3 gains a
 "**Running the query box**" bullet: the one-composition-point rule, the
 scope-is-SQL rule, `SearchPage`, the `updated_at DESC, items.id` order and the
-TEXT-stamp contract, and what is *not* replaced yet. `docs/TESTING.md` item 41 is
+TEXT-stamp contract, and what is *not* replaced yet. `docs/TESTING.md` item 42 is
 rewritten around the numbers above (it described the page-only probe), and item
 **42** records the eight S3 predicate tests.
 
@@ -726,7 +726,7 @@ the wire**": the three commands and `planned_query`, the two-word view vocabular
 `ParseError.message` as form state, how `db::suggest` counts through the query's own
 readers and what it refuses to complete, and the tag-name-vs-item-source rule.
 `docs/TESTING.md` gains item **43** (the twelve tests), loses a duplicated paragraph
-item 41 picked up in S3, and §1 gains the rustfmt warning plus the note that
+item 42 picked up in S3, and §1 gains the rustfmt warning plus the note that
 `char-audit.js` needs its file arguments. `tools/char-audit.js` itself gains three
 allow-listed codepoints (`± ’ ≡`), documented by the comment next to them.
 
@@ -737,7 +737,7 @@ has the split) — the suggestion rows with their counts, `searchItemIds` for se
 and `needs_facts` beside `total` for the "not measured yet" row. "Load more" is
 `after`: the cursor `{ updatedAt, id }` of the last row on screen, taken from
 `ItemSummary` fields the grid already renders — there is no page number and no offset
-to keep in state (invariant 30). S5 also carries the deletions that make
+to keep in state (invariant 31). S5 also carries the deletions that make
 this one wire shape instead of two: `list_items`, `source_stats`, the four facet rails,
 and `listItems`' `tag`/`site`/`source` arguments, plus `tools/filter-ui-probe.js`.
 Two facts the UI has to say out loud, both already true in the data: tags are binary
@@ -863,7 +863,7 @@ explained before the UI built on top of it. Three hypotheses were on the table �
 index on the grid’s sort key, switch the cursor to a row-value comparison, stop paying the
 count per keystroke — and one sentence in the S3 entry needed correcting. All four are now
 answered with numbers in `tools/filter-scale-20261126h.log` (100k items, 21 reps,
-p50/p95, plaintext SQLite, so a floor), and TESTING item 45 carries the tables.
+p50/p95, plaintext SQLite, so a floor), and TESTING item 46 carries the tables.
 
 **What landed.**
 
@@ -876,7 +876,7 @@ p50/p95, plaintext SQLite, so a floor), and TESTING item 45 carries the tables.
 * Two checks that can fail, as the review asked: the row-value cursor dropping a row of a
   same-second batch, and the stamp-width assumption (`the_stamp_is_one_width_…` shows both
   the agreement on one-width data and the disagreement on mixed widths). DEVELOPMENT gains
-  invariant 31 for the second, plus the row-value warning beside the cursor bullet.
+  invariant 32 for the second, plus the row-value warning beside the cursor bullet.
 * Four probe sections, printing plan and row count beside every timing: `index options`,
   `both halves DESC`, `tag predicate shape`, and a cardinality ladder for the crossover
   (synthetic alias tags, created and dropped inside the section).
@@ -937,7 +937,7 @@ was rewritten. The replacements are `…/g/9999999/0123456789abcdef/` and
 `…/images/00/00000000000000000000000000000000.jpg?9999999`; no assertion referenced
 either value, so the suites move unchanged (235 passed / 0 failed / 8 ignored).
 
-**The guard.** `tools/fixture-url-audit.js` (TESTING item 46, DEVELOPMENT invariant 32)
+**The guard.** `tools/fixture-url-audit.js` (TESTING item 47, DEVELOPMENT invariant 33)
 audits the added lines of a branch range and prints its coverage. It exits 1 on the
 history it was written for — 2 violations, naming both commits — and 0 on the rewritten
 branch, so the check is known to be able to fail. Honest limit, recorded because it is
@@ -1026,12 +1026,12 @@ stand_in_for` (`src-tauri/src/lib.rs`) feeds both rewritten fixture URLs through
 `ingest::classify` and asserts the gallery one still parses as an e-hentai **gallery** with
 gid `9999999` and the other as **DirectMedia** on the booru CDN with post id `9999999` — the
 cheap way to obey the fake-fixture rule badly is to swap in a string that no longer parses.
-The ownership ruling that came with the review is now written down (TESTING item 46,
-DEVELOPMENT invariant 32): a branch fixes the fixture lines it added, `main`'s pre-existing
+The ownership ruling that came with the review is now written down (TESTING item 47,
+DEVELOPMENT invariant 33): a branch fixes the fixture lines it added, `main`'s pre-existing
 content URLs are the board's forward-only cleanup in one commit, and a leaked string gets a
 history rewrite only when the board orders one.
 
-**Docs.** DEVELOPMENT **invariant 33**; TESTING item **47** (new) and item **46**
+**Docs.** DEVELOPMENT **invariant 34**; TESTING item **48** (new) and item **47**
 (extended); plan §6's performance line and §9 decision 13, closed with the table above.
 
 **Gates.** `cargo test --workspace` **239 passed / 0 failed / 8 ignored**
@@ -1045,3 +1045,39 @@ touched; `node tools\fixture-url-audit.js --range origin/main...HEAD` 0 violatio
 reporting "the grid is slow" also reports which shape ran; the count question the rule asks
 is the same one the *suggest* pool already pays (148 ms → 15 ms for a base query holding a
 dense tag), which is what keeps the query box responsive while typing.
+
+---
+
+## Merge — main's hygiene pass took the numbers this branch was using (2026-11-27)
+
+`034545e fix(repo-hygiene): no committed url may name a real item, and the suite enforces
+it` landed on `main` while decision 13 was in flight: 33 content urls replaced by
+placeholders, the live probes now read their targets from `GOON_PROBE_*`, and the guard
+ships as a test (`crates/goon-core/src/audit.rs`:
+`fixture_urls_in_the_repo_are_never_real`, fed real-shaped urls by
+`the_audit_refuses_a_real_shaped_url`). **Merged rather than rebased**, on purpose: 13
+replayed commits would have met the same two numbering conflicts 13 times, and a merge
+leaves the hashes the board already looked at where they are.
+
+**The collision.** Both sides added an item 39 to TESTING §3 and an invariant 30 to
+DEVELOPMENT §4 — the hygiene rule, from each direction. `main` owns both numbers, so this
+branch's TESTING items 39..47 are now **40..48** and its invariants 30..33 are now
+**31..34**, headings and every cross-reference moved together (docs, Rust doc comments,
+`api.ts`), and main's item 39 moved back into its numbered place instead of sitting after
+item 48 where the merge put it.
+
+**Two guards, one rule, said once.** `main`'s audit reads every tracked file at release
+time; `tools/fixture-url-audit.js` reads the added lines of a branch range at review time.
+DEVELOPMENT invariant 33 now states only the second half (fake identifiers must stay
+parseable, the guard runs on the diff, a branch owns its own lines) and points at §4 item
+30 for the principle, because an invariant that restates the one above it is the start of
+two rules that drift apart.
+
+**Code effect: none.** The hygiene pass rewrote fixture urls in `http.rs`, `ingest.rs`,
+`video.rs`, `bookmarks.rs`, `audit.rs`, `db.rs` and the docs; this branch's placeholders
+(`…/g/9999999/0123456789abcdef/`, `…/images/00/0000…0.jpg?9999999`) pass `main`'s audit
+unchanged, which is what placeholder-shaped means. `cargo test --workspace` = **242 passed
+/ 0 failed / 8 ignored** (`tools/cargo-test-76-merge.log`) with main's two audit tests
+among them; `node tools\fixture-url-audit.js --range origin/main..HEAD` = 0 violations
+(15 commits, 13 016 added lines, 5 site urls read, the merge itself adding nothing because
+its conflict resolution kept `main`'s line).
