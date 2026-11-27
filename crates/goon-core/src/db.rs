@@ -1073,11 +1073,7 @@ pub fn search_items(
             .then(|| count_matches(conn, scope, plan))
             .transpose()?,
         needs_facts: plan.needs_facts(),
-        shapes: plan
-            .shapes
-            .iter()
-            .map(|note| note.to_string())
-            .collect(),
+        shapes: plan.shapes.iter().map(|note| note.to_string()).collect(),
     })
 }
 

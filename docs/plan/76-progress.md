@@ -937,7 +937,7 @@ was rewritten. The replacements are `…/g/9999999/0123456789abcdef/` and
 `…/images/00/00000000000000000000000000000000.jpg?9999999`; no assertion referenced
 either value, so the suites move unchanged (235 passed / 0 failed / 8 ignored).
 
-**The guard.** `tools/fixture-url-audit.js` (TESTING item 47, DEVELOPMENT invariant 33)
+**The guard.** `tools/fixture-url-audit.js` (TESTING item 47, DEVELOPMENT invariant 33) *(tool deleted 2026-11-27 at review; DEVELOPMENT §4 item 30's test is the check)*
 audits the added lines of a branch range and prints its coverage. It exits 1 on the
 history it was written for — 2 violations, naming both commits — and 0 on the rewritten
 branch, so the check is known to be able to fail. Honest limit, recorded because it is
@@ -1039,7 +1039,7 @@ history rewrite only when the board orders one.
 `cargo clean -p goon-core -p goonflow-desktop` (log proves the re-check) 0 findings
 (`tools/cargo-clippy-76-d13.log`); `rustfmt` on the four Rust files touched, with the four
 hand-formatted siblings restored; `node tools\char-audit.js` CLEAN over the seven files
-touched; `node tools\fixture-url-audit.js --range origin/main...HEAD` 0 violations.
+touched; `node tools\fixture-url-audit.js --range origin/main...HEAD` 0 violations. *(tool deleted 2026-11-27 at review; DEVELOPMENT §4 item 30's test is the check)*
 
 **Carried into S5.** The query diagnostic in the UI prints `Plan::shapes`, so a user
 reporting "the grid is slow" also reports which shape ran; the count question the rule asks
@@ -1067,7 +1067,7 @@ branch's TESTING items 39..47 are now **40..48** and its invariants 30..33 are n
 item 48 where the merge put it.
 
 **Two guards, one rule, said once.** `main`'s audit reads every tracked file at release
-time; `tools/fixture-url-audit.js` reads the added lines of a branch range at review time.
+time; `tools/fixture-url-audit.js` reads the added lines of a branch range at review time. *(tool deleted 2026-11-27 at review; DEVELOPMENT §4 item 30's test is the check)*
 DEVELOPMENT invariant 33 now states only the second half (fake identifiers must stay
 parseable, the guard runs on the diff, a branch owns its own lines) and points at §4 item
 30 for the principle, because an invariant that restates the one above it is the start of
@@ -1078,7 +1078,7 @@ two rules that drift apart.
 (`…/g/9999999/0123456789abcdef/`, `…/images/00/0000…0.jpg?9999999`) pass `main`'s audit
 unchanged, which is what placeholder-shaped means. `cargo test --workspace` = **242 passed
 / 0 failed / 8 ignored** (`tools/cargo-test-76-merge.log`) with main's two audit tests
-among them; `node tools\fixture-url-audit.js --range origin/main..HEAD` = 0 violations
+among them; `node tools\fixture-url-audit.js --range origin/main..HEAD` = 0 violations *(tool deleted 2026-11-27 at review; DEVELOPMENT §4 item 30's test is the check)*
 (15 commits, 13 016 added lines, 5 site urls read, the merge itself adding nothing because
 its conflict resolution kept `main`'s line).
 
@@ -1139,7 +1139,7 @@ the token the planner shaped, and the page still answers the same rows). `list_i
   measures this tree and not last week's markup. That build log carries the usual
   environment noise (`LNK4099` about `ossl_static.pdb`: a missing debug symbol file for
   the static OpenSSL), which is not a source warning.
-- `node tools/char-audit.js` over every touched file plus the probe — **`8 file(s)
+- `node tools/char-audit.js` over every touched file plus the probe — **`9 file(s)
   audited` / `CLEAN`**.
 
 ### The probe: `tools/filter-ui-probe.js`
@@ -1245,3 +1245,108 @@ view is ever left filtering on nothing.
   bullet; DEVELOPMENT invariants **35** (the box is the only filter state a view has) and
   **36** (a number on the grid belongs to the query on screen); plan §5 (the deviation),
   §7 (S5 closed) and §8 item 4 (the probe, built).
+
+
+## S5 review — one rule, one check; evidence you can read; and a wrong rustfmt edition (2026-11-27)
+
+The review accepted S5 (rails gone, deferred wire deletions approved as argued) and named
+three fixes. All three are in this commit, and the third one was my mistake.
+
+### 1. `tools/fixture-url-audit.js` deleted: a rule gets one check
+
+The tool re-implemented DEVELOPMENT §4 item 30 (no committed url may name a real item) on
+a branch's added lines. On this branch's own diff it reported six findings, every one a
+placeholder url that item 30 itself blesses, plus a hit on the word *cookie* inside
+`apps/desktop/src-tauri/src/cookies.rs`. The guard that ships — and runs inside every
+`cargo test` — reads the same strings and says 0, and it prints what it read:
+
+```
+fixture audit: 114 tracked text files, 73 content-shaped urls, 0 not obviously fake
+```
+
+(Measured today, after the deletion: 114, not the 115 the reviewer read, because the scanner
+was itself one of the tracked text files. That is the whole argument for having one check:
+two implementations of one rule drift, and the drifting one is usually the one someone runs
+by hand at review time, where it can be skipped, argued with, or — as here — simply wrong.)
+
+- TESTING item **47** and DEVELOPMENT invariant **33** now keep only the part that is
+  genuinely extra: *a fake identifier has to stay the shape it stands in for*, pinned by
+  `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for` against
+  `ingest::classify` (the gallery fixture is still a gallery, the CDN fixture still a file
+  link). Both point at item 30 for the rule and neither restates it.
+- TESTING §1 gained the guard as a named gate line, because the review asked for the coverage
+  line to be quotable: `cmd /c "cargo test -p goon-core audit -- --nocapture"`.
+- The four mentions of the deleted tool in this file stay (progress is the record) and each
+  one now says the tool is gone, so nobody runs a dead command. The house-rule paragraph in
+  DEVELOPMENT §7 and the one in TESTING §4 lost the sentence describing it.
+
+### 2. The probe now writes tracked evidence that has to reproduce
+
+Every log this card has cited is unreadable on another machine: `.gitignore` covers `*.log`
+and `tools/*.log`. So the probe renders its recorded states into
+**`docs/probes/filter-ui-probe.md`** (tracked, 312 lines, 13 383 bytes) and every later run
+compares itself against that file, exiting 2 with a printed line diff if the app renders
+anything else. Rewriting it takes `--write-report`, so evidence cannot drift by silence.
+
+What is left out on purpose: absolute paths (scrubbed to `<scratch>`, `<vault>`, `<repo>`),
+ports, pids, timestamps, and the **pixel positions** the layout check measures — its booleans
+(chips above grid, same column, parent is flex/column) are in, the numbers are not, because
+window size and DPI differ between machines and a file that cannot be reproduced on another
+machine cannot be reviewed there. The console log still holds the raw snapshots for the box
+that ran it.
+
+Measured both ways, 2026-11-27:
+
+```
+probe run 1 (--write-report): exit 0  report written: docs/probes/filter-ui-probe.md (312 lines, 13383 bytes)
+probe run 2 (plain):          exit 0  report reproduces docs/probes/filter-ui-probe.md byte for byte (312 lines, 13383 bytes)
+both: VERDICT: all cases OK
+```
+
+### 3. rustfmt: the workspace is edition 2021, and my earlier runs said 2024
+
+`Cargo.toml:12` is `edition = "2021"` and there is no `rustfmt.toml`, so
+`--edition 2024` was never this tree’s style. Measured per file at
+`rustfmt --edition 2021 --config skip_children=true`:
+
+| file | on `origin/main` | on this branch, before | after |
+| --- | --- | --- | --- |
+| `crates/goon-core/src/db.rs` | clean (0 hunks) | 1 hunk at 1073, all of it the S5 `shapes` wire | clean, 6 lines became 1 |
+| `apps/desktop/src-tauri/src/lib.rs` | 1 hunk, its 1100-1103 (`store_source_image`’s `ok_or` chain) | 1 hunk at 2844, all of it the S5 shapes test | clean, 6 lines became 1 |
+
+Main’s hunk is not left dirty by choice and not fixed by me either: this branch already
+carries the 2021-canonical shape at that spot. `git blame` gives `1c5d088` (this card’s S4
+commit) for those lines, and `git merge-base --is-ancestor 1c5d088 origin/main` exits 1, so
+the shape is ours, not main’s. Which means the S4 run at 2024 reformatted a region S4 had
+no business touching. It happens to be the shape 2021 wants, so nothing is dirty today — but
+the habit was wrong, and it is worth saying so rather than reporting a clean check.
+
+Sibling check: the run is one file at a time with `skip_children=true`, and `git status
+--short` after it lists only those two Rust files plus the docs — `cookies.rs`, `http.rs`,
+`ingest.rs`, `video.rs` did not move, and no `git checkout --` rescue was needed.
+
+Carry-over: DEVELOPMENT §7 cites `list_items`'s `#[allow(...)]` as the worked example of a
+deliberate warning. S6 deletes `list_items`, so that sentence has to name a real surviving
+example in the same commit.
+
+### Gates, as measured on this tree (all from the worktree; the frontend ones from
+`apps/desktop`, which is where their `tsconfig.json` is)
+
+- `cargo test --workspace` exit 0: **243 passed / 0 failed / 8 ignored** (130 goon-core,
+  2 locator, 4 vault, 107 desktop with 8 ignored).
+- `cargo test -p goon-core audit -- --nocapture` exit 0: 3 passed, coverage line quoted
+  above.
+- `cargo clean -p goon-core -p goonflow-desktop` (*Removed 3 024 files, 6.1 GiB*) then
+  `cargo clippy --workspace --all-targets` exit 0; the log contains `Checking goon-core`,
+  `Compiling goonflow-desktop`, `Finished`, and **0 lines beginning `warning:`**.
+- `npm run build` exit 0: 136 modules transformed, `dist/assets/index-DDUJL-06.js`
+  168.48 kB, `index-Cf-hgYy_.css` 17.22 kB, built in 1.15 s.
+- `npx svelte-check --tsconfig ./tsconfig.json --output human`: **0 errors, 0 warnings**.
+- `cargo build -p goonflow-desktop` exit 0 (8 m 32 s) so the probe measures this tree. Its
+  log holds one warning and it is the linker’s `LNK4099 … ossl_static.pdb` noise off the
+  static OpenSSL, not a source warning.
+- `node tools/char-audit.js` over the eight files this entry touches (both Rust files, four
+
+Numbering after this commit: DEVELOPMENT invariants run to **36** and TESTING items to
+**49**, no duplicates, nothing renumbered — `main`’s items 30 and 39 were not touched, and
+this stage added no new invariant or item.

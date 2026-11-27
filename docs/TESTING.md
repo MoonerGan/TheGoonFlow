@@ -17,6 +17,7 @@ cmd /c "npx svelte-check --tsconfig ./tsconfig.json --output human"   # must be 
 cmd /c "npm run build"
 node tools\char-audit.js <every file you touched>                     # encoding guard; file arguments are mandatory — with none it reads nothing and prints CLEAN
 node tools\lost-calls.js apps\desktop\src\components\ItemEditor.svelte <rev before> HEAD
+cmd /c "cargo test -p goon-core audit -- --nocapture"        # the privacy guard, with the coverage line it printed
 ```
 
 `cargo fmt --all -- --check` is **not** clean on `main`: `cookies.rs`, `http.rs`,
@@ -117,7 +118,7 @@ single-instance behaviour are the two things unit tests cannot cover.
 | `tools\panic-hold-test.ps1` | holding 3 s escalates to the crypto-erase path |
 | `tools\panic-stale-test.ps1` | a stale erase marker from an old run does not fire (and the watcher really notices a fresh one) |
 | `tools\window-probe.ps1` | enumerates every window a running instance owns, with styles + pixel proof — how the 16×16 hand-off window was shown to paint nothing |
-| `tools\filter-ui-probe.js` | the #76 query box in a live session: it runs the **debug** exe of the tree it lives in (and refuses to start if that exe is older than any file under `apps\desktop\src` or `dist`, because the frontend is baked into the binary), against a throwaway vault it builds at `%TEMP%\goon-filter-probe`, and types real keystrokes into the real box through WebView2 DevTools, then reads the page back: chip row *above* the grid, `… matches` while typing and `N matches` after Enter, an inline parse error that survives as state, the `ext:gif ext:mp4` conflict hint, the *not measured yet* row for an unprobed fact, the predicate shape each tag term got, *Load more* / *Back to start* across a real 300-row page boundary with no page numbers anywhere, and the *Possible dupes* + *Vault* items plan §5 keeps |
+| `tools\filter-ui-probe.js` | the #76 query box in a live session: it runs the **debug** exe of the tree it lives in (and refuses to start if that exe is older than any file under `apps\desktop\src` or `dist`, because the frontend is baked into the binary), against a throwaway vault it builds at `%TEMP%\goon-filter-probe`, and types real keystrokes into the real box through WebView2 DevTools, then reads the page back: chip row *above* the grid, `… matches` while typing and `N matches` after Enter, an inline parse error that survives as state, the `ext:gif ext:mp4` conflict hint, the *not measured yet* row for an unprobed fact, the predicate shape each tag term got, *Load more* / *Back to start* across a real 300-row page boundary with no page numbers anywhere, and the *Possible dupes* + *Vault* items plan §5 keeps. Its recorded states are compared against the tracked `docs\probes\filter-ui-probe.md`, so a rendering change nobody reviewed fails the run rather than becoming the new baseline |
 
 Safety rules for this group:
 
@@ -131,6 +132,10 @@ Safety rules for this group:
   `app_status.vaultRoot` is that folder before it types a single character. If the
   single-instance plugin ever hands the copy to a running app, that second check is
   what stops the probe (invariant 29: a guard that cannot fire is worse than none).
+
+- The probe writes its recorded states to `docs/probes/filter-ui-probe.md`, tracked, and a
+  run that does not reproduce that file fails with a printed diff: a rendering change
+  nobody reviewed turns red instead of quietly becoming the new baseline.
 - Kill leftover instances before rebuilding (`Get-Process GoonFlow | Stop-Process
   -Force`) — a running instance holds `target\release\GoonFlow.exe` open and cargo
   fails with `failed to remove file`.
@@ -886,47 +891,28 @@ the board's *In review* column is the current list.
          `'999999999'` above `'1000000000'`, a number ranks it below), so the test can
          actually fail rather than restate a comment.
 
-    47. **Fixture hygiene: no test data may name a link that could be real** (#76
-       review, 2026-11-27; DEVELOPMENT invariant 33).
-       `node tools\fixture-url-audit.js` walks the added lines of every commit in
-       `origin/main..HEAD`, takes every URL that carries a path or a query, matches it
-       against the site vocabulary this app speaks, and fails when its identifiers are
-       not placeholder-shaped. It prints its coverage
-       (`N commit(s), M added line(s), K site URL(s) checked, J violation(s)`) and
-       exits non-zero, so a bare `CLEAN` cannot be quoted without its extent
-       (invariant 29). The proof that it can fail was run against the history that
-       motivated it: over the pre-rewrite branch it reports
-       `11 commit(s), 10 110 added line(s), 3 site URL(s) checked, 2 violation(s)`
-       with exit 1, naming a six-digit e-hentai gallery link in
-       `apps/desktop/src-tauri/src/lib.rs` (`1ca918f`) and a gelbooru CDN link in
-       `crates/goon-core/src/db.rs` (`d3f59c4`). Over the rewritten branch it prints
-       `0 violation(s)`. The two strings themselves are not written into any doc or
-       tool, because writing them back would re-add them to the history.
-       - The fixtures now read `…/g/9999999/0123456789abcdef/` and
-         `…/images/00/00000000000000000000000000000000.jpg?9999999`. Neither value was
-         ever asserted — the S1 test only cares that the URL ends in `.jpg`, the S4
-         test only that the `sources` row exists — so behaviour is unchanged:
-         `cargo test --workspace` 235 passed / 0 failed / 8 ignored on the rewritten tip
-         (`tools/cargo-test-76-rewrite.log`), clippy 0 findings after
-         `cargo clean -p goon-core -p goonflow-desktop`
-         (`tools/cargo-clippy-76-rewrite.log`).
-       - What the audit cannot do is make a pushed object unrecoverable. The old
-         commits are unreachable from the branch, but the host may still reach them
-         (its own reflog, cached views), so the finding is reported to the board and
-         treated as disclosed, not undone.
-
-       - The placeholder shapes are pinned against the app’s own classifier, because
-         the cheap way to obey this rule badly is to swap in a string that no longer
-         parses: `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
-         (`apps/desktop/src-tauri/src/lib.rs`) asserts `ingest::classify` still reads the
-         gallery fixture as an e-hentai **gallery** carrying gid `9999999`, and the image
-         fixture as **DirectMedia** on the booru CDN with post id `9999999`.
-
-       - Ownership (the user’s ruling, 2026-11-27): a branch fixes the fixture lines
-         **it** added, and asks `origin/main`’s tree whether a string is branch-owned or
-         `main`-inherited; `main`’s pre-existing content URLs are the board’s
-         forward-only cleanup in one commit with **no history rewrite**, and where that
-         commit meets a branch over a fixture string, the branch takes `main`’s version.
+    47. **A fake fixture identifier has to stay the shape it stands in for** (#76
+    review, 2026-11-27). The principle — no committed url may name a real item, and
+    the audit that enforces it on every `cargo test` — is DEVELOPMENT §4 item 30, so
+    this item is only the half of it that shows up on a diff and does not restate the
+    rule.
+    - The cheap way to obey item 30 badly is to swap a fixture for a string that no
+      longer parses: it then looks clean and tests nothing. That is pinned against the
+      app's own classifier,
+      `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
+      (`apps/desktop/src-tauri/src/lib.rs`): `ingest::classify` still reads the gallery
+      fixture as an e-hentai **gallery** carrying gid `9999999`, and the image fixture
+      as **DirectMedia** on the booru CDN with post id `9999999`. The same care covers
+      ids, file names and hashes.
+    - What this replaces: `tools/fixture-url-audit.js`, deleted 2026-11-27, a second
+      implementation of the same rule. It disagreed with the shipping guard on the
+      branch's own diff: six findings, every one a placeholder, plus a hit on the word
+      *cookie*, while `fixture_urls_in_the_repo_are_never_real` reads the same strings
+      and reports 0 (the reviewer's run over the same tip: **115 tracked text files,
+      73 content-shaped urls, 0 not obviously fake**). A branch's added lines end up in
+      the tree that test already reads, so one check loses nothing. The fixture
+      rewrite itself, the ownership ruling and the disclosure finding stay on the
+      record in `docs/plan/76-progress.md` ("Branch rewrite").
 
     48. **A tag term’s predicate shape is chosen from the vault’s counts, and the
        choice is printed** (#76 plan §9 decision 13, closed 2026-11-27; DEVELOPMENT
@@ -981,9 +967,18 @@ the board's *In review* column is the current list.
        300 stub video paths for the paging case). Fixtures are seeded only through real
        commands - `create_vault`, `import_image_files`, `import_video_files`,
        `add_item_tag` - so nothing writes the vault behind the app's back. Measured
-       2026-11-27: **13 cases / 16 recorded states, `VERDICT: all cases OK`**, exit 0,
-       exact strings in `tools\filter-ui-probe.log` (the console codepage mangles the
-       em dashes, so the log is the citation, not the transcript above it):
+       2026-11-27: **13 cases / 16 recorded states, `VERDICT: all cases OK`**, exit 0.
+       The states it recorded are **tracked** as `docs/probes/filter-ui-probe.md`
+       (312 lines: the box text, the count line, the chips, presets, autocomplete rows,
+       the paging controls and hint, the inline error and conflict sentences, the shape
+       note, the tile count and the layout booleans, per case). Paths, ports, pids and pixel
+       positions are left out of it on purpose: a file that cannot be reproduced on another
+       machine cannot be reviewed on another machine. A plain run of the probe **compares**
+       itself against that file and exits 2 with a printed diff if the app renders anything
+       else; rewriting it takes `--write-report`, so evidence cannot drift by silence.
+       Measured both ways on 2026-11-27: the write run exits 0, and the run after it prints
+       "report reproduces docs/probes/filter-ui-probe.md byte for byte (312 lines,
+       13 383 bytes)" and exits 0. `tools\filter-ui-probe.log` still keeps the raw snapshots.
       - *the number on the grid belongs to the query on screen.* Typing `big_breasts`
         without pressing Enter renders `… matches · 3 in the library` over a grid of 2,
         with `showing 2 (press Enter for the total)`; Enter renders
@@ -1057,15 +1052,19 @@ the board's *In review* column is the current list.
   `goonflow-vault/`, `*.db` / `*.db-wal` / `*.db-shm`, `*-journal`, `*.log`, `tools/*.log`
   and `tools/last-build.lock`. Check with `git check-ignore -v <path>` rather than trusting
   this sentence, and never print cookie or passphrase values into logs or issue comments.
-- Fake is a shape, not an intention. A fixture URL or id must be obviously
-  placeholder-shaped (DEVELOPMENT invariant 33); `node tools\fixture-url-audit.js`
-  checks the added lines of a branch range and prints what it read. Ownership is part
-  of the rule: a branch fixes the fixture lines **it** added, and pre-existing content
-  URLs on `main` are the board's forward-only cleanup, not something a feature branch
-  edits under someone else's commits. Whether a leaked string gets a history rewrite is
-  the board's call, not the finder's (the user's ruling, 2026-11-27: an account-tied
-  content URL is not worth rewriting history for); when it is ordered, it is a branch
-  rewrite plus a report, never a follow-up commit that leaves the string behind.
+- Fake is a shape, not an intention. A fixture URL or id has to stay the shape it
+  stands in for (DEVELOPMENT invariant 33), and the check that a committed url does
+  not name a real item is the test named in DEVELOPMENT §4 item 30, which prints its
+  own coverage — there is no second scanner, on purpose: two checks of one rule that
+  disagree is how `tools/fixture-url-audit.js` came to be deleted on 2026-11-27.
+  Ownership is part of the rule: a branch fixes the fixture lines **it** added, and
+  pre-existing content URLs on `main` are the board's forward-only cleanup, not
+  something a feature branch edits under someone else's commits. Whether a leaked
+  string gets a history rewrite is the board's call, not the finder's (the user's
+  ruling, 2026-11-27: an account-tied content URL is not worth rewriting history
+  for); when it is ordered, it is a branch rewrite plus a report, never a follow-up
+  commit that leaves the string behind.
+
 - `gh` needs `C:\Program Files\Git\cmd` on PATH; `npx` only works through
   `cmd /c` (the `.ps1` shim will not load); `cargo` only after `tools\dev-env.ps1`.
 - A finished increment means: tests green → commit → push → comment on the issue

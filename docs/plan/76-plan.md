@@ -409,7 +409,12 @@ facts already true).
    cases, `VERDICT: all cases OK`). The wire deletions §5 lists alongside it — the
    `list_items` / `source_stats` commands, the `listItems` facet arguments and
    `SourceStats` — move to S6, so the games rails die in the same commit that gives
-   `status:` to SQL and no view is left filtering on nothing (see §5).
+   `status:` to SQL and no view is left filtering on nothing (see §5). Reviewing this stage
+   added three fixes, measured in the "S5 review" entry of `76-progress.md`: the second
+   fixture scanner (`tools/fixture-url-audit.js`) is gone and its two doc entries keep only
+   the idea that is extra (DEVELOPMENT §4 item 30 is the rule); the probe's evidence became a
+   tracked, self-comparing file; and rustfmt was run at this workspace’s edition, 2021
+   (`Cargo.toml:12`), not 2024, which reflowed the two Rust files this card had touched.
 6. **S6 — GamesView** swaps likewise (status predicates replace the client filter).
 7. **S7 — facts jobs**: duration-probe + disk-size refresh as one cancellable
    job kind (`jobs.rs`, D15); `+ Video` import writes them going forward.
@@ -448,7 +453,15 @@ New checks this card needs:
    and survives (it is state), and *Possible dupes* + *Vault* still respond.
 
    **Built 2026-11-27**: 13 cases / 16 recorded states, `VERDICT: all cases OK`, exit 0,
-   exact strings in `tools\filter-ui-probe.log`. It also covers what this list forgot to
+   the recorded states live as `docs/probes/filter-ui-probe.md`, tracked, and a plain run
+   compares itself against that file and exits 2 with a printed diff if the app renders
+   anything else; rewriting it takes `--write-report`. `tools\filter-ui-probe.log` keeps the
+   raw snapshots for the machine that ran it. Reproduce measured 2026-11-27: the write run,
+   then a byte-for-byte identical run (312 lines, 13 383 bytes). Paths, ports, pids,
+   timestamps and pixel positions stay out of the tracked file, because a file that cannot be
+   reproduced on another machine cannot be reviewed there.
+
+   It also covers what this list forgot to
    name: the honest count line (an uncounted keystroke paints `… matches`, never a stale
    number), the `ext:gif ext:mp4` conflict hint, the *not measured yet* row with its
    disabled *Measure my files* button, page-2-by-cursor over a 303-item library with no

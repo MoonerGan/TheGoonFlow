@@ -883,30 +883,28 @@ tools/
     format ever changes — ISO dates, milliseconds, anything — the order, the cursor
     and the date predicates change in the **same** commit, together with that test.
 
-33. **A fake fixture identifier has to stay the shape it stands in for, and the guard
-    that enforces it runs on the diff** (the #76 review; the principle is §4 item 30, so
-    this is only the half of it a branch can be held to).
+33. **A fake fixture identifier has to stay the shape it stands in for** (the #76
+   review, 2026-11-27). The principle — no committed url may name a real item, and
+   the test that enforces it, is §4 item 30; this invariant is only the half a
+   reviewer can check on a diff, and it deliberately does not restate that rule.
 
-    * **fake must not mean unparseable.** A placeholder the parser under test no longer
-      recognises turns a fixture into a quiet lie. `…/g/9999999/0123456789abcdef/` is
-      still an e-hentai **gallery** to `ingest::classify`, and
-      `…/images/00/00000000000000000000000000000000.jpg?9999999` is still a **file link**;
-      `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
-      (`src-tauri/src/lib.rs`) asserts both, and the same care covers ids, file names and
-      hashes (`9999999`, 32 zeros — never a value copied from a real clip).
-    * **a change owns its own diff.** `tools/fixture-url-audit.js` audits the **added
-      lines** of a branch range (`--range origin/main..HEAD`), prints how many commits,
-      lines and urls it read, and exits non-zero on a finding. The repo-wide audit in
-      `crates/goon-core/src/audit.rs` (§4 item 30) reads the whole tree, which is the
-      right question for a release and the wrong one for a review. Production host
-      constants and `{id}` templates pass on shape; a flagged line that is legitimate
-      carries a `fixture-url-ok: why` note the tool echoes, so a suppression stays
-      visible.
-    * **ownership.** A branch fixes the fixture lines it added — `main`’s pre-existing
-      content urls are the board’s forward-only cleanup, not something a feature branch
-      edits under someone else’s commits, and whether a string that has already been
-      pushed earns a history rewrite is the board’s call (the operator’s ruling,
-      2026-11-27: it does not, when nothing in it identifies a person).
+   **Fake must not mean unparseable.** A placeholder the parser under test no longer
+   recognises looks clean and stops testing the thing. The gallery fixture is still a
+   gallery to `ingest::classify` and the CDN fixture is still a file link,
+   `the_placeholder_fixture_urls_are_still_the_shapes_they_stand_in_for`
+   (`apps/desktop/src-tauri/src/lib.rs`) asserts both, and the same care covers ids,
+   file names and hashes (never a value copied from a real clip— a fake value is a
+   placeholder-shaped one, `9999999` and 32 zeros, not a real one with the digits
+   shuffled).
+
+   A second implementation of item 30's rule, `tools/fixture-url-audit.js`, was
+   deleted on 2026-11-27 because it duplicated a rule that already had a check, and
+   the two disagreed: on one branch's own strings it reported six findings, every one
+   a placeholder, plus a hit on the word *cookie*, while the guard every `cargo test`
+   already runs reports 0 (its own coverage line, measured on this tree: 114 tracked
+   text files, 73 content-shaped urls, 0 not obviously fake). Two checks of one rule
+   that disagree are worse than one, and the one that stays is the one that
+   runs whether or not anyone remembers to invoke it.
 
 34. **A tag term’s SQL shape is chosen per token from what the vault says it holds, and a
     negated token never gets the shape that drives the plan** (#76 plan §9, decision 13,
@@ -1255,9 +1253,9 @@ Set-Location apps\desktop
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
   `target/`, `node_modules/`, build logs under `tools/*.log`. Shape counts too: a
-  fixture URL or id must be self-evidently fake (invariant 33), and
-  `node tools\fixture-url-audit.js` checks that on the lines a branch adds, printing
-  how many commits and added lines it read.
+  fixture URL or id must stay the shape it stands in for (invariant 33), and the
+  check is the test named in §4 item 30, not a second scanner: added lines end
+  up in the tree that test already reads.
 
 ## 8. Portable release build
 

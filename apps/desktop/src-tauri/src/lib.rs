@@ -2844,11 +2844,7 @@ mod integration_tests {
             items: vec![],
             total: Some(0),
             needs_facts: false,
-            shapes: parsed
-                .shapes
-                .iter()
-                .map(|note| note.to_string())
-                .collect(),
+            shapes: parsed.shapes.iter().map(|note| note.to_string()).collect(),
         };
         let json = serde_json::to_string(&page).unwrap();
         assert_eq!(page.shapes.len(), 2, "{json}");
