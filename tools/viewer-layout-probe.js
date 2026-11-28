@@ -25,8 +25,9 @@ const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
 
-const REPO = 'C:/Source/TheGoonFlow';
-const EXE = path.join(REPO, 'target/release/GoonFlow.exe');
+// The checkout that owns this probe (was a hard-coded C:/Source/TheGoonFlow, which
+const REPO = path.resolve(__dirname, '..');
+const EXE = process.env.GOON_PROBE_EXE || path.join(REPO, 'target/debug/GoonFlow.exe');
 const SCRATCH = path.join(os.tmpdir(), 'goon-viewer-probe');
 const MEDIA = path.join(SCRATCH, 'media');
 const VAULT = path.join(SCRATCH, 'vault');
@@ -148,8 +149,11 @@ const PAGE = {
     }
     if (!unlocked) return { unlocked, lastErr };
     const report = await inv('import_image_files', { paths: ${JSON.stringify(paths)} });
-    const items = await inv('list_items', { limit: 20, kind: 'media' });
-    return { unlocked, report, items: items.map((i) => ({ id: i.id, title: i.title })) };
+    // The grid read, not a private one (stage S6 deleted list_items): an empty
+    // query in the media scope *is* the media view, which is the list of cards the
+    // probe is about to click.
+    const page = await inv('search_items', { view: 'media', limit: 20, withCount: false });
+    return { unlocked, report, items: page.items.map((i) => ({ id: i.id, title: i.title })) };
   })()`,
 
   /** Media tab, open the first card, wait for the frame to be on screen. */

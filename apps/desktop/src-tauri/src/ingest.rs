@@ -446,9 +446,7 @@ pub fn mark_cookie_gate(core: Option<&Core>, site: &str) {
 /// read as if this app were broken.
 fn http_error(status: reqwest::StatusCode) -> String {
     if status.is_server_error() {
-        format!(
-            "http {status} — the site's own server failed this request, try again in a minute"
-        )
+        format!("http {status} — the site's own server failed this request, try again in a minute")
     } else {
         format!("http {status}")
     }
@@ -602,7 +600,9 @@ async fn fetch_meta_with(
                         if media_ext(&path).is_some() {
                             let mut m = direct_media(client, url, Some(&s.site)).await?;
                             m.note = Some(match m.note.take() {
-                                Some(n) => format!("{n}; the {} metadata api refused us ({e})", s.site),
+                                Some(n) => {
+                                    format!("{n}; the {} metadata api refused us ({e})", s.site)
+                                }
                                 None => format!(
                                     "the {} metadata api refused us ({e}) — the picture was taken \
                                      from the link itself, so there are no tags",
@@ -861,7 +861,10 @@ pub fn eh_tile(style: &str) -> Option<EhTile> {
     let w = px("width:")?;
     let h = px("height:")?;
     let u = style.find("url(")? + 4;
-    let sheet: String = style[u..].chars().take_while(|c| *c != ')' && *c != '"').collect();
+    let sheet: String = style[u..]
+        .chars()
+        .take_while(|c| *c != ')' && *c != '"')
+        .collect();
     if !sheet.starts_with("http") {
         return None;
     }
@@ -890,7 +893,10 @@ fn eh_host_at(html: &str, i: usize) -> Option<String> {
     let between = &html[start..i];
     // close by, and no tag or attribute boundary in the way: `…href="https://
     // e-hentai.org/g/` is a real absolute url, an earlier link in the page is not
-    if between.len() > 48 || between.contains('"') || between.contains('\'') || between.contains('<')
+    if between.len() > 48
+        || between.contains('"')
+        || between.contains('\'')
+        || between.contains('<')
     {
         return None;
     }
@@ -996,7 +1002,10 @@ fn eh_slides(html: &str) -> Vec<String> {
     while let Some(i) = html[at..].find("/s/") {
         let i = at + i;
         let start = html[..i].rfind("href=\"").map(|s| s + 6).unwrap_or(i);
-        let end = html[start..].find('"').map(|e| start + e).unwrap_or(html.len());
+        let end = html[start..]
+            .find('"')
+            .map(|e| start + e)
+            .unwrap_or(html.len());
         let href = &html[start..end];
         if href.contains("/s/") && seen.insert(href.to_string()) {
             out.push(href.to_string());
@@ -1077,11 +1086,19 @@ pub fn parse_eh_show(html: &str) -> EhShow {
                 .chars()
                 .take_while(|c| c.is_ascii_digit())
                 .collect();
-            (before.chars().rev().collect::<String>().parse().ok(), after.parse().ok())
+            (
+                before.chars().rev().collect::<String>().parse().ok(),
+                after.parse().ok(),
+            )
         }
         None => (None, None),
     };
-    EhShow { title, image, page, pages }
+    EhShow {
+        title,
+        image,
+        page,
+        pages,
+    }
 }
 
 async fn eh_page_art(
@@ -1171,14 +1188,18 @@ async fn eh_gallery(
                     m.note = Some(format!(
                         "{page} stored from e-hentai's image host as {mime}; the gallery has \
                          {} page(s), listed under Sources where any one of them can be stored",
-                        show.pages.map(|p| p.to_string()).unwrap_or_else(|| pages.clone())
+                        show.pages
+                            .map(|p| p.to_string())
+                            .unwrap_or_else(|| pages.clone())
                     ));
                 }
             }
-            Err(e) => m.note = Some(format!(
-                "the gallery was read, but this page's own art could not be taken ({e}) — \
+            Err(e) => {
+                m.note = Some(format!(
+                    "the gallery was read, but this page's own art could not be taken ({e}) — \
                  the title and tags were stored"
-            )),
+                ))
+            }
         }
         return Ok(m);
     }
@@ -1198,15 +1219,19 @@ async fn eh_gallery(
                         sheet.len()
                     ));
                 }
-                Err(e) => m.note = Some(format!(
-                    "e-hentai's gallery sheet arrived but the cover box could not be cut from \
+                Err(e) => {
+                    m.note = Some(format!(
+                        "e-hentai's gallery sheet arrived but the cover box could not be cut from \
                      it ({e}) — the title and tags were stored"
-                )),
+                    ))
+                }
             },
-            Err(e) => m.note = Some(format!(
-                "the gallery sheet at {} could not be fetched ({e}) — the title was stored",
-                tile.sheet
-            )),
+            Err(e) => {
+                m.note = Some(format!(
+                    "the gallery sheet at {} could not be fetched ({e}) — the title was stored",
+                    tile.sheet
+                ))
+            }
         },
         None => {
             if m.title.is_some() {
@@ -1702,7 +1727,11 @@ pub fn remember_candidates(conn: &rusqlite::Connection, item_id: &str, images: &
 /// cover ceiling, and a Lock or Nuke mid-fetch gives the picture up instead of
 /// writing into a closing vault. This is the deliberate alternative to downloading
 /// a whole thread: the user chose this image, so it is the only one fetched.
-pub async fn store_picture(core: &Core, item_id: String, url: String) -> Result<StorePictureReport, String> {
+pub async fn store_picture(
+    core: &Core,
+    item_id: String,
+    url: String,
+) -> Result<StorePictureReport, String> {
     let url = url.trim().to_string();
     if url.is_empty() {
         return Err("no url".into());
@@ -1778,16 +1807,21 @@ pub async fn store_picture(core: &Core, item_id: String, url: String) -> Result<
                      tile stays missing"
                 ))
             }
-            None => note = Some(format!(
-                "stored as {mime}; this build cannot decode {mime} into a tile, so the grid \
+            None => {
+                note = Some(format!(
+                    "stored as {mime}; this build cannot decode {mime} into a tile, so the grid \
                  tile stays missing"
-            )),
+                ))
+            }
         }
     }
     if !fresh {
         note = note_with(
             note.take(),
-            Some("the vault already had these exact bytes (stored once, deduped by content hash)".into()),
+            Some(
+                "the vault already had these exact bytes (stored once, deduped by content hash)"
+                    .into(),
+            ),
         );
     }
     Ok(StorePictureReport {
@@ -1802,7 +1836,6 @@ pub async fn store_picture(core: &Core, item_id: String, url: String) -> Result<
 }
 
 // ---- direct media & local files ----
-
 
 async fn direct_media(
     client: &reqwest::Client,
@@ -4080,14 +4113,14 @@ mod tests {
             // Which grid it lands in is part of the claim: an f95 **thread** is a
             // game, so it belongs to the Games tab (`kind = 'game'`), not Media.
             // Getting this wrong in a test is how a tile "disappears" in a report.
-            let games = db::list_items(
+            let games = db::page_items(
                 conn,
-                &db::ListQuery {
-                    limit: 300,
-                    kind: Some("game"),
-                    site: Some("f95"),
-                    ..Default::default()
-                },
+                goon_core::query::Scope::Games,
+                &goon_core::query::parse("source:f95", goon_core::query::Scope::Games)
+                    .unwrap()
+                    .plan(),
+                300,
+                None,
             )
             .unwrap();
             let me = games.iter().find(|i| i.id == report.item_id);
@@ -4097,13 +4130,12 @@ mod tests {
                 "grid     = {} game row(s) for site f95, this one has_thumb",
                 games.len()
             );
-            let media_rows = db::list_items(
+            let media_rows = db::page_items(
                 conn,
-                &db::ListQuery {
-                    limit: 300,
-                    kind: Some("media"),
-                    ..Default::default()
-                },
+                goon_core::query::Scope::Media,
+                &goon_core::query::Plan::default(),
+                300,
+                None,
             )
             .unwrap();
             assert!(

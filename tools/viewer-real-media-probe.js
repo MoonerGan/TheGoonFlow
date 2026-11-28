@@ -24,14 +24,15 @@ const net = require('net');
 const os = require('os');
 const path = require('path');
 
-const REPO = 'C:/Source/TheGoonFlow';
-const EXE = path.join(REPO, 'target/release/GoonFlow.exe');
+// The checkout that owns this probe (was a hard-coded C:/Source/TheGoonFlow plus its
+const REPO = path.resolve(__dirname, '..');
+const EXE = process.env.GOON_PROBE_EXE || path.join(REPO, 'target/debug/GoonFlow.exe');
 const SCRATCH = path.join(os.tmpdir(), 'goon-viewer-probe-real');
 const MEDIA = path.join(SCRATCH, 'media');
 const VAULT = path.join(SCRATCH, 'vault');
 const PASSPHRASE = 'real-media-probe-throwaway-not-a-real-one';
 const LOG = path.join(REPO, 'tools/viewer-real-media-probe.log');
-const CASES_FILE = process.env.GON_PROBE_CASES || path.join(REPO, 'tools/viewer-real-media-cases.json');
+const CASES_FILE = process.env.GOON_PROBE_CASES || path.join(REPO, 'tools/viewer-real-media-cases.json');
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0 Safari/537.36';
 
 /**
@@ -125,7 +126,7 @@ const PAGE = {
     const inv = (c, a) => window.__TAURI_INTERNALS__.invoke(c, a || {}, {});
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     const out = [];
-    const ids = async () => new Set((await inv('list_items', { limit: 200 })).map((i) => i.id));
+    const ids = async () => new Set((await inv('search_items', { view: 'media', limit: 200, withCount: false })).items.map((i) => i.id));
     const before = await ids();
     if (${JSON.stringify(cookieValue || '')}) {
       try {
@@ -191,15 +192,15 @@ const PAGE = {
       if (!busy.length) break;
       await sleep(1000);
     }
-    const items = await inv('list_items', { limit: 200, kind: 'media' });
-    return { out, items: items.map((i) => ({ id: i.id, title: i.title, kind: i.kind })) };
+    const page = await inv('search_items', { view: 'media', limit: 200, withCount: false });
+    return { out, items: page.items.map((i) => ({ id: i.id, title: i.title, kind: i.kind })) };
   })()`,
 
   /** just what the (already filled) scratch vault holds */
-  listItems: `(async () => {
+  mediaPage: `(async () => {
     const inv = (c, a) => window.__TAURI_INTERNALS__.invoke(c, a || {}, {});
-    const items = await inv('list_items', { limit: 200, kind: 'media' });
-    return { out: ['(reusing the vault from an earlier run)'], items: items.map((i) => ({ id: i.id, title: i.title, kind: i.kind })) };
+    const page = await inv('search_items', { view: 'media', limit: 200, withCount: false });
+    return { out: ['(reusing the vault from an earlier run)'], items: page.items.map((i) => ({ id: i.id, title: i.title, kind: i.kind })) };
   })()`,
 
   /** open the nth media card, wait for something to be on the stage */
@@ -400,7 +401,7 @@ async function main() {
     const setup = await ev(PAGE.setup(VAULT, PASSPHRASE));
     if (!setup.unlocked) throw new Error(`the scratch vault would not open: ${setup.lastErr}`);
 
-    const ing = reuse ? await ev(PAGE.listItems) : await ev(PAGE.ingest(plan, 'ehentai', ehCookie));
+    const ing = reuse ? await ev(PAGE.mediaPage) : await ev(PAGE.ingest(plan, 'ehentai', ehCookie));
     for (const line of ing.out) console.log(line);
     console.log(`items: ${JSON.stringify(ing.items)}`);
 

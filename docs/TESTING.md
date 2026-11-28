@@ -118,7 +118,7 @@ single-instance behaviour are the two things unit tests cannot cover.
 | `tools\panic-hold-test.ps1` | holding 3 s escalates to the crypto-erase path |
 | `tools\panic-stale-test.ps1` | a stale erase marker from an old run does not fire (and the watcher really notices a fresh one) |
 | `tools\window-probe.ps1` | enumerates every window a running instance owns, with styles + pixel proof — how the 16×16 hand-off window was shown to paint nothing |
-| `tools\filter-ui-probe.js` | the #76 query box in a live session: it runs the **debug** exe of the tree it lives in (and refuses to start if that exe is older than any file under `apps\desktop\src` or `dist`, because the frontend is baked into the binary), against a throwaway vault it builds at `%TEMP%\goon-filter-probe`, and types real keystrokes into the real box through WebView2 DevTools, then reads the page back: chip row *above* the grid, `… matches` while typing and `N matches` after Enter, an inline parse error that survives as state, the `ext:gif ext:mp4` conflict hint, the *not measured yet* row for an unprobed fact, the predicate shape each tag term got, *Load more* / *Back to start* across a real 300-row page boundary with no page numbers anywhere, and the *Possible dupes* + *Vault* items plan §5 keeps. Its recorded states are compared against the tracked `docs\probes\filter-ui-probe.md`, so a rendering change nobody reviewed fails the run rather than becoming the new baseline |
+| `tools\filter-ui-probe.js` | the #76 query box in a live session: it runs the **debug** exe of the tree it lives in (and refuses to start if that exe is older than any file under `apps\desktop\src` or `dist`, because the frontend is baked into the binary), against a throwaway vault it builds at `%TEMP%\goon-filter-probe`, and types real keystrokes into the real box through WebView2 DevTools, then reads the page back: chip row *above* the grid, `… matches` while typing and `N matches` after Enter, an inline parse error that survives as state, the `ext:gif ext:mp4` conflict hint, the *not measured yet* row for an unprobed fact, the predicate shape each tag term got, *Load more* / *Back to start* across a real 300-row page boundary with no page numbers anywhere, and the *Possible dupes* + *Vault* items plan §5 keeps. From stage S6 it drives the **games** grid in the same session and vault - three game folders through `import_game_folder`, moved onto three pipeline stages by `update_item` - and reads back `status:` selecting a stage, the five stages as candidate rows each wearing the count of the query already typed (`0` for an empty stage), the games presets writing `-has:tags`, chip clicks editing the box, and a sidebar that is only *Library* / *Keep current* / *Vault*, so a rail that came back would be caught (item 50). Its recorded states are compared against the tracked `docs\probes\filter-ui-probe.md`, so a rendering change nobody reviewed fails the run rather than becoming the new baseline |
 
 Safety rules for this group:
 
@@ -968,17 +968,20 @@ the board's *In review* column is the current list.
        commands - `create_vault`, `import_image_files`, `import_video_files`,
        `add_item_tag` - so nothing writes the vault behind the app's back. Measured
        2026-11-27: **13 cases / 16 recorded states, `VERDICT: all cases OK`**, exit 0.
+       Stage S6 added the games grid to the same run (item 50), so the current measurement
+       is **26 recorded states (16 media, 10 games), `VERDICT: all cases OK`**, exit 0.
        The states it recorded are **tracked** as `docs/probes/filter-ui-probe.md`
-       (312 lines: the box text, the count line, the chips, presets, autocomplete rows,
+       (512 lines: the box text, the count line, the chips, presets, autocomplete rows,
        the paging controls and hint, the inline error and conflict sentences, the shape
        note, the tile count and the layout booleans, per case). Paths, ports, pids and pixel
        positions are left out of it on purpose: a file that cannot be reproduced on another
        machine cannot be reviewed on another machine. A plain run of the probe **compares**
        itself against that file and exits 2 with a printed diff if the app renders anything
        else; rewriting it takes `--write-report`, so evidence cannot drift by silence.
-       Measured both ways on 2026-11-27: the write run exits 0, and the run after it prints
-       "report reproduces docs/probes/filter-ui-probe.md byte for byte (312 lines,
-       13 383 bytes)" and exits 0. `tools\filter-ui-probe.log` still keeps the raw snapshots.
+       Measured both ways on 2026-11-27, after the S6 games cases went in: the write run
+       exits 0, and the run after it prints
+       "report reproduces docs/probes/filter-ui-probe.md byte for byte (512 lines,
+       21 041 bytes)" and exits 0. `tools\filter-ui-probe.log` still keeps the raw snapshots.
       - *the number on the grid belongs to the query on screen.* Typing `big_breasts`
         without pressing Enter renders `… matches · 3 in the library` over a grid of 2,
         with `showing 2 (press Enter for the total)`; Enter renders
@@ -1019,10 +1022,12 @@ the board's *In review* column is the current list.
         `big_breasts: 2 of 3 items -> row probe` and `-anal: 1 of 3 items -> row
         probe`: decision 13's fourth condition, carried on `SearchPage.shapes` and
         pinned at the wire by `the_page_carries_each_tag_terms_chosen_shape_printed`.
-      - *invariant 24 measured rather than assumed.* In all eleven grid states the chip
-        row's bottom edge (264-374 px) is above the grid's top edge (288-398 px), its
-        parent computes to `flex/column`, and no control is labelled like a page
-        number - a keyset-paged grid has *Load more* and *Back to start* (invariant 31).
+      - *invariant 24 measured rather than assumed.* In all seventeen grid states that
+        carry a chip row - the media cases and the games cases of item 50 - the chip row's
+        bottom edge is above the grid's top edge, its parent computes to `flex/column`,
+        and no control is labelled like a page number - a keyset-paged grid has *Load
+        more* and *Back to start* (invariant 31). The pixel numbers themselves are in the
+        console and the raw log, not in the tracked report: they are machine-specific.
       - *what S5 promised to keep.* The sidebar's sections are *Everything*, *Possible
         dupes* and *Vault*; *Possible dupes* still opens ("No duplicates found." on the
         throwaway vault) and the Vault section names the throwaway path.
@@ -1036,6 +1041,61 @@ the board's *In review* column is the current list.
         `local` source, the image importer stores bytes and records **no** source at
         all. That is why `source:local` answers 300 while `-source:local` answers 3,
         and it is a fact about the importers that no rail ever showed.
+
+    50. **The games grid, typed into for real** (#76 stage S6, invariant 37). The unit
+       pins that the games grammar answers what the deleted rails answered compare
+       against a *frozen copy* of that SQL - `db::legacy_grid_rows` and `db::legacy_ids`,
+       both `#[cfg(test)]` - which can say what a predicate selects but not what a view
+       renders. So the same probe drives the Games tab too, in the same session and
+       the same throwaway vault: three folders written into `%TEMP%\goon-filter-probe\games`
+       in the RenPy shape the round-trip test uses (a `game/` with a script, a `renpy/`
+       beside it), put through the app's own `import_game_folder`, then moved by
+       `update_item` onto three different pipeline stages - Alpha `wishlist`, Beta
+       `played`, Gamma left where the importer files games, `downloaded` - with a tag the
+       probe adds on two of them and the third stripped to no tags at all. Measured
+       2026-11-27: **10 more recorded states, `VERDICT: all cases OK`**, exit 0.
+      - *the empty box is the whole view*: 3 tiles, `3 matches · 3 in the library`,
+        `showing 3 of 3`, one exhausted-result control ("That is all of it", disabled) and
+        nothing labelled like a page number; the sidebar is exactly the three sections
+        *Library*, *Keep current*, *Vault*, so the deleted rails are absent rather than
+        merely unused, and *Possible dupes* still opens with the Vault section naming the
+        throwaway path.
+      - *`status:` is a term like any other*: `status:wishlist` selects the one game on
+        that stage, the count line reads `1 match · 3 in the library`, and the term shows
+        as a chip with the rest. `status:tracking`, a stage nothing is on, reads
+        `0 matches` with the plain "Nothing matches" state and **no** *not measured yet*
+        row: a stage is a column, not an unprobed fact.
+      - *the pipeline is candidate rows, wearing their own counts*: typing `status:`
+        offers `status:seen 0`, `status:tracking 0`, `status:wishlist 1`,
+        `status:downloaded 1`, `status:played 1` - the five stages, the empty ones still
+        offered as 0, each counted over the query already typed. The box holding the bare
+        keyword is simultaneously a parse error (the parser names the five) and a request
+        for those rows, which is what invariant 37 means in practice: there is no stage
+        badge on the grid to be right or wrong.
+      - *the games presets write grammar*: *no tags* puts `-has:tags` in the box, shows
+        itself active, and the grid is the one game with no tags.
+      - *composition and chip removal both go through the text*: `status:played probe-tag`
+        answers `1 match` over one tile; clicking the `status:played` chip off leaves
+        `probe-tag` in the box, the uncommitted query renders `… matches` with
+        "showing 2 (press Enter for the total)" - a query change drops the total, it is no
+        longer this query's to keep (invariant 36) - and Enter gives
+        `2 matches · 3 in the library` over 2 tiles.
+      - *the fixtures were corrected by the measurement, not the app*: the game importer
+        writes the engine as a tag of its own, so every imported game already carries
+        `renpy`. The first version of these cases assumed an untagged import and failed on
+        exactly that - `-has:tags` answered 0 and the tag term answered 3, not 2 - which is
+        the kind of thing only a live run says.
+      - *the two viewer probes could no longer run, and were aimed at another tree*: both
+        enumerated their fixtures through `list_items`, which this stage deletes (the layout probe
+        printed `Command list_items not found`), and both named `C:/Source/TheGoonFlow` and its
+        **release** exe, so what they measured had no particular relation to the tree under
+        review. They now resolve the checkout that owns the script and run that tree's **debug**
+        exe, with `GOON_PROBE_EXE` / `GOON_PROBE_CASES` as overrides, and
+        `tools\webview-layout-test.ps1` runs the probe sitting beside it. Measured on this tree:
+        layout probe 3 cases, `VERDICT: all cases OK`, exit 0; real-material probe
+        **0 of 20 cases broken**, exit 0, with its two login-wall cases skipped because the cookie
+        env vars are unset here. Those links live in the gitignored
+        `tools\viewer-real-media-cases.json`, which is not in this repository and never should be.
 
 ## 4. House rules that prevent whole classes of damage
 

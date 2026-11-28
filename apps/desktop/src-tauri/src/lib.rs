@@ -867,16 +867,12 @@ fn reset_pointer(state: tauri::State<'_, AppState>, app: tauri::AppHandle) {
 }
 
 // ---------- data (post-unlock) ----------
-
-#[tauri::command]
-fn vault_stats(
-    state: tauri::State<'_, AppState>,
-    kind: Option<String>,
-) -> Result<Vec<goon_core::db::StatusCount>, String> {
-    let inner = state.inner.lock().unwrap();
-    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::counts_by_status(&opened.conn, kind.as_deref()).map_err(err)
-}
+// There is deliberately no stage-count command here. plan §5 puts a per-facet count
+// inside an autocomplete row and nowhere else, and that is where the old sidebar's five
+// pipeline numbers went: `db::suggest` answers `status:` with the five stages counted
+// over the query minus the token being typed (`db::status_counts_matching`), so the
+// number a row wears is the number of rows that term selects. A second wire carrying
+// the same five numbers would be a facet badge under another name.
 
 #[tauri::command]
 fn kind_stats(state: tauri::State<'_, AppState>) -> Result<Vec<(&'static str, i64)>, String> {
@@ -885,54 +881,15 @@ fn kind_stats(state: tauri::State<'_, AppState>) -> Result<Vec<(&'static str, i6
     goon_core::db::counts_by_kind(&opened.conn).map_err(err)
 }
 
-/// **Legacy, and stage S6 deletes it** (#76). This is the games grid's read path with
-/// the old facet arguments; the media grid left it in stage S5, and the games rails, the
-/// client-side `filtered` hack, the `tag`/`site`/`source` arguments and `source_stats`
-/// all go in the **same** S6 commit that puts `searchItems("games")` and `status:` in
-/// their place. Deleting the arguments here instead would leave the games rails inert —
-/// a rail that stops filtering is the silent breakage DESIGN forbids — so the wire stays
-/// whole for one more stage and nothing on the media view can reach it.
+/// One grammar box, one predicate, two views (#76): the wire parses the box, plans it
+/// against this vault, and runs the plan.
 ///
-/// The flat argument list is the wire contract: `api.ts listItems` sends these
-/// keys and Tauri matches them by name. Nesting them into one struct argument
-/// would be the cleaner Rust shape but would change every grid call's payload for
-/// no gain the frontend can see, so #51 resolves this one by keeping the shape
-/// and reshaping the *core* call (`db::ListQuery`) instead.
-#[allow(clippy::too_many_arguments)]
-#[tauri::command]
-fn list_items(
-    state: tauri::State<'_, AppState>,
-    limit: Option<i64>,
-    offset: Option<i64>,
-    search: Option<String>,
-    kind: Option<String>,
-    tag: Option<String>,
-    site: Option<String>,
-    source: Option<String>,
-) -> Result<Vec<goon_core::db::ItemSummary>, String> {
-    let inner = state.inner.lock().unwrap();
-    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    let q = goon_core::db::ListQuery {
-        limit: limit.unwrap_or(200),
-        offset: offset.unwrap_or(0),
-        search: search.as_deref(),
-        kind: kind.as_deref(),
-        tag: tag.as_deref(),
-        site: site.as_deref(),
-        source: source.as_deref(),
-    };
-    goon_core::db::list_items(&opened.conn, &q).map_err(err)
-}
-
-/// #76 stage S5: the media view came off this command. Its four facet rails and the three
-/// #40 queues became grammar (`source:…`, a bare tag, `stored:local-only`,
-/// `-stored:disk`, `-has:tags`), pinned word-for-word against the badge SQL by
-/// `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`, so the
-/// preset chips and the old badges are one predicate counted two ways rather than two
-/// predicates that happen to agree today. The *core* functions (`db::list_items`,
-/// `db::source_stats`) stay in the crate for the same reason: importers call the first and
-/// that pin reads the second, which is how the equivalence stays checkable after the last
-/// caller goes away in stage S6.
+/// #76 stage S6: the games view came off `list_items` too, and the command, the core
+/// function, `source_stats`, `counts_by_status` and the facet arguments are gone with it.
+/// The three #40 queues and the five pipeline stages are grammar now — `stored:local-only`,
+/// `-stored:disk`, `-has:tags`, `status:…` — pinned against the rails’ own SQL kept
+/// frozen in `db::legacy_grid_rows`, so a preset chip cannot quietly widen what it selects
+/// and the number beside it is the number of rows it selects.
 ///
 /// Parse the box once, for the three query commands. A `ParseError` becomes its
 /// one-sentence message as a command error: Tauri delivers that as the rejected
@@ -1045,23 +1002,6 @@ fn filter_suggest(
     let inner = state.inner.lock().unwrap();
     let opened = inner.opened.as_ref().ok_or("vault is locked")?;
     goon_core::db::suggest(&opened.conn, scope, &ctx, limit.unwrap_or(12)).map_err(err)
-}
-
-/// **Legacy, and stage S6 deletes it** (#76). The media view's #40 badges left in stage
-/// S5: those three queues are grammar now — `stored:local-only`, `-stored:disk`,
-/// `-has:tags` — pinned word-for-word against this command's own SQL by
-/// `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`. GamesView
-/// still renders them, so the command stays one more stage and dies in the same S6 commit
-/// that replaces the games rails with `searchItems("games")` + `status:`; taking it away
-/// on its own would leave those queue buttons inert.
-#[tauri::command]
-fn source_stats(
-    state: tauri::State<'_, AppState>,
-    kind: Option<String>,
-) -> Result<goon_core::db::SourceStats, String> {
-    let inner = state.inner.lock().unwrap();
-    let opened = inner.opened.as_ref().ok_or("vault is locked")?;
-    goon_core::db::source_stats(&opened.conn, kind.as_deref()).map_err(err)
 }
 
 #[tauri::command]
@@ -2485,14 +2425,11 @@ pub fn run() {
             lock,
             nuke_vault,
             reset_pointer,
-            vault_stats,
             kind_stats,
             site_stats,
-            list_items,
             search_items,
             search_item_ids,
             filter_suggest,
-            source_stats,
             get_thumbs,
             media_for_item,
             media_frame_bytes,
@@ -2638,8 +2575,9 @@ mod integration_tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
-    /// Regression for the M0 field report: nested game folders + the
-    /// list_items binding bug made imports look like they stored nothing.
+    /// Regression for the M0 field report: nested game folders and the placeholder
+    /// binding bug in the old `list_items` made imports look like they stored nothing.
+    /// The grid reads through the query engine now, so the round trip is measured there.
     #[test]
     fn import_then_list_roundtrip_on_real_vault() {
         let tmp = std::env::temp_dir().join(format!("goonflow-it-{}", std::process::id()));
@@ -2687,27 +2625,37 @@ mod integration_tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let items = goon_core::db::list_items(
+        // An empty query in the games scope is the whole games view: the page and the
+        // number beside it come from one predicate.
+        let empty = goon_core::query::Plan::default();
+        let page = goon_core::db::search_items(
             conn,
-            &goon_core::db::ListQuery {
-                limit: 300,
-                ..Default::default()
-            },
+            goon_core::query::Scope::Games,
+            &empty,
+            300,
+            None,
+            true,
         )
         .unwrap();
-        assert_eq!(items.len(), 1, "imported but list showed nothing");
-        assert_eq!(items[0].title, "Game X");
-        assert_eq!(items[0].version.as_deref(), Some("2.0"));
-        let games_only = goon_core::db::list_items(
-            conn,
-            &goon_core::db::ListQuery {
-                limit: 300,
-                kind: Some("game"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(games_only.len(), 1);
+        assert_eq!(page.items.len(), 1, "imported but the grid showed nothing");
+        assert_eq!(page.items[0].title, "Game X");
+        assert_eq!(page.items[0].version.as_deref(), Some("2.0"));
+        assert_eq!(
+            page.total,
+            Some(1),
+            "the paired total counts the same predicate"
+        );
+        assert_eq!(
+            goon_core::db::search_item_ids(conn, goon_core::query::Scope::Games, &empty).unwrap(),
+            [page.items[0].id.clone()],
+            "select-all sees the row the page shows"
+        );
+        assert!(
+            goon_core::db::search_item_ids(conn, goon_core::query::Scope::Media, &empty)
+                .unwrap()
+                .is_empty(),
+            "and the other view still cannot see it: D14 is enforced in the SQL"
+        );
         drop(inner);
 
         let _ = std::fs::remove_dir_all(&tmp);

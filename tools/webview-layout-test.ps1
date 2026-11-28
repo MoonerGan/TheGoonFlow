@@ -7,6 +7,11 @@
 # box the browser gives the picture, nor what the app's own readout claims about
 # it. This does: a throwaway vault in %TEMP%, three generated pictures of exact
 # pixel size, real clicks on the real buttons, and the numbers the engine drew.
+#
+# It runs the copy of the probe that sits beside it, not a path baked into the file:
+# a wrapper that always measures C:\Source\TheGoonFlow measures whatever was released
+# from there last, which is not the checkout whose view is under review (#76 stage S6
+# is where the probe itself started resolving its own tree).
 $ErrorActionPreference = 'Continue'
-& "$env:ProgramFiles\nodejs\node.exe" 'C:\Source\TheGoonFlow\tools\viewer-layout-probe.js' @args
+& "$env:ProgramFiles\nodejs\node.exe" "$PSScriptRoot\viewer-layout-probe.js" @args
 exit $LASTEXITCODE

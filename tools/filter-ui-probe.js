@@ -128,6 +128,29 @@ const FIXTURES = [
   { dir: 'untagged-tile', file: 'page-1.png', w: 500, h: 400 },
 ];
 
+/** Three game folders for the games grid (stage S6). The shape is the one the
+ *  round-trip test uses — a RenPy layout: a `game/` folder holding a script with
+ *  a `renpy/` folder beside it — so `import_game_folder` recognises them instead
+ *  of skipping them, and the title comes out of the folder name with the version
+ *  bracket stripped. Stages and tags are then set through the app: the importer files
+ *  every game as `downloaded`, and what the cases are about is that the five stages
+ *  are terms in the box.
+ */
+const GAME_FIXTURES = [
+  { dir: 'Alpha Game [v1.0]', title: 'Alpha Game' },
+  { dir: 'Beta Game [v0.2]', title: 'Beta Game' },
+  { dir: 'Gamma Game', title: 'Gamma Game' },
+];
+function writeGameFolders(root) {
+  for (const g of GAME_FIXTURES) {
+    const dir = path.join(root, g.dir);
+    fs.mkdirSync(path.join(dir, 'game'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'renpy'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'game', 'script.rpy'), '// probe fixture, not a real game');
+  }
+  return GAME_FIXTURES.length;
+}
+
 // ---------- page side ----------
 /** One snapshot of the query box and everything it is supposed to have rendered. The
  *  selectors are the view's own classes; if one of them is missing the probe says so
@@ -248,6 +271,83 @@ const PAGE = {
     return { tiles: document.querySelectorAll('button.tile').length };
   })()`,
 
+  /** The games fixtures, put through the app's own game importer and then moved off
+   *  the stage the importer files everything at: Alpha to `wishlist`, Beta to `played`,
+   *  Gamma left `downloaded`; Alpha and Beta carry a tag the probe added, and Gamma is
+   *  stripped to no tags at all, so `-has:tags` has exactly one answer. Read back through
+   *  `search_items` in the games scope
+   *  predicate the grid and its count line run, not a private count. */
+  games: (dir) => `(async () => {
+    const inv = (c, a) => window.__TAURI_INTERNALS__.invoke(c, a || {}, {});
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const report = await inv('import_game_folder', { dir: ${JSON.stringify(dir)} });
+    let page = { items: [], total: null };
+    for (let i = 0; i < 40; i += 1) {
+      page = await inv('search_items', { view: 'games', limit: 50, withCount: true });
+      if (page.items.length >= 3) break;
+      await sleep(400);
+    }
+    const byTitle = {};
+    for (const it of page.items) byTitle[it.title] = it;
+    const stages = {};
+    // There is no stage-only command: a stage moves the way the editor moves it, through
+    // update_item, so the probe hands the row's own title and version back with it. The
+    // summary carries no circle or notes and these fixtures have neither, so passing null
+    // for them moves nothing but the stage.
+    const move = async (title, status) => {
+      const it = byTitle[title];
+      if (!it) return;
+      await inv('update_item', {
+        id: it.id,
+        title: it.title,
+        circle: null,
+        status,
+        version: it.version ?? null,
+        notes: null,
+      });
+      stages[title] = status;
+    };
+    await move('Alpha Game', 'wishlist');
+    await move('Beta Game', 'played');
+    // The game importer writes the engine as a tag of its own, so all three of these
+    // already carried 'renpy' before the probe touched them (measured: 'renpy' answered 3
+    // and '-has:tags' answered 0). The probe's tag is therefore its own word, and Gamma
+    // is stripped to no tags at all, which is what the 'no tags' queue has to find.
+    for (const t of ['Alpha Game', 'Beta Game']) if (byTitle[t]) await inv('add_item_tag', { id: byTitle[t].id, name: 'probe-tag', kind: 'content' });
+    const bare = byTitle['Gamma Game'];
+    if (bare) {
+      const detail = await inv('get_item', { id: bare.id });
+      for (const t of (detail && detail.tags) || []) await inv('remove_item_tag', { id: bare.id, tagId: t.id });
+    }
+    const wishlist = await inv('search_items', { view: 'games', query: 'status:wishlist', limit: 50, withCount: true });
+    return {
+      ok: Object.keys(byTitle).length === 3,
+      report,
+      titles: Object.keys(byTitle).sort(),
+      stages,
+      wishlistTotal: wishlist.total,
+      libraryTotal: page.total,
+    };
+  })()`,
+
+  /** Games tab. The two views are swapped with `{#if}`, so exactly one `.query-box` is
+   *  ever in the document — which is also what makes the two grids comparable. */
+  openGames: `(async () => {
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    const text = (el) => (el && el.textContent ? el.textContent.trim() : '');
+    let tab = null;
+    for (let i = 0; i < 40 && !tab; i += 1) {
+      tab = [...document.querySelectorAll('.tabs button')].find((b) => /^games/i.test(text(b)));
+      if (!tab) await sleep(400);
+    }
+    if (!tab) return { err: 'still no games tab; buttons=' + [...document.querySelectorAll('button')].map(text).slice(0, 10).join('|') };
+    if (!/active/.test(tab.className)) { tab.click(); await sleep(800); }
+    for (let i = 0; i < 40 && !document.querySelector('.query-box'); i += 1) await sleep(300);
+    if (!document.querySelector('.query-box')) return { err: 'no query box on the games view' };
+    for (let i = 0; i < 40 && !document.querySelector('button.tile'); i += 1) await sleep(300);
+    return { tiles: document.querySelectorAll('button.tile').length };
+  })()`,
+
   /** Type into the real box the way a user does: set the value, dispatch `input`. The
    *  view's own debounce runs; nothing here calls the backend directly. */
   type: (value) => `(async () => {
@@ -350,7 +450,7 @@ function renderReport(seen) {
   const q = (v) => (v === null || v === undefined || v === '' ? 'none' : '`' + scrub(String(v)) + '`');
   const list = (xs) => (xs.length ? xs.map((x) => '`' + scrub(x) + '`').join(', ') : 'none');
   const out = [
-    '# The media query box, measured in a live session',
+    '# The query box on both grids, measured in a live session',
     '',
     'Generated by `tools/filter-ui-probe.js`; regenerate with',
     '`node tools/filter-ui-probe.js --write-report` (a plain run **compares** this file and',
@@ -364,6 +464,11 @@ function renderReport(seen) {
     'is 303 rows and the view\'s 300-row page has a second page behind it. The exe is the',
     'tree\'s own debug build; `app_status.vaultRoot` is re-checked against the throwaway path',
     'before any query is typed.',
+    '',
+    'The games cases at the end run against the same vault: three game folders put through',
+    'the app\'s own game importer, moved by hand onto three different pipeline stages (Alpha',
+    '`wishlist`, Beta `played`, Gamma left where the importer files games, `downloaded`),',
+    'two of them tagged `renpy`.',
     '',
     'Not in here, on purpose: absolute paths, ports, pids, timestamps and pixel positions.',
     'Those are in the console output; they cannot be compared across machines.',
@@ -474,6 +579,12 @@ async function main() {
     BULK.push(file);
   }
   console.log(`paging fixtures: 300 stub video files in ${bulkDir}`);
+  // Three game folders for the games cases at the end of the run. Cheap: one text
+  // file each, and the game importer reads no bytes.
+  const GAMES_DIR = path.join(SCRATCH, 'games');
+  fs.mkdirSync(GAMES_DIR, { recursive: true });
+  writeGameFolders(GAMES_DIR);
+  console.log(`games fixtures: ${GAME_FIXTURES.length} game folders in ${GAMES_DIR}`);
 
   const port = await freePort();
   try {
@@ -750,6 +861,118 @@ async function main() {
     // 13. *Possible dupes* still opens, and the Vault section still names this vault
     s = await shot('open possible dupes', PAGE.clickWhere('.sidebar .nav-item', 'Possible dupes'));
     failures += record('the dupes panel', s, [
+      ...(!/possible duplicates/i.test(s.panelTitle || '') ? [`the panel title is ${JSON.stringify(s.panelTitle)}`] : []),
+      ...(!/no duplicates found/i.test(s.empty || '') ? [`the pairs panel says ${JSON.stringify(s.empty)}`] : []),
+      ...(!s.vaultLine || !s.vaultLine.includes(VAULT) ? [`the Vault section does not name the throwaway vault: ${JSON.stringify(s.vaultLine)}`] : []),
+    ]);
+
+    // 14. the games grid (stage S6). Same session, same throwaway vault: three game
+    //     folders through the app's own game importer, moved onto three different
+    //     pipeline stages, two of them tagged. The sidebar rails are gone from this view
+    //     as well, so `status:` has to answer the pipeline question, the count line has
+    //     to match the tiles under it, and the two #40 queues that were badges have to be
+    //     terms. This is the live half of plan §7's S6 line: the unit pins cannot see
+    //     that the view renders the number it was handed.
+    const games = await ev(PAGE.games(GAMES_DIR));
+    if (!games.ok) throw new Error(`the games fixtures would not import: ${JSON.stringify(games)}`);
+    console.log(
+      `games fixtures: ${games.report.imported} folders (${games.titles.join(
+)}), ` +
+        `stages ${JSON.stringify(games.stages)}, status:wishlist answers ${games.wishlistTotal}`,
+    );
+    s = await shot('open the games tab', PAGE.openGames);
+    failures += record('the games grid opens on the whole library', s, [
+      ...(s.tiles.length !== 3 ? [`the games grid shows ${s.tiles.length} tiles, expected the 3 imported folders`] : []),
+      ...(!/\b3 matches\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}, expected 3 matches`] : []),
+      ...(!/3 in the library/.test(s.count || '') ? [`the total half of the count line reads ${JSON.stringify(s.count)}, expected 3 in the library`] : []),
+      ...(s.chipTerms.length ? [`chips ${JSON.stringify(s.chipTerms)} over an empty query`] : []),
+      ...(!s.presets.some((p) => p.label === 'no tags') ? ['the queue presets are missing from the games view'] : []),
+      ...(!s.paging.some((b) => b.label === 'That is all of it' && b.disabled) ? [`no exhausted-result control on a cursor-paged grid: ${JSON.stringify(s.paging)}`] : []),
+      ...(s.paging.some((b) => /page \d|next|prev/i.test(b.label)) ? ['a page-number control on a keyset-paged grid'] : []),
+      ...(!/showing 3 of 3/.test(s.pagingHint || '') ? [`the loaded count reads ${JSON.stringify(s.pagingHint)}, expected showing 3 of 3`] : []),
+      ...(s.sidebar.join('|') !== 'Library|Keep current|Vault'
+        ? [`the games sidebar is not the three sections it should be: ${JSON.stringify(s.sidebar)}`]
+        : []),
+    ]);
+
+    // 15. `status:` is a term like any other: it selects rows, the count beside it is
+    //     the number of rows it selects, and it shows up as a chip like any other.
+    s = await shot('type the stage term', PAGE.type('status:wishlist'));
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('status: selects the stage and the count follows it', s, [
+      ...(s.boxValue !== 'status:wishlist' ? [`the box holds ${JSON.stringify(s.boxValue)}`] : []),
+      ...(s.tiles.length !== 1 ? [`the grid shows ${s.tiles.length} tiles for status:wishlist, expected the one game on that stage`] : []),
+      ...(!/\b1 match\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}, expected 1 match`] : []),
+      ...(s.chipTerms.join(' ') !== 'status:wishlist' ? [`chips are ${JSON.stringify(s.chipTerms)}`] : []),
+      ...(s.factsRow ? ['a stage term claimed "not measured yet"'] : []),
+    ]);
+
+    // 16. a stage the vault holds nothing on: an honest zero, and an empty state that
+    //     says nothing matches instead of borrowing the unmeasured-facts wording.
+    s = await shot('type a stage nobody is on', PAGE.type('status:tracking'));
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('a stage with nothing on it', s, [
+      ...(!/\b0 matches\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}`] : []),
+      ...(!/Nothing matches/.test(s.empty || '') ? [`the empty state says ${JSON.stringify(s.empty)}`] : []),
+      ...(s.factsRow ? ['an unmeasured-facts row for a term that only needs a column'] : []),
+    ]);
+
+    // 17. the five stages as autocomplete rows, each wearing the count that term
+    //     answers on top of the query already typed (plan §5). An empty stage is still
+    //     offered, as 0: a stage holding nothing is a zero, not a missing word.
+    s = await shot('type the keyword alone', PAGE.type('status:'));
+    failures += record('the five stages, with their counts', s, [
+      ...(s.suggest.filter((x) => /^status:/.test(x)).length !== 5
+        ? [`status: offers ${JSON.stringify(s.suggest)}, expected the five stages`] : []),
+      ...(!s.suggest.some((x) => /^status:wishlist 1$/.test(x)) ? [`rows ${JSON.stringify(s.suggest)}: wishlist should wear 1`] : []),
+      ...(!s.suggest.some((x) => /^status:tracking 0$/.test(x)) ? [`rows ${JSON.stringify(s.suggest)}: an empty stage should still be offered, as 0`] : []),
+    ]);
+
+    // 18. the presets here write grammar too: *no tags* is the old sidebar queue, and
+    //     it is `-has:tags` in the box, counted like the box.
+    s = await shot('clear first', PAGE.type(''));
+    s = await shot('click the no-tags preset', PAGE.clickWhere('.query-presets .preset', 'no tags'));
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('the no-tags preset on the games grid', s, [
+      ...(s.boxValue !== '-has:tags' ? [`the box holds ${JSON.stringify(s.boxValue)}, the preset should have written -has:tags`] : []),
+      ...(!s.presets.some((p) => p.label === 'no tags' && p.on) ? ['the preset does not show as active'] : []),
+      ...(s.tiles.length !== 1 ? [`the grid shows ${s.tiles.length} tiles, expected the one untagged game`] : []),
+      ...(!/\b1 match\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}`] : []),
+    ]);
+
+    // 19. a stage composes with a tag, and taking the stage chip off changes the grid
+    //     because the box changed — there is no second filter state left to disagree.
+    s = await shot('type a bare word', PAGE.type('probe-tag'));
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('a bare word is a tag on this view too', s, [
+      ...(s.tiles.length !== 2 ? [`the grid shows ${s.tiles.length} tiles for probe-tag, expected the 2 tagged games`] : []),
+      ...(!/\b2 matches\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}`] : []),
+    ]);
+    s = await shot('add a stage to it', PAGE.type('status:played probe-tag'));
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('a stage and a tag together', s, [
+      ...(s.tiles.length !== 1 ? [`the grid shows ${s.tiles.length} tiles, expected the one played and tagged game`] : []),
+      ...(!/\b1 match\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}`] : []),
+      ...(s.chipTerms.join(' ') !== 'status:played probe-tag' ? [`chips are ${JSON.stringify(s.chipTerms)}`] : []),
+    ]);
+    s = await shot('click the stage chip off', PAGE.clickWhere('.query-chips .chip', 'status:played'));
+    failures += record('a chip click edits the box, not a parallel state', s, [
+      ...(s.boxValue !== 'probe-tag' ? [`the box holds ${JSON.stringify(s.boxValue)} after the stage chip was removed`] : []),
+      ...(s.tiles.length !== 2 ? [`the grid shows ${s.tiles.length} tiles, expected both tagged games`] : []),
+      ...(!/\(press Enter for the total\)/.test(s.pagingHint || '') ? [`a query change kept a total it is no longer allowed to keep: ${JSON.stringify(s.pagingHint)}`] : []),
+      ...(!/^… matches/.test(s.count || '') ? [`the uncommitted query reads ${JSON.stringify(s.count)}, which showed a number it did not pay for`] : []),
+    ]);
+    s = await shot('Enter', PAGE.press('Enter'));
+    failures += record('the query the chip left behind, committed', s, [
+      ...(!/\b2 matches\b/.test(s.count || '') ? [`count line ${JSON.stringify(s.count)}`] : []),
+      ...(s.tiles.length !== 2 ? [`the grid shows ${s.tiles.length} tiles`] : []),
+      ...(!/showing 2 of 2/.test(s.pagingHint || '') ? [`the loaded count reads ${JSON.stringify(s.pagingHint)}`] : []),
+    ]);
+
+    // 20. what the rails were *for* stays reachable: the panels below the grid are not
+    //     the grid's filter, and the Vault section still names this vault.
+    s = await shot('open possible dupes', PAGE.clickWhere('.sidebar .nav-item', 'Possible dupes'));
+    failures += record('the games sidebar kept its own panels', s, [
       ...(!/possible duplicates/i.test(s.panelTitle || '') ? [`the panel title is ${JSON.stringify(s.panelTitle)}`] : []),
       ...(!/no duplicates found/i.test(s.empty || '') ? [`the pairs panel says ${JSON.stringify(s.empty)}`] : []),
       ...(!s.vaultLine || !s.vaultLine.includes(VAULT) ? [`the Vault section does not name the throwaway vault: ${JSON.stringify(s.vaultLine)}`] : []),

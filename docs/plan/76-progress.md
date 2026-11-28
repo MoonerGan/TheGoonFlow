@@ -1346,7 +1346,226 @@ example in the same commit.
   log holds one warning and it is the linker’s `LNK4099 … ossl_static.pdb` noise off the
   static OpenSSL, not a source warning.
 - `node tools/char-audit.js` over the eight files this entry touches (both Rust files, four
+  docs, the probe and its then-untracked report): **8 file(s) audited / CLEAN**.
 
 Numbering after this commit: DEVELOPMENT invariants run to **36** and TESTING items to
 **49**, no duplicates, nothing renumbered — `main`’s items 30 and 39 were not touched, and
 this stage added no new invariant or item.
+
+
+## S6 — the games grid, and the last second copy of the predicate goes (2026-11-27)
+
+### What the stage was
+
+plan §5 and §7 item 6: GamesView reads its grid through `searchItems("games", …)` with the
+paging and count discipline S5 grew, `status:` is a SQL predicate instead of a sidebar
+rail, and the reads that served those rails die **in the same commit** that makes them
+unreachable. Gone: `db::list_items`, `db::source_stats`, `db::counts_by_status`,
+`SourceStats`, `ListQuery`, the `list_items`, `source_stats` and `vault_stats` commands,
+`api.ts` and its `listItems` with the `tag`/`site`/`source` facet arguments, `getStats` and
+`sourceStats`; and in the view the `filter`, `tagFilter`, `sourceFilter` and `filtered`
+states, the stage rail, the sources-queue rail and the tag cloud. Kept, as plan §5 says:
+*Possible dupes*, *Updates*, *Online matches* and its attach path, the *Vault* section, and
+`site_stats` / `db::counts_by_site` (the Sources panel asks that question and it is not a
+facet of any grid). `db::top_tags` is under "left deliberately".
+
+### The count question plan §5 left open, answered with something that is not a badge
+
+The five pipeline badges and the three #40 queue badges had to go somewhere. The first
+attempt gave them a command — `status_stats(view, query)` over `db::status_counts_matching`, one
+statement per committed query, the same shape as the paired total — and it was wrong before it
+was written: plan §5 puts a per-facet count **inside an autocomplete row and nowhere else**,
+and a wire carrying those five numbers is a facet badge under another name that no view
+would ever have to call. It was deleted. The numbers live in the rows: `db::suggest` answers
+`status:` with the five stages counted over the query minus the token being typed
+(`db::status_counts_matching`, reusing `planned_where`, so it is the grid's own predicate rather
+than a paraphrase of it) and re-emits an empty stage as `0`. There is no stage-count or
+facet-count command on the wire, which is now DEVELOPMENT §4 item 37.
+
+### The equivalence pin, and the row neither design could name
+
+Deleting a read path makes its own regression test unspeakable: `status:seen` cannot be
+compared against `list_items` once `list_items` does not exist, and re-implementing it to keep
+the test happy is the second live copy this card exists to remove. So the rails' SQL is kept
+**frozen and test-only** — `db::legacy_grid_rows`, `db::legacy_ids`, both `#[cfg(test)]`, placed above
+`mod tests` so `query::tests` can reach them too. Against that,
+`status_terms_answer_what_the_old_client_filter_answered` replays the old client-side
+`filtered` hack (fetch the grid, then compare `items.status` in the caller) over one row per
+stage, two rows in `wishlist`, and a seventh row whose status is `retired` — a value the schema
+does not forbid and the old sidebar had no button for. Measured: each of the five `status:`
+terms selects exactly the rows its rail selected; no term selects `retired`, because the
+parser refuses the word; the unfiltered grid holds all seven in both designs; and the five
+stage counts sum to 6 of 7, so a stage value nobody named is not silently folded into one of
+the five. The old behaviour, written down rather than quietly improved.
+
+### GamesView as built
+
+One box, and the chips, presets and autocomplete rows edit its text (the four parallel filter
+states are gone, invariant 35). Three presets for the #40 queues: *no tags* — `-has:tags`, *local
+only* — `stored:local-only`, *no local file* — `-stored:disk`. Paging is the S5 shape: 300 rows by
+cursor, *Load more* disabled once a known total is loaded, *Back to start* rather than page
+numbers (invariants 31, 36), `… matches` while typing and `N matches · M in the library` on
+commit, the unsatisfiable-conjunction sentence (`status:seen status:played` cannot both be
+true) and the *not measured yet* empty for a `needs_facts` zero. The query bar's CSS block
+moved out of `MediaView.svelte`'s `<style>` into `app.css` instead of being copied: two views render
+the same rows now, and two copies of one block is how two grids start to look different
+without anyone deciding that. (The CSS asset went 17.22 kB → 16.93 kB: the games view lost its
+rails and pays for the box out of what the rails cost. The JS asset went the other way,
+168.48 kB → 173.74 kB, which is the suggester, the paging and the chip editing, and it is worth
+saying so rather than quoting only the number that went down.)
+
+### Live evidence, because a unit pin cannot see a rendered row
+
+plan §7 asked for the games grid to get the live check S5 got, so `tools/filter-ui-probe.js`
+drives the Games tab in the same session and vault: three game folders in the RenPy shape the
+round-trip test uses, through `import_game_folder`, moved by `update_item` onto three stages
+(Alpha `wishlist`, Beta `played`, Gamma left where the importer files games, `downloaded`), two of
+them tagged and one stripped to no tags at all. Ten more recorded states; the run is **26
+states (16 media + 10 games), `VERDICT: all cases OK`, exit 0**, and the tracked report
+(`docs/probes/filter-ui-probe.md`) was rewritten and then reproduced byte for byte on a second
+run (512 lines; the probe says "21 041 bytes", which is a character
+count — the file is 21 109 bytes on disk, 68 more, because its em dashes and middots are
+multi-byte UTF-8). Out of that run: `status:wishlist` over three games → 1 tile
+and `1 match · 3 in the library`; `status:tracking` → `0 matches` with the plain empty state and
+**no** *not measured yet* row; `status:` alone offers `status:seen 0`, `status:tracking 0`,
+`status:wishlist 1`, `status:downloaded 1`, `status:played 1`; the *no tags* preset leaves
+`-has:tags` in the box and one tile; `status:played` plus a tag is 1 match, and clicking the
+stage chip out of the box answers 2 matches once Enter commits what is left.
+
+Two of the first games cases failed, and both were the probe's assumptions rather than the app:
+the game importer writes the engine as a tag of its own, so all three fixture games already
+carried `renpy` (the tag term answered 3, not 2) and none of them was untagged (`-has:tags`
+answered 0). The fixtures changed, the app did not. The other failure asserted a committed
+total for a query that had just changed, which is exactly what invariant 36 forbids, so the
+assertion moved after Enter. The layout probe broke for the same class of reason: its setup
+enumerated the grid through `list_items`, which this commit deletes (`Command list_items not
+found`), so it reads `search_items` now.
+
+### The two viewer probes, which could no longer run at all
+
+`tools/viewer-layout-probe.js` and `tools/viewer-real-media-probe.js` enumerated the grid through
+`list_items`, and both hard-coded `C:/Source/TheGoonFlow` and its **release** exe — a probe that
+measures whatever was last released from another checkout is not measuring the tree under
+review. They resolve the checkout that owns the script and run that tree's **debug** exe, with
+`GOON_PROBE_EXE` as the override, and `tools/webview-layout-test.ps1` runs the probe sitting
+beside it. Measured against this tree: the layout probe prints three `OK:` lines and
+`VERDICT: all cases OK`, exit 0; the
+real-material probe is **0 of 20 cases broken**, exit 0 — ten items (clipped links plus one
+imported mp4) at two window sizes. Its links come from the gitignored
+`tools/viewer-real-media-cases.json`, which this worktree does not have and never should, so it
+was read from the other checkout through `GOON_PROBE_CASES`. Two of its cases sit behind a login
+wall and the cookie env vars are unset on this box, so the probe printed its own
+`skip … GOON_EH_COOKIE not set, and this host is a login wall` for them: they were not
+measured, which is the honest report rather than a shorter list. Nothing from that file, and no
+cookie, appears in this repository.
+
+### Repaired on the way, four things this card had written
+
+- plan §5's sentence "…removed in the same commit — one wire shape, no legacy branch." had the S5
+  review note spliced into its middle, leaving "shape, no legacy branch." on the far side of a
+  paragraph (c0fe4f9). Rejoined; the S6 note follows it.
+- This file's S5-review char-audit bullet ended mid-sentence. Completed above, with its measured
+  "8 file(s) audited / CLEAN".
+- DEVELOPMENT §7 cited `list_items`'s `#[allow(...)]` as the worked example of a deliberate warning,
+  the carry-over the S5 review entry flagged. It now cites `db::update_item`, whose allow had
+  no comment saying why, so it has one. §7 also states what a clean clippy run means (only a
+  run after `cargo clean -p goon-core -p goonflow-desktop` counts): the S5 entry measured it
+  that way and the rule had stayed inside this file.
+- The override names this stage gave the two viewer probes were `GON_PROBE_EXE` and
+  `GON_PROBE_CASES` — a typo in the prefix, since DEVELOPMENT §5 item 29 documents the family as
+  `GOON_PROBE_*`. A knob with the wrong name is a knob nobody can turn: set the name the docs
+  give and the probe quietly falls back to its own default path. Both are `GOON_PROBE_*` now,
+  and that is what the measurements above use.
+
+### Left deliberately
+
+- `db::top_tags` and the `topTags` binding have had no caller since this commit deleted the games
+  tag cloud: the tag rows the box offers come from `top_tags_matching`. They stay, annotated in
+  DEVELOPMENT §6 item 9. Deleting a second dead read path inside a commit that is already
+  deleting one is how a review loses its thread; say the word and it goes.
+- `ingest.rs` carries roughly 75 lines of reflow this stage did not touch: rustfmt at the
+  workspace's edition (2021, `Cargo.toml:12` — the ruling from the S5 review) was run over a file whose
+  two test callers had to be rewired. Half-formatting a file is worse, so it is kept, and
+  flagged here so it can be skimmed.
+
+### lost-calls, read rather than suppressed
+
+The comparison needs two revisions, so it ran against this commit once it existed; its report is
+quoted here as measured, and the lost names are read rather than suppressed:
+
+```
+apps/desktop/src/views/GamesView.svelte  HEAD~1 -> HEAD
+  api calls  22 -> 24
+    lost: getStats, listItems, topTags, sourceStats
+    new:  searchItems, loadThumbs, filterSuggest, runQuery, loadLibraryCount, searchItemIds
+  buttons    7 -> 15
+    lost: map
+    new:  preventDefault, commitQuery, selectAllMatches, tokens, includes, removeTerm,
+          insertTerm, acceptSuggestion, rewrite
+  renamed/moved: map
+  4 call(s)/button(s) gone for good - explain each one
+```
+
+It exits 1, which is the designed answer for a rework, and the four names it wants explained are
+the four this commit deletes on purpose:
+
+- `listItems` and `sourceStats` — the grid read and the queue-count read. Their replacements are
+  in the *new* list: `searchItems` for the rows, `filterSuggest` for the counts that used to sit on
+  the rails, `loadLibraryCount` for the header line.
+- `getStats` — the `vault_stats` wire. The header says `N matches M in the library`, and the M
+  comes from the query's own paired total.
+- `topTags` — the games tag cloud, one of the rails plan §5 says dies. The tag rows the box offers
+  come from `filterSuggest`, which counts through the query already typed instead of vault-wide.
+
+No *control* went with them: the button count went 7 → 15, and the one lost name, `map`, is the
+tool's own renamed/moved case — the old *Select all* ran `filtered.map((i) => i.id)` inside an
+inline handler and the new one is `selectAllMatches`, which selects the query's matches rather
+than a client-side filtered copy of them. Everything else the old view called is still called in
+the new one — `pairingSuggestions` / `mergeItems` / `dismissPair` (*Possible dupes*),
+`listUpdates` / `checkUpdates` (*Updates*), `findMatches` / `listMatchSuggestions` / `addSource` /
+`clearItemSuggestions` / `dismissSuggestion` / `reEnrichItem` (*Online matches* and its attach
+path), `deleteItems` / `reEnrichItems` (the batch actions), `open` / `run` (the three import
+entry points), `getThumbs` / `loadThumbs` / `getKindStats`.
+
+### Gates, as measured on this tree (the frontend gates run from `apps/desktop`)
+
+- `cargo test --workspace` exit 0: **244 passed / 0 failed / 8 ignored** (131 goon-core, 2
+  locator, 4 vault, 107 desktop with 8 ignored). Net +1 against S5: three pins in
+  (`the_games_grid_scopes_searches_and_pages_by_cursor`,
+  `status_terms_answer_what_the_old_client_filter_answered`,
+  `the_source_queues_are_grammar_and_their_counts_come_from_the_query`) against two out
+  (`list_items_binds_limit_offset_without_search`, `source_state_filters_and_badges`), with
+  `the_old_source_queues_are_the_same_predicate_in_grammar_text` re-pointed at the frozen rails
+  read instead of `list_items`.
+- `cargo test -p goon-core audit -- --nocapture` exit 0, 3 passed:
+  `fixture audit: 115 tracked text files, 73 content-shaped urls, 0 not obviously fake`. The
+  file count is 115 where the S5 entry measured 114, because that gate ran while
+  `docs/probes/filter-ui-probe.md` was still untracked and the audit reads `git ls-files`.
+- `cargo clean -p goon-core -p goonflow-desktop` then `cargo clippy --workspace --all-targets`
+  exit 0: the log contains `Checking goon-core`, `Compiling goonflow-desktop`, `Finished` and **0
+  lines containing `warning`**.
+- `cargo build -p goonflow-desktop` exit 0, run because the clean above deleted
+  `target\debug\GoonFlow.exe` and `npm run build` does not put it back: every probe here refuses to
+  run against an exe older than the sources, which is the rule that keeps a probe honest about the
+  tree it measured. Its log's only warning is the static-OpenSSL `LNK4099 ossl_static.pdb` linker
+  noise, not a source warning.
+- After the rebuild and the env-name fix, all three live probes were run again against this tree:
+  `tools\filter-ui-probe.js` **26 states, `VERDICT: all cases OK`, exit 0**, and its plain (no
+  `--write-report`) run prints "report reproduces docs/probes/filter-ui-probe.md byte for byte
+  (512 lines, 21041 bytes)"; the layout probe 3 of 3; the real-material probe **0 of 20 cases
+  broken**, exit 0, with its two login-wall cases skipped as described above.
+- `npm run build` exit 0: 136 modules, `dist/assets/index-Bgxt_BmU.js` 173.74 kB,
+  `index-CEKWOCfQ.css` 16.93 kB, in 1.13 s.
+- `npx svelte-check --tsconfig ./tsconfig.json --output human`: **0 errors, 0 warnings**.
+- `node tools/char-audit.js` over the eighteen files this commit touches: **18 file(s) audited /
+  CLEAN**.
+- `node tools/lost-calls.js apps/desktop/src/views/GamesView.svelte HEAD~1 HEAD` — run once the
+  commit existed, and its report is the next section. A view that trades four filter states for one
+  box loses API calls on purpose; the question is whether it loses a *control* as well.
+
+Numbering after this commit: DEVELOPMENT invariants run to **37** (37 is new: a value's count is
+the answer the term for that value gives) and TESTING items to **50** (50 is new: the games
+grid, typed into for real). No gaps, nothing renumbered, and `main`'s items 30 and 39 are
+untouched.
+
+S7 (the facts job) does not start until this stage is reviewed; #77 depends on S6 landing.

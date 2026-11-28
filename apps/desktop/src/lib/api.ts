@@ -23,10 +23,6 @@ export type AppStatus = {
   generation: number;
 };
 
-export type StatusCount = {
-  status: string;
-  count: number;
-};
 
 export const getStatus = () => invoke<AppStatus>("app_status");
 export const getDefaultVaultDir = () => invoke<string>("default_vault_dir");
@@ -40,8 +36,6 @@ export const lockVault = () => invoke<void>("lock");
 export const nukeVault = (confirm: string, dir?: string) =>
   invoke<void>("nuke_vault", { confirm, dir: dir ?? null });
 export const resetPointer = () => invoke<void>("reset_pointer");
-export const getStats = (kind?: string) =>
-  invoke<StatusCount[]>("vault_stats", { kind: kind ?? null });
 export const getKindStats = () => invoke<Array<[string, number]>>("kind_stats");
 
 export type ItemSummary = {
@@ -237,31 +231,6 @@ export type PairSuggestion = {
   bSrc: string;
 };
 
-/** **Legacy path, and #76 stage S6 deletes it.** The media grid left this call in stage
- *  S5 — filtering there is the query box now (`searchItems`). GamesView still reads its
- *  grid through it, so the `tag`/`site`/`source` facet arguments stay one more stage:
- *  they die in the **same** S6 commit that puts `searchItems("games")` and `status:` in
- *  place of the games rails, because an argument removed on its own would leave those
- *  rails inert, and a facet that silently stops filtering is worse than a facet that is
- *  still there. Nothing on the media view can reach them any more. */
-export const listItems = (
-  limit = 300,
-  offset = 0,
-  search?: string,
-  kind?: string,
-  tag?: string,
-  site?: string,
-  source?: "local_only" | "no_local" | "no_tags",
-) =>
-  invoke<ItemSummary[]>("list_items", {
-    limit,
-    offset,
-    search: search ?? null,
-    kind: kind ?? null,
-    tag: tag ?? null,
-    site: site ?? null,
-    source: source ?? null,
-  });
 
 // ---------- the query box (#76): the wire for one predicate ----------
 /** `view` is which vocabulary the box speaks: `media` (galleries + posts) or
@@ -332,17 +301,15 @@ export const searchItemIds = (view: QueryView, query?: string) =>
 export const filterSuggest = (view: QueryView, text: string, limit = 12) =>
   invoke<Suggestion[]>("filter_suggest", { view, text, limit });
 
+/** There is no stage-count call here either: the five pipeline counts reach the games view
+ *  as the `status:` autocomplete rows, each wearing the count that term answers on top of
+ *  the query already typed (plan §5). A second wire for the same numbers would be a facet
+ *  badge under another name, and a facet badge above a filtered grid is the bug this card
+ *  exists to end. */
+
 export const siteStats = (kind?: string) =>
   invoke<SiteCount[]>("site_stats", { kind: kind ?? null });
 
-// source-state filters (#40): the queue vocabulary. The **wire** behind it came off in
-// #76 stage S5 (`source_stats` is gone from `lib.rs`) — the three queues are grammar now
-// (`stored:local-only`, `-stored:disk`, `-has:tags`). The type survives one stage only
-// because GamesView's rails, its `filtered` hack and this mirror die together in stage
-// S6: a half-deleted wire is the second filter language plan §5 forbids.
-export type SourceStats = { localOnly: number; noLocal: number; noTags: number };
-export const sourceStats = (kind?: "game" | "media") =>
-  invoke<SourceStats>("source_stats", { kind: kind ?? null });
 export const getThumbs = (ids: string[]) =>
   invoke<ThumbPayload[]>("get_thumbs", { ids });
 

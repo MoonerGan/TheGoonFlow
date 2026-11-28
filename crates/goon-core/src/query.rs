@@ -2751,37 +2751,21 @@ mod tests {
         assert_eq!(all.unmeasured.len(), 5, "{:?}", all.unmeasured);
     }
 
-    /// The three #40 queues have to map to grammar text exactly, or a preset chip
-    /// silently widens the set it selects - which is what rulings C forbids. Pinned
-    /// against the rails' own SQL, so the badge count and the query count agree by
-    /// construction and keep agreeing after S5 deletes the rails.
+    /// The three #40 queues have to map to grammar text exactly, or a preset chip silently
+    /// widens the set it selects — which is what rulings C forbids. The rails are gone now
+    /// (S6 deleted `list_items` and `source_stats`), so the comparison is against their SQL kept
+    /// frozen in `db::legacy_grid_rows`: still the sentence that ran, still one sentence, and the
+    /// only way it can drift is someone editing the evidence.
     #[test]
     fn the_old_source_queues_are_the_same_predicate_in_grammar_text() {
         let conn = seeded_library();
-        let rail = |source: &str, kind: &str| -> Vec<String> {
-            crate::db::list_items(
-                &conn,
-                &crate::db::ListQuery {
-                    limit: 300,
-                    kind: Some(kind),
-                    source: Some(source),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .into_iter()
-            .map(|i| i.id)
-            .collect()
-        };
-        let mut local_only = rail("local_only", "media");
-        local_only.sort();
-        assert_eq!(matched(&conn, "stored:local-only"), local_only);
-        let mut no_local = rail("no_local", "media");
-        no_local.sort();
-        assert_eq!(matched(&conn, "-stored:disk"), no_local);
-        let mut no_tags = rail("no_tags", "media");
-        no_tags.sort();
-        assert_eq!(matched(&conn, "-has:tags"), no_tags);
+        let rail = |source: &str, kind: &str| crate::db::legacy_ids(&conn, kind, Some(source));
+        assert_eq!(
+            matched(&conn, "stored:local-only"),
+            rail("local_only", "media")
+        );
+        assert_eq!(matched(&conn, "-stored:disk"), rail("no_local", "media"));
+        assert_eq!(matched(&conn, "-has:tags"), rail("no_tags", "media"));
         // `stored:disk` is strictly wider than the old badge: one item has a local
         // source *and* an ehentai page, and the badge excluded it.
         assert_eq!(
@@ -2794,26 +2778,17 @@ mod tests {
             ["i_diskonly", "i_local_only"],
             "a folder import with no site page is the old local-only queue"
         );
-        // And the badge count agrees with the query count.
-        // And the badge count agrees with the query count, for all three queues:
-        // the same predicate counted two ways, not two predicates that happen to
-        // agree today.
-        let stats = crate::db::source_stats(&conn, Some("media")).unwrap();
-        assert_eq!(
-            stats.local_only as usize,
-            matched(&conn, "stored:local-only").len(),
-            "the local-only badge and stored:local-only disagree"
-        );
-        assert_eq!(
-            stats.no_local as usize,
-            matched(&conn, "-stored:disk").len(),
-            "the no-local badge and -stored:disk disagree"
-        );
-        assert_eq!(
-            stats.no_tags as usize,
-            matched(&conn, "-has:tags").len(),
-            "the no-tags badge and -has:tags disagree"
-        );
+        // And the number beside a chip is the number of rows the chip selects: `COUNT(*)`
+        // and the id list are two statements, so this is a real comparison — and both run
+        // the same `planned_where`, which is what replaced the badges' own `COUNT(*)` copies.
+        for term in ["stored:local-only", "-stored:disk", "-has:tags"] {
+            let plan = media(term).plan();
+            assert_eq!(
+                crate::db::count_matches(&conn, Scope::Media, &plan).unwrap() as usize,
+                matched(&conn, term).len(),
+                "the count for `{term}` and the rows it selects disagree"
+            );
+        }
     }
 
     #[test]

@@ -386,11 +386,15 @@ tools/
   `kind` scope with the planned body in parentheses. Every reader goes through it:
   `search_items` (a page plus its paired total), `count_matches` (the total alone),
   `search_item_ids` (every matching id, no `LIMIT` — what "select all" means once
-  the grid is a query), `top_tags_matching` and `counts_by_site_matching` (the tag
-  cloud and the site counts **of the current result**, so a chip can never offer a
-  tag the query already excluded). Two reasons that one function matters. The
-  library used to keep three hand-written copies of the same sentence — `list_items`,
-  `source_stats`, `games_needing_match` — and they had already drifted. And the
+  the grid is a query), `top_tags_matching`, `counts_by_site_matching` and
+  `status_counts_matching` (the tag cloud, the site counts and the five pipeline stages
+  **of the current result**, so a candidate row can never offer a term the query already
+  excluded and a stage count can never describe a grid it is not counting). Two reasons
+  that one function matters. The
+  library kept three hand-written copies of the same sentence — `list_items`,
+  `source_stats`, `games_needing_match` — and they had already drifted; stage S6
+  deleted the first two, and the third is left alone on purpose: it is the online
+  matching job choosing its own candidates, not a grid showing someone's query. And the
   **scope is SQL, not a UI convention**: a games plan run through the media scope
   matches nothing, so D14 cannot be bypassed by a caller that forgot to check.
 
@@ -427,21 +431,29 @@ tools/
   predicate does: it would trade `items_updated_idx`, the index the page walks, for a
   sort of the whole table.
 
-  Not replaced yet: `list_items` and `source_stats` still exist, because the rails
-  that call them come out in stage S5/S6. S3 only adds the new entry points and
-  their fixture tests; the grammar tests already pin that `stored:local-only`,
-  `-stored:disk` and `-has:tags` are the same predicates those badges compute, so
-  nothing drifts while both halves are alive.
+  Both are gone as of stage S6, in one commit: `list_items`, `source_stats`,
+  `counts_by_status`, `SourceStats`, `ListQuery` and the `tag`/`site`/`source` facet
+  arguments were deleted in the same change that put `search_items("games", …)` and
+  `status:` where the games rails were, because a facet that silently stops filtering
+  is worse than one that is still there. What survives of them is a **frozen copy of
+  their SQL** behind `#[cfg(test)]` — `db::legacy_grid_rows` and `db::legacy_ids` —
+  whose only job is to pin that the grammar answers the rows those rails and the old
+  client-side `filtered` hack answered, including the status value the hack did not
+  know. A frozen copy inside the test module cannot start serving a view; a second live
+  reader can, which is the thing that went wrong in the first place.
 
 - **The query box on the wire** (stage S4) is three commands and two new arguments:
   `search_items(view, query, limit, after, with_count)` → `SearchPage`,
   `search_item_ids(view, query)` → `Vec<String>`, and
   `filter_suggest(view, text, limit)` → `Vec<Suggestion>`, all in `lib.rs` behind
   `planned_query(view, text)`, which is deliberately the **only** place a command
-  may turn a view word and box text into a plan. `list_items` and its
-  `tag`/`site`/`source` arguments still exist for the rails, and S5 deletes the
-  callers and the command in the same commit (plan §5: one wire shape, no legacy
-  branch).
+  may turn a view word and box text into a plan. They are the only grid reads now: the
+  media view came onto them in stage S5 and the games view in S6, each in the commit
+  that deleted the read path it replaced (plan §5: one wire shape, no legacy branch).
+  There is deliberately **no** stage-count or facet-count command beside them: those
+  numbers live inside `filter_suggest`'s rows, counted over the query minus the token
+  being typed (invariant 37), because a second wire carrying the same numbers is a
+  badge above a filtered grid under another name.
 
   `with_count` defaults to `true`, and `false` answers with `total: null` instead of a
   number. That is a measured split, not a taste: the count is a second statement over
@@ -556,10 +568,19 @@ tools/
    `jobs.clear()` because job history contains URLs and paths.
 9. **Views stay separate**: GamesView and MediaView share only components where
    it genuinely helps (`TileGrid`, `ItemEditor`, which hides the pipeline fields
-   for media). Pipeline filters (seen/tracking/…) and the update/dupe panels
-   exist only in the Games view; site filters only in the Media view; the
-   backend helpers take `kind` (`list_items(…, kind, site)`, `top_tags(…, kind)`,
-   `counts_by_site(…)`) so each view's sidebar counts are always scoped.
+   for media) and exactly one copy of the query-bar CSS, which lives in `app.css`
+   rather than in a `<style>` block per view. `status:` is games-only grammar
+   (`GAMES_ONLY_KEYWORDS`) and the update/dupe/match panels exist only in the
+   Games view; the separation is enforced by `query::Scope` inside
+   `planned_where`, so no helper can be shown the other view's rows by forgetting
+   an argument — which is what `list_items(…, kind, site)` used to depend on, and that
+   function is gone. `counts_by_site` still takes a `kind`, because the Sources panel
+   asks a vault-wide question outside any query; the counts beside a grid are the
+   query-shaped ones (`top_tags_matching`, `counts_by_site_matching`,
+   `status_counts_matching`). `top_tags` has had no caller since stage S6 deleted the
+   games tag cloud — the tag rows the box offers come from `top_tags_matching` — and
+   it is left in place deliberately rather than tidied away inside a commit that is
+   already deleting one read path.
 10. **Site names come from `HOST_SUFFIXES`, never from a host label.** Early
     field reports got site "i" (from `i.4cdn.org`) and "wimg". Unknown hosts
     fall back to the *registrable domain*, and booru-CDN file links carrying a
@@ -978,6 +999,25 @@ tools/
     the loaded count reaches a known `total` (invariant 31 is why there are no page
     numbers to distrust instead).
 
+37. **A value's count is the answer the term for that value gives, and it lives in the
+    row that offers it (#76 stage S6).** The sidebars this replaced each counted on
+    their own SQL: `counts_by_status` computed the five pipeline stages, `source_stats`
+    the three #40 queues and `top_tags` the tag cloud — every one of them over the whole
+    library, worn above a grid the same rails had narrowed some other way. The fix is
+    not a better-placed number. A count for a value is now **what the term for that
+    value answers on top of the query already typed**, computed inside `db::suggest`
+    (`status_counts_matching`, `counts_by_site_matching`, `top_tags_matching`, each
+    through `planned_where`) and shown in that candidate row and nowhere else. Three
+    consequences, all pinned: there is no stage-count or facet-count command on the
+    wire at all (a second wire carrying the same five numbers is a facet badge under
+    another name); a stage holding nothing is still offered, as `0`, because "nothing is
+    on this stage" is an answer and not a missing word; and the games view's pipeline is
+    `status:` and nothing else, which is why `status:wishlist renpy` composes while a
+    stage the grammar does not have is a parse error rather than a filter that quietly
+    matches nothing. The pins are `db::tests::status_terms_answer_what_the_old_client_filter_answered`,
+    `db::tests::the_source_queues_are_grammar_and_their_counts_come_from_the_query` and
+    the games cases of `tools\filter-ui-probe.js` (TESTING item 50).
+
 ## 5. Testing
 
 ```powershell
@@ -1031,13 +1071,17 @@ Set-Location apps\desktop
   it runs through `npm exec --yes`. It must print 0 errors **and** 0 warnings: that is
   what catches a `currentTarget` typed as `Element`, a possibly-null ref, and the
   leftover of a deleted `*Msg` variable.
-- No browser is installed on this box, but **the release exe is one**: the WebView2
+- No browser is installed on this box, but **the app's own exe is one**: the WebView2
   runtime answers the DevTools protocol on a loopback port, so a real session can be
-  measured. `tools\viewer-layout-probe.js` (run it through
-  `tools\webview-layout-test.ps1`) starts a *copy* of the exe in
-  `%TEMP%\goon-viewer-probe` with its own throwaway vault, imports generated PNGs of
-  exact pixel size, clicks the real card and then the real **Fit** / **1:1** buttons, and
-  prints the box the stage really got, what the app claimed, and what the engine drew.
+  measured. `tools\viewer-layout-probe.js` (run it through `tools\webview-layout-test.ps1`) starts
+  a *copy* of the **debug** exe of the checkout that owns the script — as
+  `tools\filter-ui-probe.js` does, with `GOON_PROBE_EXE` as the override — in
+  `%TEMP%\goon-viewer-probe` with its own throwaway vault, imports generated PNGs of exact pixel
+  size, clicks the real card and then the real **Fit** / **1:1** buttons, and prints the box the
+  stage really got, what the app claimed, and what the engine drew. Both viewer probes used to
+  name `C:/Source/TheGoonFlow` and its **release** build outright, which measures a binary with
+  no particular relation to the tree whose view is under review; the real-material probe takes
+  its gitignored link list from `GOON_PROBE_CASES` for the same reason.
   It is how the 2026-11-22 Fit / 1:1 report was found: the arithmetic test and the CSS
   contract were both green while the live app printed `0×0 px, shown at ?%` and disabled
   1:1. It asserts the app's own words — contained at Fit, 1:1 drawing the frame's own
@@ -1246,10 +1290,14 @@ Set-Location apps\desktop
 
 - MIT licensed (DESIGN D5).
 - Keep `cargo test --workspace` green (via `tools\run-test.ps1`), clippy clean of
-  warnings (`tools\run-clippy.ps1` must report **0**; if you add a warning on
-  purpose, `#[allow(...)]` with a comment saying why, exactly as
-  `list_items` in `src-tauri/src/lib.rs` does for the frontend wire shape), and
-  `npm run build` warning-free (svelte a11y warnings count).
+  warnings (`tools\run-clippy.ps1` must report **0** — and only a run after
+  `cargo clean -p goon-core -p goonflow-desktop` counts, because a warm cache checks
+  nothing and prints nothing), if you add a warning on purpose give it
+  `#[allow(...)]` with a comment saying why, exactly as `update_item` in
+  `crates/goon-core/src/db.rs` does for its argument list, and keep
+  `npm run build` warning-free (svelte a11y warnings count). (`list_items` in
+  `src-tauri/src/lib.rs` used to be the worked example of that allow; #76 stage S6
+  deleted the function, the wire and the allow together.)
 - Commit style: small, milestone-scoped (`M0: …`, `M1: gelbooru ingestor …`).
 - Never commit vault material: `.gitignore` covers `flow.cfg`, vault dirs,
   `target/`, `node_modules/`, build logs under `tools/*.log`. Shape counts too: a

@@ -502,13 +502,13 @@ mod tests {
 
         let inner = state.inner.lock().unwrap();
         let conn = &inner.opened.as_ref().unwrap().conn;
-        let media_items = goon_core::db::list_items(
+        // The grid read, not a private one: the media view shows exactly these rows.
+        let media_items = goon_core::db::page_items(
             conn,
-            &goon_core::db::ListQuery {
-                limit: 100,
-                kind: Some("media"),
-                ..Default::default()
-            },
+            goon_core::query::Scope::Media,
+            &goon_core::query::Plan::default(),
+            100,
+            None,
         )
         .unwrap();
         assert_eq!(media_items.len(), 4, "all four are media items");
@@ -517,16 +517,13 @@ mod tests {
             titles.iter().any(|t| t.contains("clip")),
             "video stem used as title: {titles:?}"
         );
-        let local_only = goon_core::db::list_items(
-            conn,
-            &goon_core::db::ListQuery {
-                limit: 100,
-                kind: Some("media"),
-                site: Some("local"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        // `source:local` is what the site facet used to be, written as grammar.
+        let local_plan = goon_core::query::parse("source:local", goon_core::query::Scope::Media)
+            .unwrap()
+            .plan();
+        let local_only =
+            goon_core::db::page_items(conn, goon_core::query::Scope::Media, &local_plan, 100, None)
+                .unwrap();
         assert_eq!(local_only.len(), 2);
         drop(inner);
 

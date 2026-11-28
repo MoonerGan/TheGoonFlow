@@ -322,6 +322,7 @@ persisted anywhere (nothing decrypted survives).
 
 `api.ts` grows the mirror of the new command structs (invariant 6); the old
 `listItems(tag/site/source)` arguments are removed in the same commit — one wire
+shape, no legacy branch.
 
 **S5 as built (2026-11-27), and the one place it parts from this section.** S5 removed
 the four media facet rails, their badges and every media caller of `listItems` /
@@ -339,7 +340,33 @@ before the rails that used them die, and the media rails never exist twice). The
 — is pinned without the wire: `query::tests::the_old_source_queues_are_the_same_predicate_in_grammar_text`
 asserts each #40 queue's predicate equals the preset chip's text, and the live probe
 clicks the `no tags` preset and counts what the grammar answers.
-shape, no legacy branch.
+
+**S6 as built (2026-11-27): the sentence above, paid in full.** GamesView reads its grid
+through `searchItems("games", …)` with the cursor paging and count discipline S5 grew,
+`status:` is a SQL predicate, and the client-side `filtered` hack is gone with the rails
+that drove it. Deleted in that same commit: `db::list_items`, `db::source_stats`,
+`db::counts_by_status`, `SourceStats`, `ListQuery`, the `list_items`, `source_stats` and
+`vault_stats` commands, and `listItems`' facet arguments (TESTING item 50).
+`site_stats` / `db::counts_by_site` stays: the Sources panel asks that question, and it is
+not a facet of any grid. Two decisions this section left open, made in the open:
+
+* **The five pipeline counts have no command of their own.** "Per-facet counts live only
+  inside autocomplete rows" is what they became: `db::suggest` answers `status:` with the
+  five stages counted over the query minus the token being typed
+  (`db::status_counts_matching`), so the number beside a row is the number of rows that
+  term selects. A `status_stats` command was written first, then deleted — it was a
+  facet badge under another name, and once the rows carried the numbers no view had a
+  reason to call it (DEVELOPMENT §4 item 37).
+* **What a deleted read path leaves behind.** The equivalence this card asserts — the
+  grammar answers the rows those rails answered — is pinned against a **frozen,
+  test-only** copy of the deleted SQL (`db::legacy_grid_rows`, `db::legacy_ids`, both
+  `#[cfg(test)]`), never a second live implementation. The fixture includes a status the
+  old `filtered` hack had no word for (`retired`): unreachable by term in both designs,
+  present in the unfiltered grid in both, and folded into none of the five stage counts — the old behaviour written down rather than quietly improved.
+* **One query bar, styled once.** The games view renders the same rows as the media
+  view, so the CSS block moved out of `MediaView.svelte`'s `<style>` into `app.css`
+  instead of being copied. Two copies of one block is how two grids start to look
+  different without anyone deciding that.
 
 ---
 
@@ -416,6 +443,9 @@ facts already true).
    tracked, self-comparing file; and rustfmt was run at this workspace’s edition, 2021
    (`Cargo.toml:12`), not 2024, which reflowed the two Rust files this card had touched.
 6. **S6 — GamesView** swaps likewise (status predicates replace the client filter).
+   **Built 2026-11-27** (TESTING item 50; the same live probe, now 26 recorded states, 16
+   media + 10 games, `VERDICT: all cases OK`). Its own part of §5 is in the §5 note above;
+   what the stage found on the way is in `76-progress.md`.
 7. **S7 — facts jobs**: duration-probe + disk-size refresh as one cancellable
    job kind (`jobs.rs`, D15); `+ Video` import writes them going forward.
 
@@ -457,7 +487,8 @@ New checks this card needs:
    compares itself against that file and exits 2 with a printed diff if the app renders
    anything else; rewriting it takes `--write-report`. `tools\filter-ui-probe.log` keeps the
    raw snapshots for the machine that ran it. Reproduce measured 2026-11-27: the write run,
-   then a byte-for-byte identical run (312 lines, 13 383 bytes). Paths, ports, pids,
+   then a byte-for-byte identical run (512 lines, 21 041 bytes, measured again after the
+   games cases went in). Paths, ports, pids,
    timestamps and pixel positions stay out of the tracked file, because a file that cannot be
    reproduced on another machine cannot be reviewed there.
 
@@ -468,6 +499,17 @@ New checks this card needs:
    page-number control, and the predicate shape each tag term got printed in the page.
    TESTING item 49 states the limits with it (`ext:` unfilterable until S7 backfills the
    extension tag; *Measure my files* inert until S7).
+   **Added by S6 (TESTING item 50): the games grid, in the same probe, same vault.** Three
+   game folders through `import_game_folder`, moved onto three pipeline stages by
+   `update_item`, two of them tagged and one stripped to nothing: `status:` selects a stage,
+   the five stages arrive as autocomplete rows each wearing the count of the query already
+   typed (`0` for the empty ones), `status:tracking` answers `0 matches` without borrowing
+   the *not measured yet* row, the `no tags` preset writes `-has:tags`, a chip click edits
+   the box, and the sidebar is only *Library* / *Keep current* / *Vault* — a rail that
+   came back would fail the run. The fixtures were corrected by the measurement, not the
+   app: the game importer writes the engine as a tag, so the first version of these cases
+   (which assumed an untagged import) failed on exactly that.
+
 5. Manual checklist additions for the field round (chip click-to-remove, preset
    chips, Games `status:` replacing the old rails, dupes/Vault untouched).
 

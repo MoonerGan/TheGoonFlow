@@ -599,40 +599,6 @@ pub struct StatusCount {
     pub count: i64,
 }
 
-pub fn counts_by_status(
-    conn: &Connection,
-    kind: Option<&str>,
-) -> rusqlite::Result<Vec<StatusCount>> {
-    let mut stmt = conn.prepare(
-        "SELECT status, count(*) FROM items
-         WHERE (?1 IS NULL
-                OR (?1 = 'game' AND kind = 'game')
-                OR (?1 = 'media' AND kind IN ('gallery','post')))
-         GROUP BY status",
-    )?;
-    let rows = stmt.query_map(params![kind], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
-    let mut map = std::collections::HashMap::new();
-    for row in rows {
-        let (status, count) = row?;
-        map.insert(status, count);
-    }
-    Ok([
-        Status::Seen,
-        Status::Tracking,
-        Status::Wishlist,
-        Status::Downloaded,
-        Status::Played,
-    ]
-    .into_iter()
-    .map(|s| StatusCount {
-        status: s.as_str(),
-        count: map.get(s.as_str()).copied().unwrap_or(0),
-    })
-    .collect())
-}
-
 pub fn counts_by_kind(conn: &Connection) -> rusqlite::Result<Vec<(&'static str, i64)>> {
     let mut stmt = conn.prepare("SELECT kind, count(*) FROM items GROUP BY kind")?;
     let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
@@ -707,77 +673,6 @@ pub struct ItemSummary {
     pub version: Option<String>,
     pub has_thumb: bool,
     pub updated_at: String,
-}
-
-/// Filters for one grid page. Grew out of #40 (source-state filters) and the
-/// M2 site filter; as a plain argument list it was already eight wide, so every
-/// new facet would have pushed it further past clippy's limit (#51). Call sites
-/// are meant to read as `ListQuery { kind: Some("game"), ..Default::default() }`.
-#[derive(Debug)]
-pub struct ListQuery<'a> {
-    pub limit: i64,
-    pub offset: i64,
-    pub search: Option<&'a str>,
-    /// `"game"` or `"media"` (media = galleries + posts), as the views ask for it.
-    pub kind: Option<&'a str>,
-    pub tag: Option<&'a str>,
-    pub site: Option<&'a str>,
-    /// Sidebar source state: `local_only` | `no_local` | `no_tags`.
-    pub source: Option<&'a str>,
-}
-
-impl Default for ListQuery<'_> {
-    fn default() -> Self {
-        Self {
-            // The grid has no pagination yet; this is the safety ceiling, and the
-            // desktop command overrides it the same way it always did.
-            limit: 200,
-            offset: 0,
-            search: None,
-            kind: None,
-            tag: None,
-            site: None,
-            source: None,
-        }
-    }
-}
-
-pub fn list_items(conn: &Connection, q: &ListQuery<'_>) -> rusqlite::Result<Vec<ItemSummary>> {
-    let like = q.search.map(|s| format!("%{}%", s.trim()));
-    // Placeholders are always ?1..?7 — binding with params! fills positions
-    // in order, so skipping ?1 while using ?2 would bind offset to ?2.
-    let sql = "SELECT id, kind, title, status, version,
-                    EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
-                    updated_at
-             FROM items
-             WHERE (?1 IS NULL OR title LIKE ?1 OR IFNULL(circle,'') LIKE ?1)
-               AND (?4 IS NULL
-                    OR (?4 = 'game' AND kind = 'game')
-                    OR (?4 = 'media' AND kind IN ('gallery','post')))
-               AND (?5 IS NULL OR EXISTS (
-                     SELECT 1 FROM item_tags it JOIN tags t ON t.id = it.tag_id
-                     WHERE it.item_id = items.id AND t.name = ?5))
-               AND (?6 IS NULL OR EXISTS (
-                     SELECT 1 FROM sources ss WHERE ss.item_id = items.id AND ss.site = ?6))
-               AND (?7 IS NULL
-                    OR (?7 = 'local_only' AND
-                        EXISTS (SELECT 1 FROM sources sl WHERE sl.item_id = items.id AND sl.site = 'local')
-                        AND NOT EXISTS (SELECT 1 FROM sources so WHERE so.item_id = items.id AND so.site <> 'local'))
-                    OR (?7 = 'no_local' AND
-                        NOT EXISTS (SELECT 1 FROM sources sn WHERE sn.item_id = items.id AND sn.site = 'local'))
-                    OR (?7 = 'no_tags' AND
-                        NOT EXISTS (SELECT 1 FROM item_tags tn WHERE tn.item_id = items.id)))
-             ORDER BY updated_at DESC LIMIT ?2 OFFSET ?3";
-    let mut stmt = conn.prepare(sql)?;
-    let mut out = Vec::new();
-    let mapped = stmt.query_map(
-        params![like, q.limit, q.offset, q.kind, q.tag, q.site, q.source],
-        map_item_summary,
-    )?;
-    for row in mapped {
-        out.push(row?);
-    }
-    Ok(out)
 }
 
 fn map_item_summary(r: &rusqlite::Row<'_>) -> rusqlite::Result<ItemSummary> {
@@ -1204,6 +1099,52 @@ pub fn counts_by_site_matching(
     rows.collect()
 }
 
+/// The pipeline stages **of the current result**: the same [`planned_where`] the page,
+/// the paired total and the id list run, grouped by `items.status`. This replaces
+/// `counts_by_status`, which counted the whole library on its own SQL and wore the
+/// number as a sidebar badge above a grid that had been filtered by something else —
+/// the second copy of one predicate plan §9 names, and the reason a badge could say 12
+/// over a grid of 3.
+///
+/// Status is a partition, not a facet: every item carries exactly one, so the five rows
+/// sum to the result. A status outside the five words (the schema does not constrain the
+/// column) is a row of its own that no grammar term can name, which is why
+/// `status_terms_answer_what_the_old_client_filter_answered` pins both halves. The five
+/// known stages are re-emitted with 0 filled in, exactly as `counts_by_status` did — a
+/// stage holding nothing reads as a zero, not as a missing word.
+pub fn status_counts_matching(
+    conn: &Connection,
+    scope: Scope,
+    plan: &Plan,
+) -> rusqlite::Result<Vec<StatusCount>> {
+    let sql = format!(
+        "SELECT items.status, count(*) FROM items{} GROUP BY items.status",
+        planned_where(scope, plan)
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(rusqlite::params_from_iter(plan.params.iter()), |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (status, count) = row?;
+        map.insert(status, count);
+    }
+    Ok([
+        Status::Seen,
+        Status::Tracking,
+        Status::Wishlist,
+        Status::Downloaded,
+        Status::Played,
+    ]
+    .into_iter()
+    .map(|s| StatusCount {
+        status: s.as_str(),
+        count: map.get(s.as_str()).copied().unwrap_or(0),
+    })
+    .collect())
+}
+
 /// One autocomplete row. `token` is the whole term to insert, `-type:video`
 /// including the minus the user already typed, so clicking it replaces the token
 /// instead of appending to it.
@@ -1231,13 +1172,14 @@ pub struct Suggestion {
 /// yet" is no reason to hide the word `stored:`.
 ///
 /// The counts come from the same SQL the query itself would run
-/// ([`counts_by_site_matching`] for `source:`, [`top_tags_matching`] for `ext:` and
-/// for a bare word), so the number beside a row is the number pressing Enter
-/// would print. `tag:` is not completed at all: the bare-word path already lists
-/// every tag, and asking for the exact spelling has nothing to guess. The one
-/// known cut is `ext:` — it reads the top tags and keeps the extension ones, so a
-/// vault holding 20 000 content tags and one rare extension may not surface it
-/// until the prefix narrows; worth a `type_id` filter if field use complains.
+/// ([`counts_by_site_matching`] for `source:`, [`status_counts_matching`] for
+/// `status:`, [`top_tags_matching`] for `ext:` and for a bare word), so the number
+/// beside a row is the number pressing Enter would print. `tag:` is not completed at
+/// all: the bare-word path already lists every tag, and asking for the exact spelling
+/// has nothing to guess. The one known cut is `ext:` — it reads the top tags and
+/// keeps the extension ones, so a vault holding 20 000 content tags and one rare
+/// extension may not surface it until the prefix narrows; worth a `type_id` filter if
+/// field use complains.
 pub fn suggest(
     conn: &Connection,
     scope: Scope,
@@ -1256,14 +1198,19 @@ pub fn suggest(
 
     if let Some(key) = ctx.keyword {
         // A keyword's closed values: the grammar owns these, so they are offered
-        // even in a vault where they currently match nothing.
-        for value in closed_values(key) {
-            if completes(value) {
-                rows.push(Suggestion {
-                    token: format!("{minus}{key}:{value}"),
-                    kind: "value",
-                    count: None,
-                });
+        // even in a vault where they currently match nothing. `status:` is the
+        // exception below — the only closed vocabulary that is also a column, so its
+        // arm offers the same five words *with* the count the current query answers,
+        // and emitting them twice would be two autocomplete rows per stage.
+        if key != "status" {
+            for value in closed_values(key) {
+                if completes(value) {
+                    rows.push(Suggestion {
+                        token: format!("{minus}{key}:{value}"),
+                        kind: "value",
+                        count: None,
+                    });
+                }
             }
         }
         // A keyword whose vocabulary is the vault's.
@@ -1289,6 +1236,22 @@ pub fn suggest(
                         kind: "tag",
                         count: Some(tag.count),
                     });
+                }
+            }
+            // `status:` is a column, so the five stages can be counted honestly over
+            // the query minus the token being typed — one grouped statement, the same
+            // planned_where the grid runs. This is where the games pipeline rails'
+            // numbers went: still visible while typing, with no second copy of the
+            // predicate.
+            "status" => {
+                for c in status_counts_matching(conn, scope, &base)? {
+                    if completes(c.status) {
+                        rows.push(Suggestion {
+                            token: format!("{minus}{key}:{}", c.status),
+                            kind: "value",
+                            count: Some(c.count),
+                        });
+                    }
                 }
             }
             // `size:`, `added:`, `circle:` … have no enumerable value set, and
@@ -1320,47 +1283,9 @@ pub fn suggest(
     Ok(rows)
 }
 
-/// Sidebar badges for the source-state filters: "local only" (no online link —
-/// the fix-my-metadata queue), "no local file" (folder lost / never linked),
-/// "no tags" (bare imports and unresolved direct-file clips).
-///
-/// The three queues each have an exact grammar equivalent, pinned by
-/// `the_old_source_queues_are_the_same_predicate_in_grammar_text`: `local_only` ≡
-/// `stored:local-only`, `no_local` ≡ `-stored:disk`, `no_tags` ≡ `-has:tags`.
-/// Stage S5 removes this function with the rails that call it.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SourceStats {
-    pub local_only: i64,
-    pub no_local: i64,
-    pub no_tags: i64,
-}
-
-pub fn source_stats(conn: &Connection, kind: Option<&str>) -> rusqlite::Result<SourceStats> {
-    let kind_sql = match kind {
-        Some("game") => "AND kind = 'game'",
-        Some("media") => "AND kind IN ('gallery','post')",
-        _ => "",
-    };
-    let count = |extra: &str| -> rusqlite::Result<i64> {
-        conn.query_row(
-            &format!("SELECT COUNT(*) FROM items WHERE 1=1 {kind_sql} {extra}"),
-            [],
-            |r| r.get(0),
-        )
-    };
-    Ok(SourceStats {
-        local_only: count(
-            "AND EXISTS (SELECT 1 FROM sources sl WHERE sl.item_id = items.id AND sl.site = 'local')
-             AND NOT EXISTS (SELECT 1 FROM sources so WHERE so.item_id = items.id AND so.site <> 'local')",
-        )?,
-        no_local: count(
-            "AND NOT EXISTS (SELECT 1 FROM sources sn WHERE sn.item_id = items.id AND sn.site = 'local')",
-        )?,
-        no_tags: count("AND NOT EXISTS (SELECT 1 FROM item_tags tn WHERE tn.item_id = items.id)")?,
-    })
-}
-
+/// The editor's whole write, in one statement: the arguments **are** the editor's
+/// fields, so bundling them into a struct would only add a second shape to keep in
+/// step with the wire. Hence the allow rather than a refactor.
 #[allow(clippy::too_many_arguments)]
 pub fn update_item(
     conn: &Connection,
@@ -2497,6 +2422,51 @@ pub fn merge_items(conn: &Connection, keep_id: &str, drop_id: &str) -> rusqlite:
     Ok(())
 }
 
+/// The grid read this card deleted, kept verbatim from the commit before it:
+/// `list_items`'s `WHERE` with its `kind` tri-state and its source-state facet. Two pins
+/// need it — the source queues in `query::tests` and the status pin in `db::tests` — and
+/// both ask one question: does the grammar select the rows the rails selected? Comparing the
+/// new predicate against a **live** second copy would put back the thing plan §9 removed,
+/// so the old sentence lives here, frozen, where the only way it can go stale is someone
+/// editing it. `#[cfg(test)]`: it is evidence, not a code path.
+#[cfg(test)]
+pub(crate) fn legacy_grid_rows(
+    conn: &Connection,
+    kind: &str,
+    source: Option<&str>,
+) -> rusqlite::Result<Vec<ItemSummary>> {
+    let sql = "SELECT id, kind, title, status, version,
+                EXISTS (SELECT 1 FROM media m WHERE m.item_id = items.id AND m.kind = 'thumb'),
+                updated_at
+         FROM items
+         WHERE (?1 IS NULL OR (?1 = 'game' AND kind = 'game')
+                  OR (?1 = 'media' AND kind IN ('gallery','post')))
+           AND (?2 IS NULL
+                OR (?2 = 'local_only' AND
+                    EXISTS (SELECT 1 FROM sources sl WHERE sl.item_id = items.id AND sl.site = 'local')
+                    AND NOT EXISTS (SELECT 1 FROM sources so WHERE so.item_id = items.id AND so.site <> 'local'))
+                OR (?2 = 'no_local' AND
+                    NOT EXISTS (SELECT 1 FROM sources sn WHERE sn.item_id = items.id AND sn.site = 'local'))
+                OR (?2 = 'no_tags' AND
+                    NOT EXISTS (SELECT 1 FROM item_tags tn WHERE tn.item_id = items.id)))
+         ORDER BY updated_at DESC LIMIT 300 OFFSET 0";
+    let mut stmt = conn.prepare(sql)?;
+    let rows = stmt.query_map(params![kind, source], map_item_summary)?;
+    rows.collect()
+}
+
+/// `legacy_grid_rows` as a sorted id list, which is the comparison both pins make.
+#[cfg(test)]
+pub(crate) fn legacy_ids(conn: &Connection, kind: &str, source: Option<&str>) -> Vec<String> {
+    let mut ids: Vec<String> = legacy_grid_rows(conn, kind, source)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2507,7 +2477,7 @@ mod tests {
         init_schema(&conn).unwrap();
         init_schema(&conn).unwrap();
         assert_eq!(schema_version(&conn).unwrap(), crate::SCHEMA_VERSION);
-        let counts = counts_by_status(&conn, None).unwrap();
+        let counts = status_counts_matching(&conn, Scope::Games, &Plan::default()).unwrap();
         assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 0);
         let tags: i64 = conn
             .query_row("SELECT count(*) FROM tags WHERE type_id = 1", [], |r| {
@@ -2884,59 +2854,199 @@ mod tests {
         assert_eq!(kind, "extension");
     }
 
+    /// The games grid through the query engine: the **scope** picks the kind (D14), a quoted
+    /// phrase reaches title and circle, and the next page comes from a **cursor** built off the
+    /// last row on screen rather than an offset. `list_items` pinned these three through its
+    /// own eight-argument call; the function is gone, so the pin moved here instead of away.
     #[test]
-    fn list_items_binds_limit_offset_without_search() {
-        // Regression: the no-search SQL used ?2/?3 while params! binds 1/2,
-        // so every grid load failed and the UI silently showed "empty".
+    fn the_games_grid_scopes_searches_and_pages_by_cursor() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
-        for (id, kind, title) in [
-            ("g1", "game", "Alpha Game"),
-            ("g2", "game", "Beta Game"),
-            ("b1", "post", "Gamma Post"),
+        for (id, kind, title, circle, updated) in [
+            ("g1", "game", "Alpha Game", Some("Red Garden"), "3"),
+            ("g2", "game", "Beta Game", None, "2"),
+            ("b1", "post", "Gamma Post", None, "1"),
         ] {
             conn.execute(
-                "INSERT INTO items (id, kind, title, created_at, updated_at) VALUES (?1,?2,?3,'0','1')",
-                params![id, kind, title],
+                "INSERT INTO items (id, kind, title, circle, created_at, updated_at)
+                 VALUES (?1,?2,?3,?4,'0',?5)",
+                params![id, kind, title, circle, updated],
             )
             .unwrap();
         }
-        let all = list_items(
-            &conn,
-            &ListQuery {
-                limit: 300,
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(all.len(), 3);
-        let games = list_items(
-            &conn,
-            &ListQuery {
-                limit: 300,
-                kind: Some("game"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(games.len(), 2);
-        let search = list_items(
-            &conn,
-            &ListQuery {
-                limit: 300,
-                search: Some("gamma"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert_eq!(search.len(), 1);
-        let counts = counts_by_status(&conn, Some("game")).unwrap();
-        assert_eq!(counts.iter().map(|c| c.count).sum::<i64>(), 2);
+        let games = |text: &str| -> Vec<String> {
+            let plan = query::parse(text, Scope::Games)
+                .unwrap_or_else(|e| panic!("{text:?}: {}", e.message));
+            search_item_ids(&conn, Scope::Games, &plan.plan()).unwrap()
+        };
+        assert_eq!(
+            games(""),
+            ["g1", "g2"],
+            "the view scope, not the query, is what keeps the post out of the grid"
+        );
+        assert_eq!(games("\"beta\""), ["g2"], "a quoted phrase searches titles");
+        assert_eq!(
+            games("\"red garden\""),
+            ["g1"],
+            "and circles, which is what the games box searched before this card"
+        );
+
+        // Page 1, then the continuation built from the row that page ended on: the cursor is
+        // that row (stamp + id), never a row count.
+        let plan = query::parse("", Scope::Games).unwrap().plan();
+        let first = search_items(&conn, Scope::Games, &plan, 1, None, true).unwrap();
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            ["g1"]
+        );
+        assert_eq!(
+            first.total,
+            Some(2),
+            "the committed query pays for the total"
+        );
+        let cursor = PageCursor {
+            updated_at: first.items[0].updated_at.clone(),
+            id: first.items[0].id.clone(),
+        };
+        let second = search_items(&conn, Scope::Games, &plan, 1, Some(&cursor), false).unwrap();
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|i| i.id.as_str())
+                .collect::<Vec<_>>(),
+            ["g2"]
+        );
+        assert_eq!(second.total, None, "a page does not buy a second count");
     }
 
-    /// #40: sidebar source-state filters + their badge counts.
+    /// The games sidebar filtered **in the browser**: `GamesView` fetched 300 game rows and
+    /// kept `items.filter((i) => i.status === key)` for whichever stage was lit. That is the
+    /// behaviour `status:` has to reproduce exactly (plan §9: a rewrite may not change
+    /// what a control selects), **including the row no rail could name**, so nothing can
+    /// quietly disappear on the way into SQL. The stage counts are pinned too: they are the
+    /// numbers the sidebar wore, and they now describe the result on screen.
     #[test]
-    fn source_state_filters_and_badges() {
+    fn status_terms_answer_what_the_old_client_filter_answered() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        // One game per stage the grammar knows, two in one stage (a stage is not a row), and
+        // one row whose status is outside the five words: the schema does not constrain the
+        // column, and the old sidebar had no button for it either.
+        for (id, status) in [
+            ("s_seen", "seen"),
+            ("s_tracking", "tracking"),
+            ("s_wishlist", "wishlist"),
+            ("s_wishlist_two", "wishlist"),
+            ("s_downloaded", "downloaded"),
+            ("s_played", "played"),
+            ("s_retired", "retired"),
+        ] {
+            conn.execute(
+                "INSERT INTO items (id, kind, title, status, created_at, updated_at)
+                 VALUES (?1,'game',?1,?2,'0','1')",
+                params![id, status],
+            )
+            .unwrap();
+        }
+        // The hack, replayed against the frozen rail read: fetch the grid, then filter by
+        // status in the caller. `all` meant "no status filter at all".
+        let old_hack = |key: &str| -> Vec<String> {
+            let mut ids: Vec<String> = legacy_grid_rows(&conn, "game", None)
+                .unwrap()
+                .into_iter()
+                .filter(|i| key == "all" || i.status == key)
+                .map(|i| i.id)
+                .collect();
+            ids.sort();
+            ids
+        };
+        let grammar = |text: &str| -> Vec<String> {
+            let plan = query::parse(text, Scope::Games)
+                .unwrap_or_else(|e| panic!("{text:?}: {}", e.message));
+            let mut ids = search_item_ids(&conn, Scope::Games, &plan.plan()).unwrap();
+            ids.sort();
+            ids
+        };
+        for key in query::STATUSES.iter().copied() {
+            assert_eq!(
+                grammar(&format!("status:{key}")),
+                old_hack(key),
+                "`status:{key}` is not the rows the {key} rail selected"
+            );
+        }
+        assert_eq!(
+            grammar("status:seen"),
+            ["s_seen"],
+            "seen is the column default"
+        );
+        assert_eq!(
+            old_hack("all").len(),
+            7,
+            "the unfiltered grid held all seven"
+        );
+        assert_eq!(
+            grammar(""),
+            old_hack("all"),
+            "no term is the Everything rail"
+        );
+
+        // The seventh row: no rail could name it and the grammar refuses the word, so it is
+        // unreachable by term in both designs — but it is real, it is in the unfiltered
+        // result in both, and no stage count folds it into one of the five.
+        assert!(
+            query::parse("status:retired", Scope::Games).is_err(),
+            "a status outside the five must not parse"
+        );
+        assert!(grammar("").contains(&"s_retired".to_string()));
+        assert!(!old_hack("seen").contains(&"s_retired".to_string()));
+        let counts = |text: &str| -> Vec<(&'static str, i64)> {
+            let plan = query::parse(text, Scope::Games).unwrap().plan();
+            status_counts_matching(&conn, Scope::Games, &plan)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.status, c.count))
+                .collect()
+        };
+        assert_eq!(
+            counts(""),
+            [
+                ("seen", 1),
+                ("tracking", 1),
+                ("wishlist", 2),
+                ("downloaded", 1),
+                ("played", 1),
+            ],
+            "the five stages of the whole games library, in the grammar's order"
+        );
+        let five: i64 = counts("").iter().map(|(_, c)| c).sum();
+        assert_eq!(
+            five, 6,
+            "the five stages do not account for the seventh row"
+        );
+        assert_eq!(
+            counts("status:wishlist"),
+            [
+                ("seen", 0),
+                ("tracking", 0),
+                ("wishlist", 2),
+                ("downloaded", 0),
+                ("played", 0),
+            ],
+            "one stage lit: the other four read zero rather than vanishing"
+        );
+    }
+
+    /// #40's three queues, read as grammar. The rows come from the planned predicate and so
+    /// do the numbers (`count_matches`), which is what replaced `source_stats` and its three
+    /// `COUNT(*)` copies; the frozen rail SQL pins that the grammar selects exactly the rows
+    /// the rails selected, which is what a preset chip promises (rulings C).
+    #[test]
+    fn the_source_queues_are_grammar_and_their_counts_come_from_the_query() {
         let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         for (id, kind, title) in [
@@ -2990,32 +3100,46 @@ mod tests {
         insert_source(&conn, "m_local", "local", "file:///D:/img.png", None, None).unwrap();
         add_item_tag(&conn, "g_both", "renpy", TYPE_CONTENT).unwrap();
 
-        let ids = |source: &str, kind: &str| -> Vec<String> {
-            let mut v: Vec<String> = list_items(
-                &conn,
-                &ListQuery {
-                    limit: 300,
-                    kind: Some(kind),
-                    source: Some(source),
-                    ..Default::default()
-                },
-            )
-            .unwrap()
-            .into_iter()
-            .map(|i| i.id)
-            .collect();
-            v.sort();
-            v
+        let plan_for = |text: &str, scope: Scope| -> Plan {
+            query::parse(text, scope)
+                .unwrap_or_else(|e| panic!("{text:?}: {}", e.message))
+                .plan()
         };
-        assert_eq!(ids("local_only", "game"), ["g_local"]);
-        assert_eq!(ids("no_local", "game"), ["g_web"]);
-        assert_eq!(ids("no_tags", "game"), ["g_local", "g_web"]);
-        assert_eq!(ids("local_only", "media"), ["m_local"]);
+        let grammar_ids = |text: &str, scope: Scope| -> Vec<String> {
+            let mut ids = search_item_ids(&conn, scope, &plan_for(text, scope)).unwrap();
+            ids.sort();
+            ids
+        };
+        for (term, queue) in [
+            ("stored:local-only", "local_only"),
+            ("-stored:disk", "no_local"),
+            ("-has:tags", "no_tags"),
+        ] {
+            for kind in ["game", "media"] {
+                let scope = if kind == "game" {
+                    Scope::Games
+                } else {
+                    Scope::Media
+                };
+                assert_eq!(
+                    grammar_ids(term, scope),
+                    legacy_ids(&conn, kind, Some(queue)),
+                    "`{term}` in the {kind} view is not the {queue} queue"
+                );
+            }
+        }
 
-        let g = source_stats(&conn, Some("game")).unwrap();
-        assert_eq!((g.local_only, g.no_local, g.no_tags), (1, 1, 2));
-        let m = source_stats(&conn, Some("media")).unwrap();
-        assert_eq!((m.local_only, m.no_local, m.no_tags), (1, 0, 1));
+        // The numbers beside the chips, from the predicate itself: the six the sidebar wore as
+        // `source_stats` badges on this fixture, none of which it measured with the grid.
+        let count = |text: &str, scope: Scope| -> i64 {
+            count_matches(&conn, scope, &plan_for(text, scope)).unwrap()
+        };
+        assert_eq!(count("stored:local-only", Scope::Games), 1);
+        assert_eq!(count("-stored:disk", Scope::Games), 1);
+        assert_eq!(count("-has:tags", Scope::Games), 2);
+        assert_eq!(count("stored:local-only", Scope::Media), 1);
+        assert_eq!(count("-stored:disk", Scope::Media), 0);
+        assert_eq!(count("-has:tags", Scope::Media), 1);
     }
 
     /// #31: "Keep both" has to stick. A dismissed pair leaves the library
@@ -3118,44 +3242,21 @@ mod tests {
         // Tag write path + tag filter + top tags.
         add_item_tag(&conn, "g1", "renpy", TYPE_CONTENT).unwrap();
         add_item_tag(&conn, "g2", "renpy", TYPE_CONTENT).unwrap();
-        let tagged = list_items(
-            &conn,
-            &ListQuery {
-                limit: 300,
-                tag: Some("renpy"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let renpy = query::parse("renpy", Scope::Games).unwrap().plan();
+        let tagged = search_item_ids(&conn, Scope::Games, &renpy).unwrap();
         assert_eq!(tagged.len(), 2);
         let tops = top_tags(&conn, 10, None).unwrap();
         assert_eq!(tops[0].name, "renpy");
         assert_eq!(tops[0].count, 2);
         remove_item_tag(&conn, "g2", tops[0].id).unwrap();
         assert_eq!(
-            list_items(
-                &conn,
-                &ListQuery {
-                    limit: 300,
-                    tag: Some("renpy"),
-                    ..Default::default()
-                }
-            )
-            .unwrap()
-            .len(),
+            search_item_ids(&conn, Scope::Games, &renpy).unwrap().len(),
             1
         );
 
         // Site filter + per-site counts (Media view filters).
-        let from_dlsite = list_items(
-            &conn,
-            &ListQuery {
-                limit: 300,
-                site: Some("dlsite"),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let dlsite = query::parse("source:dlsite", Scope::Games).unwrap().plan();
+        let from_dlsite = search_item_ids(&conn, Scope::Games, &dlsite).unwrap();
         assert_eq!(from_dlsite.len(), 1);
         let sites = counts_by_site(&conn, Some("game")).unwrap();
         assert_eq!(sites.len(), 2);
